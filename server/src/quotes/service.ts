@@ -7,6 +7,8 @@ export interface QuotePerformance {
   y1: number | null;
 }
 
+export type AutoBias = 'bull' | 'bear' | 'range';
+
 export interface MarketQuote {
   symbol: string; // canonical requested symbol e.g. OANDA:XAUUSD
   shortName: string; // e.g. XAUUSD
@@ -16,6 +18,8 @@ export interface MarketQuote {
   changePercent: number;
   type: string;
   performance: QuotePerformance;
+  autoBias: AutoBias;
+  biasScore: number | null; // -1 (strong bear) to +1 (strong bull)
   source: 'tv' | 'yahoo';
   updatedAt: string;
 }
@@ -31,7 +35,45 @@ interface CacheEntry {
 }
 
 const quoteCache = new Map<string, CacheEntry>();
-const yahooPerfCache = new Map<string, { perf: QuotePerformance; fetchedAt: number }>();
+const yahooPerfCache = new Map<
+  string,
+  { perf: QuotePerformance; autoBias: AutoBias; biasScore: number; fetchedAt: number }
+>();
+
+function classifyBias(score: number | null): AutoBias {
+  if (score == null || !Number.isFinite(score)) return 'range';
+  if (score >= 0.15) return 'bull';
+  if (score <= -0.15) return 'bear';
+  return 'range';
+}
+
+function computeEma(values: number[], period: number): number | null {
+  if (values.length < period) return null;
+  const k = 2 / (period + 1);
+  let ema = 0;
+  for (let i = 0; i < period; i++) ema += values[i];
+  ema /= period;
+  for (let i = period; i < values.length; i++) {
+    ema = values[i] * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+function computeYahooBias(price: number, closes: number[]): { autoBias: AutoBias; biasScore: number } {
+  const ema20 = computeEma(closes, 20);
+  const ema50 = computeEma(closes, 50);
+  if (ema20 == null || ema50 == null) {
+    return { autoBias: 'range', biasScore: 0 };
+  }
+  let score = 0;
+  if (price > ema20) score += 0.35;
+  else if (price < ema20) score -= 0.35;
+  if (price > ema50) score += 0.35;
+  else if (price < ema50) score -= 0.35;
+  if (ema20 > ema50) score += 0.3;
+  else if (ema20 < ema50) score -= 0.3;
+  return { autoBias: classifyBias(score), biasScore: Number(score.toFixed(2)) };
+}
 
 const TV_TICKER_OVERRIDES: Record<string, string> = {
   XAUUSD: 'OANDA:XAUUSD',
@@ -125,7 +167,9 @@ async function fetchFromTvScanner(
           'Perf.6M',
           'Perf.YTD',
           'Perf.Y',
-          'type'
+          'type',
+          'Recommend.All',
+          'Recommend.MA'
         ]
       }),
       signal: controller.signal
@@ -152,6 +196,13 @@ async function fetchFromTvScanner(
       const change = numOrNull(cols[4]) ?? 0;
       const desc = typeof cols[1] === 'string' && cols[1].trim() ? cols[1].trim() : shortTicker(reqItem.requested);
       const type = typeof cols[11] === 'string' ? cols[11] : 'cfd';
+      const recAll = numOrNull(cols[12]);
+      const recMa = numOrNull(cols[13]);
+      // Blend overall rating with HTF moving-average alignment
+      const biasScore =
+        recAll != null && recMa != null
+          ? Number((recAll * 0.55 + recMa * 0.45).toFixed(2))
+          : (recMa ?? recAll);
 
       out.set(reqItem.requested, {
         symbol: reqItem.requested,
@@ -169,6 +220,8 @@ async function fetchFromTvScanner(
           ytd: numOrNull(cols[9]),
           y1: numOrNull(cols[10])
         },
+        autoBias: classifyBias(biasScore),
+        biasScore,
         source: 'tv',
         updatedAt: nowIso
       });
@@ -263,6 +316,8 @@ async function fetchFromYahoo(requested: string): Promise<MarketQuote | null> {
       ytd: null,
       y1: null
     };
+    let autoBias: AutoBias = cachedPerf?.autoBias ?? 'range';
+    let biasScore: number | null = cachedPerf?.biasScore ?? null;
 
     if (needFullYear && timestamps.length > 5) {
       const nowSec = Math.floor(Date.now() / 1000);
@@ -275,7 +330,10 @@ async function fetchFromYahoo(requested: string): Promise<MarketQuote | null> {
         ytd: pctFrom(price, findCloseOnOrBefore(timestamps, closes, yearStartSec)),
         y1: pctFrom(price, validCloses[0])
       };
-      yahooPerfCache.set(yahooSym, { perf, fetchedAt: Date.now() });
+      const computed = computeYahooBias(price, validCloses);
+      autoBias = computed.autoBias;
+      biasScore = computed.biasScore;
+      yahooPerfCache.set(yahooSym, { perf, autoBias, biasScore, fetchedAt: Date.now() });
     }
 
     return {
@@ -287,6 +345,8 @@ async function fetchFromYahoo(requested: string): Promise<MarketQuote | null> {
       changePercent,
       type: mapped?.type ?? 'cfd',
       performance: perf,
+      autoBias,
+      biasScore,
       source: 'yahoo',
       updatedAt: new Date().toISOString()
     };

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import PanelShell from './PanelShell.svelte';
+  import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
     OPERATOR_LABELS,
     clearAlertLog,
@@ -12,7 +13,7 @@
     type AlertsState,
     type TradingAlert
   } from '../alerts/store';
-  import { formatQuotePrice, symbolBadgeBg } from '../watchlist/store';
+  import { formatQuotePrice } from '../watchlist/store';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -301,13 +302,11 @@
                 <div class="alert-main">
                   <div class="alert-title">{alertHeadline(alert)}</div>
                   <div class="alert-meta">
-                    <span
-                      class="al-badge"
-                      class:news={alert.kind === 'news'}
-                      style:background={alert.kind === 'news' ? '#2962ff' : symbolBadgeBg(alert.shortName)}
-                    >
-                      {alert.kind === 'news' ? 'N' : alert.shortName.slice(0, 2)}
-                    </span>
+                    {#if alert.kind === 'news'}
+                      <span class="al-badge news">N</span>
+                    {:else}
+                      <SymbolIcon symbol={alert.shortName} size={16} />
+                    {/if}
                     <span class="al-sym">
                       {alert.kind === 'news' ? `${alert.eventCountry ?? 'News'} · ${alert.leadMinutes ?? 15}m before` : alert.shortName}
                     </span>
@@ -407,6 +406,7 @@
 
 <!-- Delete confirmation modal matching Screenshot 8 & SettingsModal dark glass -->
 {#if pendingDelete}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="confirm-backdrop"
     onpointerdown={(e) => {
@@ -719,6 +719,7 @@
     height: 16px;
     border-radius: 50%;
     color: #fff;
+    background: #2962ff;
     font-size: 8px;
     font-weight: 700;
     display: grid;

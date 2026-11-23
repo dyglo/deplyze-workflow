@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import PanelShell from './PanelShell.svelte';
+  import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import { loadNotes } from '../notes/api';
   import { subscribeAlerts, type AlertsState } from '../alerts/store';
   import { makeWorkspaceId } from '../workspace/storage';
@@ -12,10 +13,8 @@
     formatQuoteChange,
     formatQuotePct,
     formatQuotePrice,
-    getSymbolBadgeKind,
     loadWatchlistState,
     saveWatchlistState,
-    symbolBadgeBg,
     type BiasDirection,
     type MarketQuote,
     type WatchlistItem,
@@ -108,6 +107,7 @@
     change?: number;
     changePercent?: number;
     perf?: MarketQuote['performance'];
+    autoBias?: 'bull' | 'bear' | 'range';
     description: string;
   } {
     const q = quotes[item.symbol];
@@ -129,6 +129,7 @@
         change: chgAbs,
         changePercent: chgPct,
         perf: q?.performance,
+        autoBias: q?.autoBias,
         description: q?.description || item.description
       };
     }
@@ -138,8 +139,22 @@
       change: q?.change,
       changePercent: q?.changePercent,
       perf: q?.performance,
+      autoBias: q?.autoBias,
       description: q?.description || item.description
     };
+  }
+
+  function effectiveBias(item: WatchlistItem, autoBias?: 'bull' | 'bear' | 'range'): {
+    bias: BiasDirection;
+    isAuto: boolean;
+  } {
+    if (item.bias !== 'none') {
+      return { bias: item.bias, isAuto: false };
+    }
+    if (autoBias) {
+      return { bias: autoBias, isAuto: true };
+    }
+    return { bias: 'none', isAuto: true };
   }
 
   function notesCountFor(shortName: string): number {
@@ -628,10 +643,10 @@
         {#if !sec.collapsed}
           {#each sec.items as item (item.id)}
             {@const q = resolveQuote(item)}
+            {@const eff = effectiveBias(item, q.autoBias)}
             {@const isSelected = selectedItem?.id === item.id}
             {@const isUp = (q.changePercent ?? 0) > 0}
             {@const isDown = (q.changePercent ?? 0) < 0}
-            {@const badgeKind = getSymbolBadgeKind(item.shortName)}
             <div
               class="sym-row"
               class:selected={isSelected}
@@ -646,37 +661,17 @@
               }}
             >
               <div class="sym-cell">
-                <span class="emblem" style:background={symbolBadgeBg(item.shortName)}>
-                  {#if badgeKind === 'gold'}
-                    <svg viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M5.5 6.5h5l.8 2H4.7l.8-2ZM3 9.5h4.2l.6 2H2.4l.6-2Zm5.8 0H13l.6 2H8.2l.6-2Z" fill="#fff" />
-                    </svg>
-                  {:else if badgeKind === 'oil'}
-                    <svg viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M8 2.6C8 2.6 4.2 7 4.2 9.6a3.8 3.8 0 0 0 7.6 0C11.8 7 8 2.6 8 2.6Z" fill="#fff" />
-                    </svg>
-                  {:else if badgeKind === 'dxy'}
-                    <span>$</span>
-                  {:else if badgeKind === 'btc'}
-                    <span>₿</span>
-                  {:else if badgeKind === 'eth'}
-                    <span>Ξ</span>
-                  {:else if badgeKind === 'nas'}
-                    <span class="emblem-tiny">100</span>
-                  {:else}
-                    <span>{item.shortName.slice(0, 2)}</span>
-                  {/if}
-                </span>
+                <SymbolIcon symbol={item.shortName} size={20} />
 
                 <span class="sym-name">{item.shortName}</span>
 
-                {#if item.bias !== 'none'}
+                {#if eff.bias !== 'none'}
                   <span
                     class="bias-dot"
-                    class:bull={item.bias === 'bull'}
-                    class:bear={item.bias === 'bear'}
-                    class:range={item.bias === 'range'}
-                    title="HTF Bias: {item.bias}"
+                    class:bull={eff.bias === 'bull'}
+                    class:bear={eff.bias === 'bear'}
+                    class:range={eff.bias === 'range'}
+                    title="{eff.isAuto ? 'Auto HTF Bias' : 'Manual HTF Bias'}: {eff.bias}"
                   ></span>
                 {/if}
               </div>
@@ -716,9 +711,10 @@
       {/each}
     </div>
 
-    <!-- Bottom detail sheet (TradingView-inspired + our HTF Bias, Notes/Alerts counts & Performance) -->
+    <!-- Bottom detail sheet (TradingView-inspired + Auto/Manual HTF Bias, Notes/Alerts & Performance) -->
     {#if selectedItem}
       {@const sq = resolveQuote(selectedItem)}
+      {@const seff = effectiveBias(selectedItem, sq.autoBias)}
       {@const isUp = (sq.changePercent ?? 0) > 0}
       {@const isDown = (sq.changePercent ?? 0) < 0}
       {@const noteCnt = notesCountFor(selectedItem.shortName)}
@@ -726,9 +722,7 @@
       <div class="detail-sheet">
         <div class="detail-header">
           <div class="detail-title-wrap">
-            <span class="emblem lg" style:background={symbolBadgeBg(selectedItem.shortName)}>
-              {selectedItem.shortName.slice(0, 2)}
-            </span>
+            <SymbolIcon symbol={selectedItem.shortName} size={26} />
             <div class="detail-titles">
               <div class="detail-sym">{selectedItem.shortName}</div>
               <div class="detail-sub">
@@ -772,15 +766,21 @@
           </span>
         </div>
 
-        <!-- Our trader-first upgrades: HTF Bias + POI note + Notes/Alerts badges -->
+        <!-- Auto-detected HTF Bias (with 1-click manual override) + POI note + Notes/Alerts badges -->
         <div class="bias-block">
           <div class="bias-row">
-            <span class="sheet-label">HTF Bias</span>
+            <span class="sheet-label">
+              HTF Bias
+              {#if seff.isAuto && seff.bias !== 'none'}
+                <span class="auto-tag">Auto</span>
+              {/if}
+            </span>
             <div class="bias-pills">
               <button
                 class="bias-pill bull"
-                class:active={selectedItem.bias === 'bull'}
+                class:active={seff.bias === 'bull'}
                 type="button"
+                title={seff.isAuto && seff.bias === 'bull' ? 'Auto-detected Bullish (click to lock manually)' : 'Set Bullish bias (click again for Auto)'}
                 onclick={() =>
                   setItemBias(selectedItem.id, selectedItem.bias === 'bull' ? 'none' : 'bull')
                 }
@@ -789,8 +789,9 @@
               </button>
               <button
                 class="bias-pill range"
-                class:active={selectedItem.bias === 'range'}
+                class:active={seff.bias === 'range'}
                 type="button"
+                title={seff.isAuto && seff.bias === 'range' ? 'Auto-detected Range (click to lock manually)' : 'Set Range bias (click again for Auto)'}
                 onclick={() =>
                   setItemBias(selectedItem.id, selectedItem.bias === 'range' ? 'none' : 'range')
                 }
@@ -799,8 +800,9 @@
               </button>
               <button
                 class="bias-pill bear"
-                class:active={selectedItem.bias === 'bear'}
+                class:active={seff.bias === 'bear'}
                 type="button"
+                title={seff.isAuto && seff.bias === 'bear' ? 'Auto-detected Bearish (click to lock manually)' : 'Set Bearish bias (click again for Auto)'}
                 onclick={() =>
                   setItemBias(selectedItem.id, selectedItem.bias === 'bear' ? 'none' : 'bear')
                 }
@@ -1267,37 +1269,6 @@
     min-width: 0;
   }
 
-  .emblem {
-    width: 18px;
-    height: 18px;
-    flex: 0 0 18px;
-    border-radius: 50%;
-    display: grid;
-    place-items: center;
-    color: #ffffff;
-    font-size: 9px;
-    font-weight: 700;
-    line-height: 1;
-    overflow: hidden;
-  }
-
-  .emblem.lg {
-    width: 24px;
-    height: 24px;
-    flex: 0 0 24px;
-    font-size: 10px;
-  }
-
-  .emblem svg {
-    width: 12px;
-    height: 12px;
-  }
-
-  .emblem-tiny {
-    font-size: 7.5px;
-    letter-spacing: -0.03em;
-  }
-
   .sym-name {
     font-size: 12.5px;
     font-weight: 600;
@@ -1508,6 +1479,20 @@
   .sheet-label {
     font-size: 11.5px;
     font-weight: 600;
+    color: var(--wl-secondary);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .auto-tag {
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    background: var(--wl-surface);
+    border: 1px solid var(--wl-border-soft);
     color: var(--wl-secondary);
   }
 

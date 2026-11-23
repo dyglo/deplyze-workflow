@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
     DEFAULT_NOTIFICATIONS,
     OPERATOR_LABELS,
@@ -12,8 +13,7 @@
   import {
     SYMBOL_CATALOG,
     formatQuotePrice,
-    normalizeSymbolInput,
-    symbolBadgeBg
+    normalizeSymbolInput
   } from '../watchlist/store';
   import { makeWorkspaceId, playAlertChime } from '../workspace/storage';
 
@@ -40,16 +40,35 @@
   const MODAL_WIDTH = 440;
   const TITLE_BAR_HEIGHT = 34;
 
-  function toLocalDateTimeInput(iso: string): string {
-    const d = new Date(iso);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
+  type ExpiryPreset = 'open' | '1d' | '7d' | '30d' | '90d';
+  type OpenMenu = 'symbol' | 'operator' | 'trigger' | 'expiry' | 'schedule' | null;
 
-  function defaultExpiryInput(): string {
-    const d = new Date(Date.now() + 30 * 86_400_000);
-    return toLocalDateTimeInput(d.toISOString());
-  }
+  const OPERATOR_OPTIONS: { id: AlertOperator; label: string }[] = [
+    { id: 'crossing', label: 'Crossing' },
+    { id: 'crossing_up', label: 'Crossing Up' },
+    { id: 'crossing_down', label: 'Crossing Down' },
+    { id: 'greater_than', label: 'Greater Than' },
+    { id: 'less_than', label: 'Less Than' }
+  ];
+
+  const TRIGGER_OPTIONS: { id: AlertTrigger; label: string }[] = [
+    { id: 'once', label: 'Once only' },
+    { id: 'every', label: 'Every time' }
+  ];
+
+  const EXPIRY_OPTIONS: { id: ExpiryPreset; label: string; days: number | null }[] = [
+    { id: '30d', label: 'In 30 days', days: 30 },
+    { id: '7d', label: 'In 7 days', days: 7 },
+    { id: '1d', label: 'In 24 hours', days: 1 },
+    { id: '90d', label: 'In 90 days', days: 90 },
+    { id: 'open', label: 'Open-ended', days: null }
+  ];
+
+  const SCHEDULE_OPTIONS: { id: NotificationSchedule; label: string }[] = [
+    { id: '24/7', label: '24/7' },
+    { id: 'weekdays', label: 'Weekdays (Mon–Fri)' },
+    { id: 'sessions', label: 'Sessions (07:00–22:00)' }
+  ];
 
   // svelte-ignore state_referenced_locally
   let symbol = $state(editingAlert?.symbol ?? initialSymbol ?? 'OANDA:XAUUSD');
@@ -68,29 +87,54 @@
   // svelte-ignore state_referenced_locally
   let trigger = $state<AlertTrigger>(editingAlert?.trigger ?? 'once');
   // svelte-ignore state_referenced_locally
-  let openEnded = $state(editingAlert ? editingAlert.expiresAt === null : false);
-  // svelte-ignore state_referenced_locally
-  let expiresInput = $state(
-    editingAlert?.expiresAt ? toLocalDateTimeInput(editingAlert.expiresAt) : defaultExpiryInput()
+  let expiryPreset = $state<ExpiryPreset>(
+    editingAlert ? (editingAlert.expiresAt === null ? 'open' : '30d') : '30d'
   );
   // svelte-ignore state_referenced_locally
   let customMessage = $state(editingAlert?.message ?? '');
   // svelte-ignore state_referenced_locally
   let messageEdited = $state(Boolean(editingAlert));
 
+  // Committed notification prefs
   // svelte-ignore state_referenced_locally
-  let notifications = $state<AlertNotificationPrefs>({
-    ...DEFAULT_NOTIFICATIONS,
-    ...(editingAlert?.notifications ?? {})
-  });
-  let draftNotifications = $state<AlertNotificationPrefs>({ ...DEFAULT_NOTIFICATIONS });
+  let notifyDesktop = $state(
+    editingAlert?.notifications?.notifyDesktop ?? DEFAULT_NOTIFICATIONS.notifyDesktop
+  );
+  // svelte-ignore state_referenced_locally
+  let showToast = $state(
+    editingAlert?.notifications?.showToast ?? DEFAULT_NOTIFICATIONS.showToast
+  );
+  // svelte-ignore state_referenced_locally
+  let playSound = $state(
+    editingAlert?.notifications?.playSound ?? DEFAULT_NOTIFICATIONS.playSound
+  );
+  // svelte-ignore state_referenced_locally
+  let webhookEnabled = $state(
+    editingAlert?.notifications?.webhookEnabled ?? DEFAULT_NOTIFICATIONS.webhookEnabled
+  );
+  // svelte-ignore state_referenced_locally
+  let webhookUrl = $state(
+    editingAlert?.notifications?.webhookUrl ?? DEFAULT_NOTIFICATIONS.webhookUrl
+  );
+  // svelte-ignore state_referenced_locally
+  let schedule = $state<NotificationSchedule>(
+    editingAlert?.notifications?.schedule ?? DEFAULT_NOTIFICATIONS.schedule
+  );
+
+  // Draft values for Notifications sub-view (plain primitive $state — zero proxy spreading issues)
+  let draftDesktop = $state(true);
+  let draftToast = $state(true);
+  let draftSound = $state(true);
+  let draftWebhookEnabled = $state(false);
+  let draftWebhookUrl = $state('');
+  let draftSchedule = $state<NotificationSchedule>('24/7');
 
   let view = $state<'main' | 'notifications'>('main');
-  let symbolMenuOpen = $state(false);
+  let openMenu = $state<OpenMenu>(null);
   let symbolQuery = $state('');
   let formError = $state<string | null>(null);
 
-  // Draggable modal state (same crisp feel as SettingsModal)
+  // Floating modal drag state (clamped cleanly inside window)
   let posX = $state(
     typeof window !== 'undefined'
       ? Math.max(16, Math.round((window.innerWidth - MODAL_WIDTH) / 2))
@@ -114,12 +158,26 @@
 
   const displayedMessage = $derived(messageEdited ? customMessage : autoMessage);
 
+  const expiryDisplayLabel = $derived.by(() => {
+    const opt = EXPIRY_OPTIONS.find((o) => o.id === expiryPreset);
+    if (!opt || opt.days === null) return 'Open-ended';
+    const d = new Date(Date.now() + opt.days * 86_400_000);
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(d);
+  });
+
   const notificationSummary = $derived.by(() => {
     const parts: string[] = [];
-    if (notifications.notifyDesktop) parts.push('Desktop');
-    if (notifications.showToast) parts.push('Toasts');
-    if (notifications.playSound) parts.push('Sound');
-    if (notifications.webhookEnabled && notifications.webhookUrl.trim()) parts.push('Webhook');
+    if (notifyDesktop) parts.push('Desktop');
+    if (showToast) parts.push('Toasts');
+    if (playSound) parts.push('Sound');
+    if (webhookEnabled && webhookUrl.trim()) parts.push('Webhook');
     return parts.length > 0 ? parts.join(', ') : 'Muted';
   });
 
@@ -150,34 +208,37 @@
 
   function onHeaderPointerDown(e: PointerEvent) {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest('button, input')) return;
+    if ((e.target as HTMLElement).closest('button, input, [data-am-menu]')) return;
+    openMenu = null;
     dragging = true;
     dragOffsetX = e.clientX - posX;
     dragOffsetY = e.clientY - posY;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
   }
 
-  function onHeaderPointerMove(e: PointerEvent) {
+  function onWindowPointerMove(e: PointerEvent) {
     if (!dragging) return;
     const next = clampPosition(e.clientX - dragOffsetX, e.clientY - dragOffsetY);
     posX = next.x;
     posY = next.y;
   }
 
-  function onHeaderPointerUp(e: PointerEvent) {
-    if (!dragging) return;
-    dragging = false;
-    const target = e.currentTarget as HTMLElement;
-    if (target.hasPointerCapture(e.pointerId)) {
-      target.releasePointerCapture(e.pointerId);
+  function onWindowPointerUp() {
+    if (dragging) dragging = false;
+  }
+
+  function onWindowPointerDown(e: PointerEvent) {
+    if (!openMenu) return;
+    const target = e.target as HTMLElement | null;
+    if (target && !target.closest('[data-am-menu]')) {
+      openMenu = null;
     }
   }
 
   function onWindowKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
-      if (symbolMenuOpen) {
-        symbolMenuOpen = false;
+      if (openMenu) {
+        openMenu = null;
       } else if (view === 'notifications') {
         view = 'main';
       } else {
@@ -186,21 +247,42 @@
     }
   }
 
+  function toggleMenu(name: Exclude<OpenMenu, null>) {
+    openMenu = openMenu === name ? null : name;
+  }
+
   function pickSymbol(raw: string) {
     const norm = normalizeSymbolInput(raw);
     symbol = norm.symbol;
     shortName = norm.shortName;
-    symbolMenuOpen = false;
+    openMenu = null;
     symbolQuery = '';
   }
 
   function openNotificationsSubView() {
-    draftNotifications = { ...notifications };
+    openMenu = null;
+    draftDesktop = notifyDesktop;
+    draftToast = showToast;
+    draftSound = playSound;
+    draftWebhookEnabled = webhookEnabled;
+    draftWebhookUrl = webhookUrl;
+    draftSchedule = schedule;
     view = 'notifications';
   }
 
+  function cancelNotifications() {
+    openMenu = null;
+    view = 'main';
+  }
+
   function applyNotifications() {
-    notifications = { ...draftNotifications };
+    notifyDesktop = draftDesktop;
+    showToast = draftToast;
+    playSound = draftSound;
+    webhookEnabled = draftWebhookEnabled;
+    webhookUrl = draftWebhookUrl;
+    schedule = draftSchedule;
+    openMenu = null;
     view = 'main';
   }
 
@@ -211,13 +293,20 @@
       return;
     }
 
-    let expiresAt: string | null = null;
-    if (!openEnded && expiresInput) {
-      const parsed = Date.parse(expiresInput);
-      if (Number.isFinite(parsed)) {
-        expiresAt = new Date(parsed).toISOString();
-      }
-    }
+    const expOpt = EXPIRY_OPTIONS.find((o) => o.id === expiryPreset);
+    const expiresAt =
+      expOpt && expOpt.days !== null
+        ? new Date(Date.now() + expOpt.days * 86_400_000).toISOString()
+        : null;
+
+    const notifPrefs: AlertNotificationPrefs = {
+      notifyDesktop,
+      showToast,
+      playSound,
+      webhookEnabled,
+      webhookUrl: webhookUrl.trim(),
+      schedule
+    };
 
     const nowIso = new Date().toISOString();
     const alert: TradingAlert = {
@@ -238,7 +327,7 @@
       expiresAt,
       message: (messageEdited ? customMessage.trim() : autoMessage) || autoMessage,
       status: editingAlert?.status === 'paused' ? 'paused' : 'active',
-      notifications: { ...notifications },
+      notifications: notifPrefs,
       createdAt: editingAlert?.createdAt ?? nowIso,
       lastTriggeredAt: editingAlert?.lastTriggeredAt
     };
@@ -248,7 +337,18 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeyDown} />
+<svelte:window
+  onkeydown={onWindowKeyDown}
+  onpointerdown={onWindowPointerDown}
+  onpointermove={onWindowPointerMove}
+  onpointerup={onWindowPointerUp}
+  onpointercancel={onWindowPointerUp}
+/>
+
+{#if dragging}
+  <!-- Prevents cross-origin TradingView iframe from stealing pointer events while dragging -->
+  <div class="drag-shield" aria-hidden="true"></div>
+{/if}
 
 <div
   bind:this={modalEl}
@@ -260,35 +360,27 @@
   role="dialog"
   aria-label={view === 'notifications' ? 'Alert notifications' : 'Create alert'}
 >
-  {#if view === 'main'}
-    <!-- Draggable header matching TradingView screenshot -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="modal-header"
-      onpointerdown={onHeaderPointerDown}
-      onpointermove={onHeaderPointerMove}
-      onpointerup={onHeaderPointerUp}
-      onpointercancel={onHeaderPointerUp}
-    >
+  <!-- Single persistent draggable header (never unmounted on view switch) -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <header class="modal-header" onpointerdown={onHeaderPointerDown}>
+    {#if view === 'main'}
       <div class="header-left">
         <span class="modal-title">{editingAlert ? 'Edit alert on' : 'Create alert on'}</span>
-        <div class="sym-picker">
+        <div class="menu-anchor" data-am-menu>
           <button
             class="sym-trigger"
             type="button"
-            onclick={() => (symbolMenuOpen = !symbolMenuOpen)}
+            onclick={() => toggleMenu('symbol')}
           >
-            <span class="sym-dot" style:background={symbolBadgeBg(shortName)}>
-              {shortName.slice(0, 2)}
-            </span>
+            <SymbolIcon symbol={shortName} size={18} />
             <span>{shortName}</span>
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
             </svg>
           </button>
 
-          {#if symbolMenuOpen}
-            <div class="sym-dropdown">
+          {#if openMenu === 'symbol'}
+            <div class="custom-menu sym-dropdown">
               <input
                 type="text"
                 placeholder="Type symbol..."
@@ -297,13 +389,14 @@
                   if (e.key === 'Enter' && symbolQuery.trim()) pickSymbol(symbolQuery);
                 }}
               />
-              <div class="sym-list">
+              <div class="menu-scroll">
                 {#each filteredSymbols as entry (entry.symbol)}
                   <button
-                    class="sym-opt"
+                    class="menu-opt sym-opt"
                     type="button"
                     onclick={() => pickSymbol(entry.symbol)}
                   >
+                    <SymbolIcon symbol={entry.shortName} size={16} />
                     <strong>{entry.shortName}</strong>
                     <span>{entry.description}</span>
                   </button>
@@ -313,27 +406,63 @@
           {/if}
         </div>
       </div>
+    {:else}
+      <div class="header-left">
+        <button class="back-btn" type="button" aria-label="Back" onclick={cancelNotifications}>
+          <svg viewBox="0 0 18 18" aria-hidden="true">
+            <path d="m11 4.5-4.5 4.5L11 13.5" />
+          </svg>
+        </button>
+        <span class="modal-title">Notifications</span>
+      </div>
+    {/if}
 
-      <button class="close-btn" type="button" aria-label="Close" onclick={onClose}>
-        <svg viewBox="0 0 18 18" aria-hidden="true">
-          <path d="m4.5 4.5 9 9m0-9-9 9" />
-        </svg>
-      </button>
-    </div>
+    <button class="close-btn" type="button" aria-label="Close" onclick={onClose}>
+      <svg viewBox="0 0 18 18" aria-hidden="true">
+        <path d="m4.5 4.5 9 9m0-9-9 9" />
+      </svg>
+    </button>
+  </header>
 
+  {#if view === 'main'}
     <div class="modal-body">
       <!-- Condition -->
       <div class="form-row top-align">
         <span class="row-label">Condition</span>
         <div class="row-controls stack">
           <div class="static-select">Price</div>
-          <select class="tv-select" bind:value={operator}>
-            <option value="crossing">Crossing</option>
-            <option value="crossing_up">Crossing Up</option>
-            <option value="crossing_down">Crossing Down</option>
-            <option value="greater_than">Greater Than</option>
-            <option value="less_than">Less Than</option>
-          </select>
+
+          <!-- Custom operator dropdown (WebView2-safe) -->
+          <div class="menu-anchor" data-am-menu>
+            <button
+              class="custom-select"
+              type="button"
+              onclick={() => toggleMenu('operator')}
+            >
+              <span>{OPERATOR_LABELS[operator]}</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+              </svg>
+            </button>
+            {#if openMenu === 'operator'}
+              <div class="custom-menu full">
+                {#each OPERATOR_OPTIONS as opt (opt.id)}
+                  <button
+                    class="menu-opt"
+                    class:active={operator === opt.id}
+                    type="button"
+                    onclick={() => {
+                      operator = opt.id;
+                      openMenu = null;
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
           <div class="value-split">
             <div class="value-kind">Value</div>
             <input
@@ -354,29 +483,71 @@
       <div class="form-row">
         <span class="row-label">Trigger</span>
         <div class="row-controls">
-          <select class="tv-select compact" bind:value={trigger}>
-            <option value="once">Once only</option>
-            <option value="every">Every time</option>
-          </select>
+          <div class="menu-anchor inline-anchor" data-am-menu>
+            <button
+              class="inline-select"
+              type="button"
+              onclick={() => toggleMenu('trigger')}
+            >
+              <span>{TRIGGER_OPTIONS.find((t) => t.id === trigger)?.label ?? 'Once only'}</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+              </svg>
+            </button>
+            {#if openMenu === 'trigger'}
+              <div class="custom-menu">
+                {#each TRIGGER_OPTIONS as opt (opt.id)}
+                  <button
+                    class="menu-opt"
+                    class:active={trigger === opt.id}
+                    type="button"
+                    onclick={() => {
+                      trigger = opt.id;
+                      openMenu = null;
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
         </div>
       </div>
 
       <!-- Expiration -->
       <div class="form-row">
         <span class="row-label">Expiration</span>
-        <div class="row-controls exp-row">
-          {#if openEnded}
-            <span class="open-ended-lbl">Open-ended</span>
-          {:else}
-            <input class="tv-input date-in" type="datetime-local" bind:value={expiresInput} />
-          {/if}
-          <button
-            class="mini-link"
-            type="button"
-            onclick={() => (openEnded = !openEnded)}
-          >
-            {openEnded ? 'Set date' : 'Open-ended'}
-          </button>
+        <div class="row-controls">
+          <div class="menu-anchor inline-anchor" data-am-menu>
+            <button
+              class="inline-select"
+              type="button"
+              onclick={() => toggleMenu('expiry')}
+            >
+              <span>{expiryDisplayLabel}</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+              </svg>
+            </button>
+            {#if openMenu === 'expiry'}
+              <div class="custom-menu">
+                {#each EXPIRY_OPTIONS as opt (opt.id)}
+                  <button
+                    class="menu-opt"
+                    class:active={expiryPreset === opt.id}
+                    type="button"
+                    onclick={() => {
+                      expiryPreset = opt.id;
+                      openMenu = null;
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
         </div>
       </div>
 
@@ -422,73 +593,97 @@
       </button>
     </div>
   {:else}
-    <!-- Notifications sub-view matching Screenshot 5 -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="modal-header"
-      onpointerdown={onHeaderPointerDown}
-      onpointermove={onHeaderPointerMove}
-      onpointerup={onHeaderPointerUp}
-      onpointercancel={onHeaderPointerUp}
-    >
-      <div class="header-left">
-        <button class="back-btn" type="button" aria-label="Back" onclick={() => (view = 'main')}>
-          <svg viewBox="0 0 18 18" aria-hidden="true">
-            <path d="m11 4.5-4.5 4.5L11 13.5" />
-          </svg>
-        </button>
-        <span class="modal-title">Notifications</span>
-      </div>
-
-      <button class="close-btn" type="button" aria-label="Close" onclick={onClose}>
-        <svg viewBox="0 0 18 18" aria-hidden="true">
-          <path d="m4.5 4.5 9 9m0-9-9 9" />
-        </svg>
-      </button>
-    </div>
-
+    <!-- Notifications sub-view (100% custom checkboxes & dropdowns — zero WebView2 OS popup freezes) -->
     <div class="modal-body notif-body">
-      <label class="check-item">
-        <input type="checkbox" bind:checked={draftNotifications.notifyDesktop} />
+      <button
+        class="check-item"
+        type="button"
+        role="checkbox"
+        aria-checked={draftDesktop}
+        onclick={() => (draftDesktop = !draftDesktop)}
+      >
+        <span class="cb-box" class:checked={draftDesktop}>
+          {#if draftDesktop}
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2.5 6.2 5 8.7 9.5 3.5" />
+            </svg>
+          {/if}
+        </span>
         <span class="check-copy">
           <span class="check-title">Notify on desktop</span>
           <span class="check-desc">Sends a native Windows notification even when minimized.</span>
         </span>
-      </label>
+      </button>
 
-      <label class="check-item">
-        <input type="checkbox" bind:checked={draftNotifications.showToast} />
+      <button
+        class="check-item"
+        type="button"
+        role="checkbox"
+        aria-checked={draftToast}
+        onclick={() => (draftToast = !draftToast)}
+      >
+        <span class="cb-box" class:checked={draftToast}>
+          {#if draftToast}
+            <svg viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2.5 6.2 5 8.7 9.5 3.5" />
+            </svg>
+          {/if}
+        </span>
         <span class="check-copy">
           <span class="check-title">Show toast notification</span>
           <span class="check-desc">Displays an onsite notification in the window corner.</span>
         </span>
-      </label>
+      </button>
 
       <div class="check-item-row">
-        <label class="check-item">
-          <input type="checkbox" bind:checked={draftNotifications.playSound} />
+        <button
+          class="check-item"
+          type="button"
+          role="checkbox"
+          aria-checked={draftSound}
+          onclick={() => (draftSound = !draftSound)}
+        >
+          <span class="cb-box" class:checked={draftSound}>
+            {#if draftSound}
+              <svg viewBox="0 0 12 12" aria-hidden="true">
+                <path d="M2.5 6.2 5 8.7 9.5 3.5" />
+              </svg>
+            {/if}
+          </span>
           <span class="check-copy">
             <span class="check-title">Play sound</span>
             <span class="check-desc">Plays an audio cue when your alert triggers.</span>
           </span>
-        </label>
+        </button>
         <button class="test-sound" type="button" onclick={playAlertChime}>Test</button>
       </div>
 
       <div class="webhook-block">
-        <label class="check-item">
-          <input type="checkbox" bind:checked={draftNotifications.webhookEnabled} />
+        <button
+          class="check-item"
+          type="button"
+          role="checkbox"
+          aria-checked={draftWebhookEnabled}
+          onclick={() => (draftWebhookEnabled = !draftWebhookEnabled)}
+        >
+          <span class="cb-box" class:checked={draftWebhookEnabled}>
+            {#if draftWebhookEnabled}
+              <svg viewBox="0 0 12 12" aria-hidden="true">
+                <path d="M2.5 6.2 5 8.7 9.5 3.5" />
+              </svg>
+            {/if}
+          </span>
           <span class="check-copy">
             <span class="check-title">Webhook URL</span>
             <span class="check-desc">Sends a POST JSON request to your URL when triggered.</span>
           </span>
-        </label>
-        {#if draftNotifications.webhookEnabled}
+        </button>
+        {#if draftWebhookEnabled}
           <input
             class="tv-input webhook-input"
             type="url"
             placeholder="https://discord.com/api/webhooks/..."
-            bind:value={draftNotifications.webhookUrl}
+            bind:value={draftWebhookUrl}
           />
         {/if}
       </div>
@@ -498,34 +693,59 @@
       <div class="schedule-block">
         <div class="schedule-row">
           <span class="check-title">Notification schedule</span>
-          <select
-            class="tv-select schedule-select"
-            value={draftNotifications.schedule}
-            onchange={(e) =>
-              (draftNotifications.schedule = (e.currentTarget as HTMLSelectElement)
-                .value as NotificationSchedule)
-            }
-          >
-            <option value="24/7">24/7</option>
-            <option value="weekdays">Weekdays (Mon–Fri)</option>
-            <option value="sessions">Sessions (07:00–22:00)</option>
-          </select>
+          <div class="menu-anchor schedule-anchor" data-am-menu>
+            <button
+              class="custom-select"
+              type="button"
+              onclick={() => toggleMenu('schedule')}
+            >
+              <span>{SCHEDULE_OPTIONS.find((s) => s.id === draftSchedule)?.label ?? '24/7'}</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+              </svg>
+            </button>
+            {#if openMenu === 'schedule'}
+              <div class="custom-menu up full">
+                {#each SCHEDULE_OPTIONS as opt (opt.id)}
+                  <button
+                    class="menu-opt"
+                    class:active={draftSchedule === opt.id}
+                    type="button"
+                    onclick={() => {
+                      draftSchedule = opt.id;
+                      openMenu = null;
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
         </div>
         <span class="check-desc">Notifications are muted outside this schedule.</span>
       </div>
     </div>
 
     <div class="modal-footer">
-      <button class="btn-cancel" type="button" onclick={() => (view = 'main')}>Cancel</button>
+      <button class="btn-cancel" type="button" onclick={cancelNotifications}>Cancel</button>
       <button class="btn-primary" type="button" onclick={applyNotifications}>Apply</button>
     </div>
   {/if}
 </div>
 
 <style>
+  .drag-shield {
+    position: fixed;
+    inset: 0;
+    z-index: 109;
+    cursor: grabbing;
+  }
+
   /* Exact dark glass tokens matching SettingsModal.svelte */
   .alert-modal {
     --am-bg: rgba(18, 18, 18, 0.86);
+    --am-menu-bg: rgba(24, 24, 28, 0.96);
     --am-border: rgba(255, 255, 255, 0.12);
     --am-divider: rgba(255, 255, 255, 0.09);
     --am-text: #f0f0f0;
@@ -533,6 +753,9 @@
     --am-control-bg: rgba(16, 16, 16, 0.65);
     --am-control-border: rgba(255, 255, 255, 0.16);
     --am-hover: rgba(255, 255, 255, 0.06);
+    --am-check-bg: #f0f0f0;
+    --am-check-fg: #0d0d0d;
+    --am-check-border: rgba(255, 255, 255, 0.42);
     --am-btn-bg: #f0f0f0;
     --am-btn-fg: #0d0d0d;
     --am-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
@@ -554,6 +777,7 @@
 
   .alert-modal.light {
     --am-bg: #ffffff;
+    --am-menu-bg: #ffffff;
     --am-border: #e0e3eb;
     --am-divider: #eceef2;
     --am-text: #131722;
@@ -561,6 +785,9 @@
     --am-control-bg: #ffffff;
     --am-control-border: #d8dce6;
     --am-hover: rgba(0, 0, 0, 0.04);
+    --am-check-bg: #131722;
+    --am-check-fg: #ffffff;
+    --am-check-border: #8c919e;
     --am-btn-bg: #131722;
     --am-btn-fg: #ffffff;
     --am-shadow: 0 14px 40px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.08);
@@ -625,8 +852,16 @@
     stroke-linejoin: round;
   }
 
-  .sym-picker {
+  .menu-anchor {
     position: relative;
+  }
+
+  .inline-anchor {
+    display: inline-block;
+  }
+
+  .schedule-anchor {
+    width: 185px;
   }
 
   .sym-trigger {
@@ -645,37 +880,46 @@
     cursor: pointer;
   }
 
-  .sym-trigger svg {
+  .sym-trigger svg,
+  .custom-select svg,
+  .inline-select svg {
     width: 13px;
     height: 13px;
     fill: none;
-    stroke: currentColor;
+    stroke: var(--am-secondary);
     stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
-  .sym-dot {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    color: #fff;
-    font-size: 8.5px;
-    font-weight: 700;
-    display: grid;
-    place-items: center;
+  .custom-menu {
+    position: absolute;
+    top: calc(100% + 5px);
+    left: 0;
+    min-width: 168px;
+    padding: 5px;
+    border-radius: 10px;
+    border: 1px solid var(--am-border);
+    background: var(--am-menu-bg);
+    box-shadow: var(--am-shadow);
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .custom-menu.full {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .custom-menu.up {
+    top: auto;
+    bottom: calc(100% + 5px);
   }
 
   .sym-dropdown {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    width: 240px;
-    padding: 6px;
-    border-radius: 10px;
-    border: 1px solid var(--am-border);
-    background: var(--am-bg);
-    backdrop-filter: blur(22px);
-    box-shadow: var(--am-shadow);
-    z-index: 20;
+    width: 248px;
   }
 
   .sym-dropdown input {
@@ -683,6 +927,7 @@
     box-sizing: border-box;
     height: 28px;
     padding: 0 8px;
+    margin-bottom: 4px;
     border-radius: 6px;
     border: 1px solid var(--am-control-border);
     background: var(--am-control-bg);
@@ -692,9 +937,8 @@
     outline: none;
   }
 
-  .sym-list {
-    margin-top: 5px;
-    max-height: 180px;
+  .menu-scroll {
+    max-height: 185px;
     overflow-y: auto;
     scrollbar-width: none;
     display: flex;
@@ -702,27 +946,38 @@
     gap: 2px;
   }
 
-  .sym-list::-webkit-scrollbar {
+  .menu-scroll::-webkit-scrollbar {
     display: none;
   }
 
-  .sym-opt {
-    padding: 6px 8px;
+  .menu-opt {
+    width: 100%;
+    padding: 7px 9px;
     border: 0;
     border-radius: 6px;
     background: transparent;
     color: var(--am-text);
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 110ms ease;
+  }
+
+  .menu-opt:hover,
+  .menu-opt.active {
+    background: var(--am-hover);
+  }
+
+  .menu-opt.active {
+    font-weight: 600;
+  }
+
+  .sym-opt {
     display: flex;
     align-items: center;
     gap: 8px;
-    font: inherit;
     font-size: 12px;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .sym-opt:hover {
-    background: var(--am-hover);
   }
 
   .sym-opt span {
@@ -770,7 +1025,7 @@
   }
 
   .static-select,
-  .tv-select,
+  .custom-select,
   .tv-input {
     width: 100%;
     box-sizing: border-box;
@@ -785,19 +1040,42 @@
     outline: none;
   }
 
-  .tv-select option {
-    background: #181a22;
-    color: #f0f0f0;
-  }
-
-  .alert-modal.light .tv-select option {
-    background: #ffffff;
-    color: #131722;
-  }
-
   .static-select {
     display: flex;
     align-items: center;
+  }
+
+  .custom-select {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .custom-select:hover {
+    border-color: color-mix(in srgb, var(--am-text) 30%, transparent);
+  }
+
+  .inline-select {
+    height: 30px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--am-text);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .inline-select:hover {
+    background: var(--am-hover);
   }
 
   .value-split {
@@ -820,40 +1098,6 @@
 
   .tv-input.num {
     font-variant-numeric: tabular-nums;
-  }
-
-  .tv-select.compact {
-    width: auto;
-    min-width: 140px;
-  }
-
-  .exp-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .date-in {
-    flex: 1;
-    min-width: 0;
-    font-size: 12px;
-  }
-
-  .open-ended-lbl {
-    font-size: 13px;
-    font-weight: 500;
-  }
-
-  .mini-link {
-    border: 0;
-    background: transparent;
-    color: #2962ff;
-    font: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    padding: 2px 4px;
   }
 
   .nav-row-btn {
@@ -910,22 +1154,45 @@
   }
 
   .check-item {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--am-text);
     display: flex;
     align-items: flex-start;
     gap: 10px;
+    text-align: left;
+    font: inherit;
     cursor: pointer;
   }
 
-  .check-item input[type='checkbox'] {
-    margin-top: 2px;
-    width: 16px;
-    height: 16px;
-    accent-color: #131722;
-    cursor: pointer;
+  .cb-box {
+    width: 17px;
+    height: 17px;
+    margin-top: 1px;
+    flex: 0 0 17px;
+    border-radius: 4px;
+    border: 1.5px solid var(--am-check-border);
+    background: transparent;
+    display: grid;
+    place-items: center;
+    transition: background-color 120ms ease, border-color 120ms ease;
   }
 
-  .alert-modal:not(.light) .check-item input[type='checkbox'] {
-    accent-color: #f0f0f0;
+  .cb-box.checked {
+    border-color: var(--am-check-bg);
+    background: var(--am-check-bg);
+    color: var(--am-check-fg);
+  }
+
+  .cb-box svg {
+    width: 11px;
+    height: 11px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.1;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
   .check-copy {
@@ -948,6 +1215,7 @@
   .test-sound {
     height: 24px;
     padding: 0 9px;
+    flex: 0 0 auto;
     border-radius: 6px;
     border: 1px solid var(--am-control-border);
     background: transparent;
@@ -968,8 +1236,8 @@
   }
 
   .webhook-input {
-    margin-left: 26px;
-    width: calc(100% - 26px);
+    margin-left: 27px;
+    width: calc(100% - 27px);
   }
 
   .schedule-block {
@@ -983,10 +1251,6 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-  }
-
-  .schedule-select {
-    width: 185px;
   }
 
   .modal-footer {

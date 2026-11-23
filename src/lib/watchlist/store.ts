@@ -25,6 +25,8 @@ export interface MarketQuote {
   changePercent: number;
   type: string;
   performance: QuotePerformance;
+  autoBias?: 'bull' | 'bear' | 'range';
+  biasScore?: number | null;
   source: 'tv' | 'yahoo';
   updatedAt: string;
 }
