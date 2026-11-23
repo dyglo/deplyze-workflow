@@ -69,6 +69,81 @@
   let symbolBrief = $state<SymbolBriefResponse | null>(null);
   let briefForceNonce = $state(0);
 
+  const SHEET_HEIGHT_KEY = 'deplyzeworkflow-wl-sheet-h';
+  const DEFAULT_SHEET_HEIGHT = 320;
+  function loadSavedSheetHeight(): number {
+    if (typeof localStorage === 'undefined') return DEFAULT_SHEET_HEIGHT;
+    try {
+      const raw = Number(localStorage.getItem(SHEET_HEIGHT_KEY));
+      if (Number.isFinite(raw) && raw >= 120 && raw <= 900) return Math.round(raw);
+    } catch {
+      // ignore
+    }
+    return DEFAULT_SHEET_HEIGHT;
+  }
+
+  let wlContainerEl: HTMLDivElement | undefined = $state();
+  let sheetHeight = $state<number>(loadSavedSheetHeight());
+  let resizingSheet = $state(false);
+  let dragStartY = 0;
+  let dragStartH = DEFAULT_SHEET_HEIGHT;
+
+  function clampSheetHeight(nextH: number): number {
+    const totalH = wlContainerEl?.clientHeight ?? 760;
+    const maxH = Math.max(220, Math.round(totalH - 135));
+    return Math.max(120, Math.min(maxH, Math.round(nextH)));
+  }
+
+  function onSheetResizeDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const target = e.currentTarget as HTMLElement;
+    try {
+      target.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    resizingSheet = true;
+    dragStartY = e.clientY;
+    dragStartH = sheetHeight;
+
+    const onMove = (ev: PointerEvent) => {
+      const deltaY = dragStartY - ev.clientY;
+      sheetHeight = clampSheetHeight(dragStartH + deltaY);
+    };
+    const onEnd = (ev: PointerEvent) => {
+      resizingSheet = false;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
+      try {
+        if (target.hasPointerCapture(ev.pointerId)) {
+          target.releasePointerCapture(ev.pointerId);
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        localStorage.setItem(SHEET_HEIGHT_KEY, String(sheetHeight));
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+  }
+
+  function resetSheetHeight() {
+    sheetHeight = clampSheetHeight(DEFAULT_SHEET_HEIGHT);
+    try {
+      localStorage.setItem(SHEET_HEIGHT_KEY, String(sheetHeight));
+    } catch {
+      // ignore
+    }
+  }
+
   let selectedItemId = $state<string | null>(null);
   let groupMenuOpen = $state(false);
   let moreMenuOpen = $state(false);
@@ -279,14 +354,20 @@
     return label.slice(0, 12);
   }
 
+  const briefTargetKey = $derived.by(() => {
+    if (!briefOpen || !selectedItem) return '';
+    const autoBias = quotes[selectedItem.symbol]?.autoBias;
+    const techBias = effectiveBias(selectedItem, autoBias).bias;
+    return `${selectedItem.symbol}|${selectedItem.shortName}|${techBias}`;
+  });
+
   $effect(() => {
-    if (!briefOpen) return;
-    const item = selectedItem;
-    if (!item) return;
-    const autoBias = quotes[item.symbol]?.autoBias;
-    const techBias = effectiveBias(item, autoBias).bias;
+    const key = briefTargetKey;
+    if (!key) return;
+    const [sym, shortName, rawBias] = key.split('|');
+    const techBias = (rawBias || 'none') as BiasDirection;
     const force = briefForceNonce > 0;
-    const targetShort = normalizeShortSymbol(item.shortName);
+    const targetShort = normalizeShortSymbol(shortName);
     const controller = new AbortController();
 
     if (!symbolBrief || normalizeShortSymbol(symbolBrief.shortName) !== targetShort || force) {
@@ -294,7 +375,7 @@
     }
     briefError = null;
 
-    fetchSymbolBrief(item.symbol, techBias, { force, signal: controller.signal })
+    fetchSymbolBrief(sym, techBias, { force, signal: controller.signal })
       .then((res) => {
         if (controller.signal.aborted) return;
         symbolBrief = res;
@@ -510,7 +591,7 @@
     </svg>
   {/snippet}
 
-  <div class="watchlist" class:light={theme === 'light'}>
+  <div bind:this={wlContainerEl} class="watchlist" class:light={theme === 'light'} class:resizing={resizingSheet}>
     <!-- Top toolbar -->
     <div class="wl-toolbar">
       <div class="group-switcher" data-wl-group-menu>
@@ -825,7 +906,25 @@
           : null}
       {@const selFundBias = activeBrief?.fundamentalBias ?? selMacro?.bias ?? 'neutral'}
       {@const selAlign = computeAlignment(selFundBias, seff.bias)}
-      <div class="detail-sheet">
+      <!-- TradingView-style vertical drag splitter to reposition bottom detail sheet -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="sheet-resizer"
+        class:dragging={resizingSheet}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize detail sheet"
+        title="Drag to resize detail sheet (double-click to reset)"
+        onpointerdown={onSheetResizeDown}
+        ondblclick={resetSheetHeight}
+      >
+        <span class="sheet-grip" aria-hidden="true"></span>
+      </div>
+      {#if resizingSheet}
+        <div class="sheet-drag-shield" aria-hidden="true"></div>
+      {/if}
+      <div class="detail-sheet" style:height="{sheetHeight}px">
         <div class="detail-header">
           <div class="detail-title-wrap">
             <SymbolIcon symbol={selectedItem.shortName} size={26} />
@@ -1575,18 +1674,73 @@
     color: #f23645;
   }
 
+  .watchlist.resizing {
+    user-select: none;
+    cursor: ns-resize;
+  }
+
+  .sheet-drag-shield {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    cursor: ns-resize;
+    background: transparent;
+  }
+
+  /* TradingView-style horizontal resize handle above bottom detail sheet */
+  .sheet-resizer {
+    flex: 0 0 8px;
+    height: 8px;
+    position: relative;
+    cursor: ns-resize;
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border-top: 1px solid var(--wl-border-soft);
+    touch-action: none;
+    user-select: none;
+    transition: background-color 120ms ease, border-color 120ms ease;
+  }
+
+  .sheet-resizer:hover,
+  .sheet-resizer.dragging {
+    background: var(--wl-hover);
+    border-top-color: var(--wl-border);
+  }
+
+  .sheet-grip {
+    width: 30px;
+    height: 3px;
+    border-radius: 99px;
+    background: var(--wl-border);
+    opacity: 0.65;
+    transition: opacity 120ms ease, width 120ms ease;
+  }
+
+  .sheet-resizer:hover .sheet-grip,
+  .sheet-resizer.dragging .sheet-grip {
+    opacity: 1;
+    width: 40px;
+  }
+
   /* Bottom detail sheet */
   .detail-sheet {
-    flex: 0 1 auto;
-    max-height: 48%;
+    flex: 0 0 auto;
+    min-height: 110px;
+    max-height: 82%;
     overflow-y: auto;
     overflow-x: hidden;
     scrollbar-width: none;
-    padding: 12px 14px 14px;
-    border-top: 3px solid var(--wl-border-soft);
+    scroll-behavior: smooth;
+    padding: 8px 14px 16px;
     display: flex;
     flex-direction: column;
     gap: 10px;
+    box-sizing: border-box;
+  }
+
+  .detail-sheet > * {
+    flex: 0 0 auto;
   }
 
   .detail-sheet::-webkit-scrollbar {
@@ -1875,8 +2029,9 @@
 
   /* Bottom detail sheet Macro & Fundamental Brief card */
   .macro-card {
+    flex: 0 0 auto;
     border-radius: 9px;
-    border: 1px solid var(--wl-border-soft);
+    border: 1px solid var(--wl-border);
     background: var(--wl-surface);
     overflow: hidden;
   }

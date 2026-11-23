@@ -12,7 +12,7 @@
     type InAppAlertToast
   } from './lib/alerts/store';
   import { startCloudAutoSync } from './lib/cloud/api';
-  import { saveLayoutId, type LayoutId } from './lib/chart/layouts';
+  import { getLayoutById, saveLayoutId, type LayoutId } from './lib/chart/layouts';
   import {
     loadChartSettings,
     saveChartSettings,
@@ -20,12 +20,17 @@
   } from './lib/settings/chartSettings';
   import {
     DEFAULT_GROUP_ID,
+    clonePanes,
     createTab,
+    extractShortSymbol,
     getActiveGroup,
     getActiveTab,
+    getPaneState,
+    hydrateTabsStateFromWorkspace,
     loadTabsState,
     makeId,
     saveTabsState,
+    seedTabPanes,
     type TabsState,
     type WorkspaceTab
   } from './lib/tabs/tabs';
@@ -51,6 +56,8 @@
   let settingsOpen = false;
   let closedTabs: WorkspaceTab[] = [];
   let alertToasts: InAppAlertToast[] = [];
+  // Transient live quote cache per (tabId, paneIndex) — never persisted to disk
+  const paneQuotesByTab: Record<string, Record<number, ChartQuote>> = {};
 
   $: theme = (
     themeMode === 'system' ? (systemPrefersDark ? 'dark' : 'light') : themeMode
@@ -61,6 +68,13 @@
   onMount(() => {
     const stopAlerts = startAlertMonitor();
     const stopCloudSync = startCloudAutoSync();
+
+    void hydrateTabsStateFromWorkspace(tabsState).then((restored) => {
+      if (restored) {
+        tabsState = restored;
+      }
+    });
+
     const unsubToasts = subscribeAlertToasts((toast) => {
       alertToasts = [toast, ...alertToasts].slice(0, 4);
       setTimeout(() => {
@@ -106,6 +120,7 @@
 
   function updateLayout(next: LayoutId) {
     saveLayoutId(next);
+    const nextCount = getLayoutById(next).count;
     commitTabs({
       ...tabsState,
       groups: tabsState.groups.map((g) =>
@@ -113,7 +128,25 @@
           ? g
           : {
               ...g,
-              tabs: g.tabs.map((t) => (t.id === activeTab.id ? { ...t, layoutId: next } : t))
+              tabs: g.tabs.map((t) => {
+                if (t.id !== activeTab.id) return t;
+                const seeded = seedTabPanes(t, next);
+                const curActive = t.activePane ?? 0;
+                const nextActivePane = curActive < nextCount ? curActive : 0;
+                const activePaneState = seeded[nextActivePane] ?? getPaneState(t, nextActivePane);
+                const cachedQuote = paneQuotesByTab[t.id]?.[nextActivePane];
+                return {
+                  ...t,
+                  layoutId: next,
+                  panes: seeded,
+                  activePane: nextActivePane,
+                  symbol: activePaneState.symbol,
+                  title: activePaneState.shortName || extractShortSymbol(activePaneState.symbol),
+                  quote: cachedQuote
+                    ? { price: cachedQuote.price, changePercent: cachedQuote.changePercent }
+                    : t.quote
+                };
+              })
             }
       )
     });
@@ -198,7 +231,9 @@
     const restored = createTab({
       title: last.title,
       symbol: last.symbol,
-      layoutId: last.layoutId
+      layoutId: last.layoutId,
+      panes: clonePanes(last.panes),
+      activePane: last.activePane ?? 0
     });
     commitTabs({
       ...tabsState,
@@ -232,11 +267,24 @@
           ? g
           : {
               ...g,
-              tabs: g.tabs.map((t) =>
-                t.id !== activeTab.id
-                  ? t
-                  : { ...t, symbol, title: shortName, quote: undefined }
-              )
+              tabs: g.tabs.map((t) => {
+                if (t.id !== activeTab.id) return t;
+                const paneIdx = t.activePane ?? 0;
+                const seeded = seedTabPanes(t, t.layoutId);
+                const prevPane = seeded[paneIdx];
+                seeded[paneIdx] = {
+                  symbol,
+                  shortName,
+                  interval: prevPane?.interval || 'D'
+                };
+                return {
+                  ...t,
+                  symbol,
+                  title: shortName,
+                  panes: seeded,
+                  quote: undefined
+                };
+              })
             }
       )
     });
@@ -254,34 +302,123 @@
     });
   }
 
-  function handleTabQuote(tabId: string, quote: ChartQuote) {
-    if (Number.isFinite(quote.price)) {
-      evaluateAlertsWithPrice(quote.symbol, quote.shortName, quote.price, 'live');
-    }
+  function handleActivePaneChange(tabId: string, paneIdx: number) {
     let changed = false;
-    let symbolChanged = false;
     const nextGroups = tabsState.groups.map((g) => {
       if (!g.tabs.some((t) => t.id === tabId)) return g;
       return {
         ...g,
         tabs: g.tabs.map((t) => {
           if (t.id !== tabId) return t;
-          if (
-            t.symbol === quote.symbol &&
-            t.title === quote.shortName &&
-            t.quote?.price === quote.price &&
-            t.quote?.changePercent === quote.changePercent
-          ) {
+          const seeded = seedTabPanes(t, t.layoutId);
+          const count = getLayoutById(t.layoutId).count;
+          const clamped = paneIdx >= 0 && paneIdx < count ? paneIdx : 0;
+          const paneState = seeded[clamped] ?? getPaneState(t, clamped);
+          const nextTitle = paneState.shortName || extractShortSymbol(paneState.symbol);
+          const cached = paneQuotesByTab[tabId]?.[clamped];
+          if ((t.activePane ?? 0) === clamped && t.symbol === paneState.symbol && t.title === nextTitle) {
             return t;
           }
           changed = true;
-          if (t.symbol !== quote.symbol || t.title !== quote.shortName) {
-            symbolChanged = true;
+          return {
+            ...t,
+            panes: seeded,
+            activePane: clamped,
+            symbol: paneState.symbol,
+            title: nextTitle,
+            quote: cached
+              ? { price: cached.price, changePercent: cached.changePercent }
+              : undefined
+          };
+        })
+      };
+    });
+
+    if (!changed) return;
+    commitTabs({ ...tabsState, groups: nextGroups });
+  }
+
+  function handlePaneInterval(tabId: string, paneIdx: number, interval: string) {
+    let changed = false;
+    const nextGroups = tabsState.groups.map((g) => {
+      if (!g.tabs.some((t) => t.id === tabId)) return g;
+      return {
+        ...g,
+        tabs: g.tabs.map((t) => {
+          if (t.id !== tabId) return t;
+          const seeded = seedTabPanes(t, t.layoutId);
+          const prev = seeded[paneIdx] ?? getPaneState(t, paneIdx);
+          if (prev.interval === interval) return t;
+          changed = true;
+          seeded[paneIdx] = { ...prev, interval };
+          return { ...t, panes: seeded };
+        })
+      };
+    });
+    if (!changed) return;
+    commitTabs({ ...tabsState, groups: nextGroups });
+  }
+
+  function handlePaneQuote(tabId: string, paneIdx: number, quote: ChartQuote) {
+    if (Number.isFinite(quote.price)) {
+      evaluateAlertsWithPrice(quote.symbol, quote.shortName, quote.price, 'live');
+    }
+
+    if (!paneQuotesByTab[tabId]) paneQuotesByTab[tabId] = {};
+    paneQuotesByTab[tabId][paneIdx] = quote;
+
+    let changed = false;
+    let persistedChanged = false;
+    const nextGroups = tabsState.groups.map((g) => {
+      if (!g.tabs.some((t) => t.id === tabId)) return g;
+      return {
+        ...g,
+        tabs: g.tabs.map((t) => {
+          if (t.id !== tabId) return t;
+          const activeIdx = t.activePane ?? 0;
+          const existingPane = t.panes?.[paneIdx];
+          const paneSymbolChanged =
+            !existingPane ||
+            existingPane.symbol !== quote.symbol ||
+            existingPane.shortName !== quote.shortName ||
+            (Boolean(quote.interval) && existingPane.interval !== quote.interval);
+
+          const isActivePane = paneIdx === activeIdx;
+          const headerQuoteChanged =
+            isActivePane &&
+            (t.quote?.price !== quote.price || t.quote?.changePercent !== quote.changePercent);
+          const headerSymbolChanged =
+            isActivePane && (t.symbol !== quote.symbol || t.title !== quote.shortName);
+
+          if (!paneSymbolChanged && !headerQuoteChanged && !headerSymbolChanged) {
+            return t;
           }
+
+          changed = true;
+          if (paneSymbolChanged || headerSymbolChanged) {
+            persistedChanged = true;
+          }
+
+          let nextPanes = t.panes;
+          if (paneSymbolChanged) {
+            nextPanes = seedTabPanes(t, t.layoutId);
+            const prev = nextPanes[paneIdx];
+            nextPanes[paneIdx] = {
+              symbol: quote.symbol,
+              shortName: quote.shortName,
+              interval: quote.interval || prev?.interval || 'D'
+            };
+          }
+
+          if (!isActivePane) {
+            return { ...t, panes: nextPanes };
+          }
+
           return {
             ...t,
             title: quote.shortName,
             symbol: quote.symbol,
+            panes: nextPanes,
             quote: {
               price: quote.price,
               changePercent: quote.changePercent
@@ -294,7 +431,7 @@
     if (!changed) return;
     const nextState: TabsState = { ...tabsState, groups: nextGroups };
     tabsState = nextState;
-    if (symbolChanged) {
+    if (persistedChanged) {
       saveTabsState(nextState);
     }
   }
@@ -337,7 +474,11 @@
             layoutId={tab.layoutId}
             tabId={tab.id}
             symbol={tab.symbol}
-            onActiveQuote={(q) => handleTabQuote(tab.id, q)}
+            panes={tab.panes}
+            activePane={tab.activePane ?? 0}
+            onActivePaneChange={(idx) => handleActivePaneChange(tab.id, idx)}
+            onPaneQuote={(idx, q) => handlePaneQuote(tab.id, idx, q)}
+            onPaneInterval={(idx, ivl) => handlePaneInterval(tab.id, idx, ivl)}
           />
         </div>
       {/each}

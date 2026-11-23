@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import AiPanel from './panels/AiPanel.svelte';
   import AlertsPanel from './panels/AlertsPanel.svelte';
   import CalendarPanel from './panels/CalendarPanel.svelte';
@@ -15,6 +16,7 @@
   import { upsertAlert, type TradingAlert } from './alerts/store';
   import { getLayoutById, type LayoutId } from './chart/layouts';
   import type { ChartSettings } from './settings/chartSettings';
+  import { loadWorkspaceJson, saveWorkspaceJson } from './workspace/storage';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -62,7 +64,35 @@
     | 'trash'
     | 'cloud';
 
-  let active = $state<RailId | null>(null);
+  const VALID_RAIL_IDS: readonly RailId[] = [
+    'list',
+    'calendar',
+    'tasks',
+    'note',
+    'ai',
+    'alerts',
+    'routines',
+    'favorites',
+    'trash',
+    'cloud'
+  ];
+  const RAIL_STORAGE_KEY = 'deplyzeworkflow-rail';
+
+  function parseRailId(raw: unknown): RailId | null {
+    if (typeof raw !== 'string') return null;
+    return VALID_RAIL_IDS.includes(raw as RailId) ? (raw as RailId) : null;
+  }
+
+  function loadInitialRail(): RailId | null {
+    if (typeof localStorage === 'undefined') return null;
+    try {
+      return parseRailId(localStorage.getItem(RAIL_STORAGE_KEY));
+    } catch {
+      return null;
+    }
+  }
+
+  let active = $state<RailId | null>(loadInitialRail());
   let layoutAnchor = $state<DOMRect | null>(null);
   let alertModalSeq = 0;
   let alertModalState = $state<{
@@ -74,6 +104,40 @@
   } | null>(null);
 
   const activeLayoutDef = $derived(getLayoutById(layoutId));
+
+  function persistRail(next: RailId | null) {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        if (next) {
+          localStorage.setItem(RAIL_STORAGE_KEY, next);
+        } else {
+          localStorage.removeItem(RAIL_STORAGE_KEY);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    void saveWorkspaceJson('rail', { active: next, updatedAt: Date.now() });
+  }
+
+  onMount(() => {
+    const hasLocal =
+      typeof localStorage !== 'undefined' && localStorage.getItem(RAIL_STORAGE_KEY) !== null;
+    if (!hasLocal) {
+      void loadWorkspaceJson<{ active?: string | null } | null>('rail', null).then((disk) => {
+        if (!disk) return;
+        const restored = parseRailId(disk.active);
+        if (restored && active === null) {
+          active = restored;
+          try {
+            localStorage.setItem(RAIL_STORAGE_KEY, restored);
+          } catch {
+            // ignore
+          }
+        }
+      });
+    }
+  });
 
   function openCreateAlertModal(
     symbol = activeFullSymbol || 'OANDA:XAUUSD',
@@ -96,10 +160,12 @@
   function select(id: RailId) {
     layoutAnchor = null;
     active = active === id ? null : id;
+    persistRail(active);
   }
 
   function closePanel() {
     active = null;
+    persistRail(null);
   }
 
   function toggleLayoutPopover(e: MouseEvent) {
@@ -125,7 +191,10 @@
     {activeChangePercent}
     {onSelectSymbol}
     {onOpenSymbolInNewTab}
-    onOpenNotesForSymbol={() => (active = 'note')}
+    onOpenNotesForSymbol={() => {
+      active = 'note';
+      persistRail('note');
+    }}
     onCreateAlertForSymbol={(sym, short, price) => openCreateAlertModal(sym, short, price, null)}
     onClose={closePanel}
   />

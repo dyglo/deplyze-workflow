@@ -2,6 +2,7 @@
   import Chart, { type ChartQuote } from './Chart.svelte';
   import { getLayoutById, type LayoutId } from './chart/layouts';
   import type { ChartSettings } from './settings/chartSettings';
+  import type { ChartPaneState } from './tabs/tabs';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -9,7 +10,11 @@
     layoutId: LayoutId;
     tabId?: string;
     symbol?: string;
-    onActiveQuote?: (quote: ChartQuote) => void;
+    panes?: Record<number, ChartPaneState>;
+    activePane?: number;
+    onActivePaneChange?: (paneIndex: number) => void;
+    onPaneQuote?: (paneIndex: number, quote: ChartQuote) => void;
+    onPaneInterval?: (paneIndex: number, interval: string) => void;
   }
 
   let {
@@ -18,31 +23,39 @@
     layoutId,
     tabId = 'default',
     symbol = 'OANDA:XAUUSD',
-    onActiveQuote
+    panes = {},
+    activePane = 0,
+    onActivePaneChange,
+    onPaneQuote,
+    onPaneInterval
   }: Props = $props();
 
   const layout = $derived(getLayoutById(layoutId));
-  let activePane = $state(0);
   let gridEl: HTMLDivElement | undefined = $state();
-  const paneQuotes: Record<number, ChartQuote> = {};
+
+  const currentActivePane = $derived(
+    activePane >= 0 && activePane < layout.count ? activePane : 0
+  );
 
   $effect(() => {
     if (activePane >= layout.count) {
-      activePane = 0;
+      onActivePaneChange?.(0);
     }
   });
 
   function setActivePane(idx: number) {
-    activePane = idx;
-    const q = paneQuotes[idx];
-    if (q) onActiveQuote?.(q);
+    if (idx < 0 || idx >= layout.count) return;
+    if (idx !== currentActivePane) {
+      onActivePaneChange?.(idx);
+    }
   }
 
   function handlePaneQuote(idx: number, quote: ChartQuote) {
-    paneQuotes[idx] = quote;
-    if (idx === activePane) {
-      onActiveQuote?.(quote);
-    }
+    onPaneQuote?.(idx, quote);
+  }
+
+  function handlePaneInterval(idx: number, interval: string) {
+    onPaneInterval?.(idx, interval);
   }
 
   function syncActiveFromIframe() {
@@ -69,10 +82,13 @@
   style:grid-template-rows={layout.rows}
 >
   {#each layout.panes as placement, idx (idx)}
+    {@const paneState = panes?.[idx]}
+    {@const paneSymbol = paneState?.symbol || symbol}
+    {@const paneInterval = paneState?.interval || 'D'}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="chart-pane"
-      class:active={layout.count > 1 && activePane === idx}
+      class:active={layout.count > 1 && currentActivePane === idx}
       data-pane-index={idx}
       style:grid-column={placement.gridColumn}
       style:grid-row={placement.gridRow}
@@ -81,10 +97,12 @@
       <Chart
         {theme}
         {settings}
-        {symbol}
+        symbol={paneSymbol}
+        interval={paneInterval}
         paneId="{tabId}-slot-{idx}"
         collapseSideToolbarByDefault={idx > 0}
         onQuote={(q) => handlePaneQuote(idx, q)}
+        onInterval={(ivl) => handlePaneInterval(idx, ivl)}
       />
     </div>
   {/each}

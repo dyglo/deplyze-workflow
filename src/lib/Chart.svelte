@@ -1,54 +1,116 @@
 <script module lang="ts">
-  let nextId = 0;
-
   export interface ChartQuote {
-    symbol: string; // full symbol e.g. EASYMARKETS:OILUSD
-    shortName: string; // e.g. OILUSD
+    symbol: string; // full symbol e.g. OANDA:XAUUSD
+    shortName: string; // e.g. XAUUSD
     price: number;
     changePercent: number;
     description?: string;
+    interval?: string;
+  }
+
+  const TV_INTERVAL_RE = /^(\d+[SMHDW]?|[DWMY])$/i;
+
+  function normalizeInterval(raw: unknown): string | null {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+      return String(Math.round(raw));
+    }
+    if (typeof raw === 'string') {
+      const cleaned = raw.trim().toUpperCase();
+      if (cleaned && TV_INTERVAL_RE.test(cleaned)) {
+        return cleaned;
+      }
+    }
+    return null;
+  }
+
+  function extractIntervalFromRecord(data: Record<string, unknown> | undefined): string | null {
+    if (!data) return null;
+    return normalizeInterval(data.interval ?? data.resolution ?? data.timeframe);
   }
 </script>
 
 <script lang="ts">
-  import { loadTradingView } from './chart/tvLoader';
+  import { loadTradingView, type TvWidgetInstance } from './chart/tvLoader';
   import { toRgba, type ChartSettings } from './settings/chartSettings';
 
   interface Props {
     theme: 'dark' | 'light';
     settings: ChartSettings;
-    paneId?: string;
+    paneId: string;
     symbol?: string;
     interval?: string;
     collapseSideToolbarByDefault?: boolean;
     onQuote?: (quote: ChartQuote) => void;
+    onInterval?: (interval: string) => void;
   }
 
   let {
     theme,
     settings,
-    paneId = `pane-${++nextId}`,
+    paneId,
     symbol = 'OANDA:XAUUSD',
     interval = 'D',
     collapseSideToolbarByDefault = false,
-    onQuote
+    onQuote,
+    onInterval
   }: Props = $props();
 
   let hostEl: HTMLDivElement | undefined = $state();
-  const containerId = $derived(`tv-chart-${paneId}`);
+  const containerId = $derived(`tv-chart-${paneId.replace(/[^a-zA-Z0-9_-]/g, '_')}`);
 
-  // Track the latest symbol reported by this chart so updating parent state
+  // Track the latest symbol & interval reported by this chart so updating parent state
   // does NOT cause this chart instance to unnecessarily remount, while explicit
-  // external switches (e.g. clicking a Watchlist or Alert symbol) DO load immediately.
+  // external switches (e.g. clicking a Watchlist symbol or workspace restore) DO load immediately.
   // svelte-ignore state_referenced_locally
   let mountedSymbol = symbol;
   let lastReportedSymbol: string | null = null;
   let externalSymbolVersion = $state(0);
 
+  // svelte-ignore state_referenced_locally
+  let mountedInterval = interval;
+  let lastReportedInterval: string | null = null;
+  let externalIntervalVersion = $state(0);
+
+  let widgetIsReady = false;
+  let pendingExternalSwitch: { prev: string; until: number } | null = null;
+
+  function getActiveIframeWindow(): Window | null {
+    const iframe = hostEl?.querySelector<HTMLIFrameElement>('iframe');
+    return iframe?.contentWindow ?? null;
+  }
+
   $effect(() => {
     if (symbol !== lastReportedSymbol && symbol !== mountedSymbol) {
+      const prev = mountedSymbol;
       mountedSymbol = symbol;
+      const win = widgetIsReady ? getActiveIframeWindow() : null;
+      if (win) {
+        try {
+          pendingExternalSwitch = { prev, until: Date.now() + 2500 };
+          win.postMessage({ name: 'set-symbol', data: { symbol } }, '*');
+          return;
+        } catch {
+          pendingExternalSwitch = null;
+          // fall back to remount below
+        }
+      }
       externalSymbolVersion += 1;
+    }
+  });
+
+  $effect(() => {
+    if (interval !== lastReportedInterval && interval !== mountedInterval) {
+      mountedInterval = interval;
+      const win = widgetIsReady ? getActiveIframeWindow() : null;
+      if (win) {
+        try {
+          win.postMessage({ name: 'set-interval', data: { interval } }, '*');
+          return;
+        } catch {
+          // fall back to remount below
+        }
+      }
+      externalIntervalVersion += 1;
     }
   });
 
@@ -93,6 +155,11 @@
         : transparent
     };
 
+    const enabledFeatures: string[] = ['use_localstorage_for_settings'];
+    if (collapseSide) {
+      enabledFeatures.push('hide_left_toolbar_by_default');
+    }
+
     const options: Record<string, unknown> = {
       container_id: id,
       autosize: true,
@@ -107,13 +174,9 @@
       hide_volume: true,
       hide_side_toolbar: false,
       save_image: true,
-      doNotStoreSettings: true,
+      enabled_features: enabledFeatures,
       overrides
     };
-
-    if (collapseSide) {
-      options.enabled_features = ['hide_left_toolbar_by_default'];
-    }
 
     if (!s.verticalGrid && !s.horizontalGrid) {
       options.gridColor = transparent;
@@ -124,17 +187,17 @@
     return options;
   }
 
-  // Re-mount ONLY when theme, settings, containerId, interval, or collapseSide changes.
-  // `mountedSymbol` is read non-reactively inside the effect so live symbol switches
-  // inside the iframe never trigger a reload, while theme toggles / restarts preserve it.
+  // Re-mount ONLY when theme, settings, containerId, collapseSide, or an explicit external
+  // symbol/interval change before iframe readiness occurs. Live changes inside the iframe update
+  // mountedSymbol / mountedInterval without touching optionsKey so the iframe stays intact.
   const optionsKey = $derived(
     JSON.stringify({
       containerId,
       theme,
       settings,
-      interval,
       collapseSideToolbarByDefault,
-      externalSymbolVersion
+      externalSymbolVersion,
+      externalIntervalVersion
     })
   );
 
@@ -148,13 +211,16 @@
       theme,
       settings,
       mountedSymbol,
-      interval,
+      mountedInterval,
       collapseSideToolbarByDefault
     );
 
     let cancelled = false;
     let subscribed = false;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let infoTimer: ReturnType<typeof setInterval> | undefined;
+    let widgetInstance: TvWidgetInstance | null = null;
+    widgetIsReady = false;
     root.innerHTML = '';
 
     function getIframeWindow(): Window | null {
@@ -181,6 +247,28 @@
       }
     }
 
+    function reportIntervalIfChanged(nextInterval: string | null) {
+      if (!nextInterval || nextInterval === mountedInterval) return;
+      mountedInterval = nextInterval;
+      lastReportedInterval = nextInterval;
+      onInterval?.(nextInterval);
+    }
+
+    function querySymbolInfo() {
+      if (cancelled || !widgetInstance?.postMessage) return;
+      try {
+        widgetInstance.postMessage.get('symbolInfo', {}, (info) => {
+          if (cancelled || !info || typeof info !== 'object') return;
+          const ivl = normalizeInterval(info.interval);
+          if (ivl) {
+            reportIntervalIfChanged(ivl);
+          }
+        });
+      } catch {
+        // Ignore transient cross-origin errors
+      }
+    }
+
     function handleMessage(e: MessageEvent) {
       const win = getIframeWindow();
       if (!win || e.source !== win) return;
@@ -197,8 +285,17 @@
 
       if (msg.name === 'widgetReady' && !subscribed) {
         subscribed = true;
+        widgetIsReady = true;
         sendQuoteSubscribe();
+        querySymbolInfo();
         return;
+      }
+
+      const detectedInterval = extractIntervalFromRecord(
+        msg.data && typeof msg.data === 'object' ? msg.data : undefined
+      );
+      if (detectedInterval) {
+        reportIntervalIfChanged(detectedInterval);
       }
 
       if (msg.name === 'quoteUpdate' && msg.data && typeof msg.data === 'object') {
@@ -212,6 +309,15 @@
         if (!shortName) return;
 
         const fullSymbol = originalName || shortName;
+
+        // Ignore stale in-flight quote ticks from the previous symbol right after an external set-symbol
+        if (pendingExternalSwitch) {
+          if (Date.now() < pendingExternalSwitch.until && fullSymbol === pendingExternalSwitch.prev) {
+            return;
+          }
+          pendingExternalSwitch = null;
+        }
+
         mountedSymbol = fullSymbol;
         lastReportedSymbol = fullSymbol;
 
@@ -220,17 +326,44 @@
           shortName,
           price,
           changePercent,
-          description
+          description,
+          interval: detectedInterval ?? undefined
         });
       }
     }
 
+    const handleQuickSync = () => {
+      if (widgetIsReady) querySymbolInfo();
+    };
+
     window.addEventListener('message', handleMessage);
+    window.addEventListener('blur', handleQuickSync);
+    window.addEventListener('beforeunload', handleQuickSync);
 
     void loadTradingView()
       .then((tv) => {
         if (cancelled || !hostEl) return;
-        new tv.widget(currentOptions);
+        const instance = new tv.widget(currentOptions);
+        widgetInstance = instance;
+
+        if (typeof instance.ready === 'function') {
+          instance.ready(() => {
+            if (cancelled) return;
+            widgetIsReady = true;
+            if (!subscribed) {
+              subscribed = true;
+              sendQuoteSubscribe();
+            }
+            querySymbolInfo();
+          });
+        }
+
+        // Poll symbolInfo quietly so timeframe/interval changes persist across restarts
+        infoTimer = setInterval(() => {
+          if (!cancelled && widgetIsReady) {
+            querySymbolInfo();
+          }
+        }, 2500);
 
         // Subscribe once the iframe loads (and retry briefly in case widgetReady fired early)
         const iframe = root.querySelector<HTMLIFrameElement>('iframe');
@@ -239,7 +372,10 @@
           sendQuoteSubscribe();
           // One gentle retry after widget model initializes
           pollTimer = setTimeout(() => {
-            if (!cancelled) sendQuoteSubscribe();
+            if (!cancelled) {
+              sendQuoteSubscribe();
+              querySymbolInfo();
+            }
           }, 1800);
         };
 
@@ -255,8 +391,13 @@
 
     return () => {
       cancelled = true;
+      widgetIsReady = false;
+      widgetInstance = null;
       if (pollTimer) clearTimeout(pollTimer);
+      if (infoTimer) clearInterval(infoTimer);
       window.removeEventListener('message', handleMessage);
+      window.removeEventListener('blur', handleQuickSync);
+      window.removeEventListener('beforeunload', handleQuickSync);
       root.innerHTML = '';
     };
   });
