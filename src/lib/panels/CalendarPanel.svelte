@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import PanelShell from './PanelShell.svelte';
+  import { subscribeAlerts, toggleNewsAlertForEvent } from '../alerts/store';
   import { FLAG_SVGS } from '../calendar/flags';
   import {
     addDays,
@@ -43,6 +45,23 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let refreshNonce = $state(0);
+  let armedEventIds = $state<Record<string, boolean>>({});
+
+  onMount(() => {
+    return subscribeAlerts((s) => {
+      const next: Record<string, boolean> = {};
+      for (const a of s.alerts) {
+        if (a.kind === 'news' && a.status === 'active' && a.eventId) {
+          next[a.eventId] = true;
+        }
+      }
+      armedEventIds = next;
+    });
+  });
+
+  function isUpcomingEvent(ts: number): boolean {
+    return ts > Math.floor(Date.now() / 1000) + 60;
+  }
 
   let dateInput: HTMLInputElement | undefined = $state();
   let stripEl: HTMLDivElement | undefined = $state();
@@ -420,7 +439,35 @@
             </div>
 
             <div class="event-main">
-              <div class="event-title">{event.title}</div>
+              <div class="event-title-row">
+                <div class="event-title">{event.title}</div>
+                {#if isUpcomingEvent(event.ts)}
+                  {@const isArmed = Boolean(armedEventIds[event.id])}
+                  <button
+                    class="news-bell"
+                    class:armed={isArmed}
+                    type="button"
+                    title={isArmed
+                      ? '15-min pre-news alert active (click to remove)'
+                      : 'Notify me 15 min before release'}
+                    aria-label={isArmed ? 'Remove news alert' : 'Set 15-minute news alert'}
+                    onclick={() =>
+                      toggleNewsAlertForEvent({
+                        eventId: event.id,
+                        title: event.title,
+                        country: event.country,
+                        ts: event.ts,
+                        leadMinutes: 15
+                      })
+                    }
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M8 2.25a3.75 3.75 0 0 0-3.75 3.75v2.2c0 .6-.22 1.18-.62 1.63l-.63.72h10l-.63-.72a2.45 2.45 0 0 1-.62-1.63V6A3.75 3.75 0 0 0 8 2.25Z" />
+                      <path d="M6.4 12.25a1.65 1.65 0 0 0 3.2 0" />
+                    </svg>
+                  </button>
+                {/if}
+              </div>
               {#if event.actual || event.prior || event.forecast}
                 <div class="event-meta">
                   {#if event.actual}
@@ -987,11 +1034,63 @@
     flex-direction: column;
   }
 
+  .event-title-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
   .event-title {
     font-size: 13px;
     font-weight: 500;
     line-height: 1.35;
     color: var(--cal-text);
+  }
+
+  .news-bell {
+    width: 22px;
+    height: 22px;
+    margin-top: -2px;
+    flex: 0 0 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    display: grid;
+    place-items: center;
+    color: var(--cal-secondary);
+    background: transparent;
+    opacity: 0;
+    cursor: pointer;
+    transition: opacity 130ms ease, color 130ms ease, background-color 130ms ease;
+  }
+
+  .event-row:hover .news-bell,
+  .news-bell.armed {
+    opacity: 1;
+  }
+
+  .news-bell:hover {
+    color: var(--cal-text);
+    background: var(--cal-control-hover);
+  }
+
+  .news-bell.armed {
+    color: #2962ff;
+  }
+
+  .news-bell svg {
+    width: 14px;
+    height: 14px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .news-bell.armed svg path:first-child {
+    fill: currentColor;
   }
 
   .event-meta {

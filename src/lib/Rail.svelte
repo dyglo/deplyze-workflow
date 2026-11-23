@@ -1,10 +1,15 @@
 <script lang="ts">
   import AiPanel from './panels/AiPanel.svelte';
+  import AlertsPanel from './panels/AlertsPanel.svelte';
   import CalendarPanel from './panels/CalendarPanel.svelte';
+  import CreateAlertModal from './panels/CreateAlertModal.svelte';
   import LayoutPopover from './panels/LayoutPopover.svelte';
   import NotesPanel from './panels/NotesPanel.svelte';
   import SettingsModal from './panels/SettingsModal.svelte';
+  import TasksPanel from './panels/TasksPanel.svelte';
   import TrashPanel from './panels/TrashPanel.svelte';
+  import WatchlistPanel from './panels/WatchlistPanel.svelte';
+  import { upsertAlert, type TradingAlert } from './alerts/store';
   import { getLayoutById, type LayoutId } from './chart/layouts';
   import type { ChartSettings } from './settings/chartSettings';
 
@@ -20,6 +25,8 @@
   export let onCloseSettings: () => void;
   export let onSaveChartSettings: (next: ChartSettings) => void;
   export let onSelectLayout: (next: LayoutId) => void;
+  export let onSelectSymbol: (symbol: string, shortName: string) => void;
+  export let onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
 
   type RailId =
     | 'list'
@@ -35,8 +42,23 @@
 
   let active: RailId | null = null;
   let layoutAnchor: DOMRect | null = null;
+  let alertModalState: {
+    symbol: string;
+    shortName: string;
+    price?: number;
+    editing: TradingAlert | null;
+  } | null = null;
 
   $: activeLayoutDef = getLayoutById(layoutId);
+
+  function openCreateAlertModal(
+    symbol = activeFullSymbol || 'OANDA:XAUUSD',
+    shortName = activeSymbol || 'XAUUSD',
+    price = activePrice,
+    editing: TradingAlert | null = null
+  ) {
+    alertModalState = { symbol, shortName, price, editing };
+  }
 
   function select(id: RailId) {
     layoutAnchor = null;
@@ -61,8 +83,29 @@
   }
 </script>
 
-{#if active === 'calendar'}
+{#if active === 'list'}
+  <WatchlistPanel
+    {theme}
+    {activeSymbol}
+    {activeFullSymbol}
+    {activePrice}
+    {activeChangePercent}
+    {onSelectSymbol}
+    {onOpenSymbolInNewTab}
+    onOpenNotesForSymbol={() => (active = 'note')}
+    onCreateAlertForSymbol={(sym, short, price) => openCreateAlertModal(sym, short, price, null)}
+    onClose={closePanel}
+  />
+{:else if active === 'calendar'}
   <CalendarPanel {theme} onClose={closePanel} />
+{:else if active === 'tasks'}
+  <TasksPanel
+    {theme}
+    {activeSymbol}
+    {activeFullSymbol}
+    {activePrice}
+    onClose={closePanel}
+  />
 {:else if active === 'note'}
   <NotesPanel {theme} {activeSymbol} {activeFullSymbol} onClose={closePanel} />
 {:else if active === 'ai'}
@@ -74,8 +117,34 @@
     {activeChangePercent}
     onClose={closePanel}
   />
+{:else if active === 'alerts'}
+  <AlertsPanel
+    {theme}
+    onOpenCreateAlert={(editing) =>
+      openCreateAlertModal(
+        editing?.symbol ?? activeFullSymbol,
+        editing?.shortName ?? activeSymbol,
+        editing?.targetPrice ?? activePrice,
+        editing ?? null
+      )
+    }
+    {onSelectSymbol}
+    onClose={closePanel}
+  />
 {:else if active === 'trash'}
   <TrashPanel {theme} onClose={closePanel} />
+{/if}
+
+{#if alertModalState}
+  <CreateAlertModal
+    {theme}
+    initialSymbol={alertModalState.symbol}
+    initialShortName={alertModalState.shortName}
+    initialPrice={alertModalState.price}
+    editingAlert={alertModalState.editing}
+    onSave={(saved) => upsertAlert(saved)}
+    onClose={() => (alertModalState = null)}
+  />
 {/if}
 
 {#if layoutAnchor}

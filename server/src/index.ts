@@ -11,6 +11,7 @@ import {
   type AiChatRequest
 } from './routes/ai.js';
 import { getCalendarEventsPayload, getCalendarWeekPayload } from './routes/calendar.js';
+import { dispatchAlertWebhook, getQuotesPayload } from './quotes/service.js';
 
 /** Load local .env files (repo root + server dir) without overriding real environment variables. */
 function loadLocalEnv(): void {
@@ -121,7 +122,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.3',
+        version: '0.1.4',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -135,15 +136,45 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.3',
+      version: '0.1.4',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
         'GET /api/calendar/events?date=YYYY-MM-DD&category=economic&tz=Africa/Nairobi',
+        'GET /api/quotes?symbols=OANDA:XAUUSD,TVC:DXY',
+        'POST /api/alerts/webhook',
         'GET /api/ai/models',
         'POST /api/ai/chat'
       ]
     });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/quotes') {
+    const raw = url.searchParams.get('symbols') ?? '';
+    const symbols = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const payload = await getQuotesPayload(symbols);
+    sendJson(res, 200, payload, 'public, max-age=5');
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/alerts/webhook') {
+    let body: { url?: string; payload?: Record<string, unknown> };
+    try {
+      body = await readJsonBody<{ url?: string; payload?: Record<string, unknown> }>(req, 64 * 1024);
+    } catch (err) {
+      sendJson(res, 400, { error: (err as Error).message }, 'no-store');
+      return;
+    }
+    if (!body.url) {
+      sendJson(res, 400, { error: 'Missing webhook url' }, 'no-store');
+      return;
+    }
+    const result = await dispatchAlertWebhook(body.url, body.payload ?? {});
+    sendJson(res, result.ok ? 200 : 502, result, 'no-store');
     return;
   }
 

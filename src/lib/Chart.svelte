@@ -38,16 +38,17 @@
   const containerId = $derived(`tv-chart-${paneId}`);
 
   // Track the latest symbol reported by this chart so updating parent state
-  // does NOT cause this chart instance to unnecessarily remount.
+  // does NOT cause this chart instance to unnecessarily remount, while explicit
+  // external switches (e.g. clicking a Watchlist or Alert symbol) DO load immediately.
   // svelte-ignore state_referenced_locally
   let mountedSymbol = symbol;
   let lastReportedSymbol: string | null = null;
+  let externalSymbolVersion = $state(0);
 
   $effect(() => {
-    // Only change mountedSymbol if parent switched to a genuinely external symbol
-    // (not the one we just reported back from inside this iframe).
-    if (symbol !== lastReportedSymbol) {
+    if (symbol !== lastReportedSymbol && symbol !== mountedSymbol) {
       mountedSymbol = symbol;
+      externalSymbolVersion += 1;
     }
   });
 
@@ -132,7 +133,8 @@
       theme,
       settings,
       interval,
-      collapseSideToolbarByDefault
+      collapseSideToolbarByDefault,
+      externalSymbolVersion
     })
   );
 

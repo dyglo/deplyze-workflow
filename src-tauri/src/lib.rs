@@ -1,6 +1,7 @@
 mod ai;
 mod capture;
 mod notes;
+mod workspace;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,6 +16,9 @@ pub fn run() {
             capture::capture_chart_region,
             ai::ai_chats_load,
             ai::ai_chats_save,
+            workspace::workspace_load_json,
+            workspace::workspace_save_json,
+            workspace::notify_desktop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

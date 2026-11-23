@@ -5,6 +5,12 @@
   import ChartGrid from './lib/ChartGrid.svelte';
   import Rail from './lib/Rail.svelte';
   import TitleBar from './lib/TitleBar.svelte';
+  import {
+    evaluateAlertsWithPrice,
+    startAlertMonitor,
+    subscribeAlertToasts,
+    type InAppAlertToast
+  } from './lib/alerts/store';
   import { saveLayoutId, type LayoutId } from './lib/chart/layouts';
   import {
     loadChartSettings,
@@ -43,6 +49,7 @@
   let tabsState: TabsState = loadTabsState();
   let settingsOpen = false;
   let closedTabs: WorkspaceTab[] = [];
+  let alertToasts: InAppAlertToast[] = [];
 
   $: theme = (
     themeMode === 'system' ? (systemPrefersDark ? 'dark' : 'light') : themeMode
@@ -51,14 +58,30 @@
   $: activeTab = getActiveTab(tabsState);
 
   onMount(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    systemPrefersDark = mq.matches;
-    const onChange = (e: MediaQueryListEvent) => {
-      systemPrefersDark = e.matches;
+    const stopAlerts = startAlertMonitor();
+    const unsubToasts = subscribeAlertToasts((toast) => {
+      alertToasts = [toast, ...alertToasts].slice(0, 4);
+      setTimeout(() => {
+        alertToasts = alertToasts.filter((t) => t.id !== toast.id);
+      }, 8000);
+    });
+
+    let cleanupMq: (() => void) | undefined;
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      systemPrefersDark = mq.matches;
+      const onChange = (e: MediaQueryListEvent) => {
+        systemPrefersDark = e.matches;
+      };
+      mq.addEventListener('change', onChange);
+      cleanupMq = () => mq.removeEventListener('change', onChange);
+    }
+
+    return () => {
+      stopAlerts();
+      unsubToasts();
+      cleanupMq?.();
     };
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
   });
 
   function commitTabs(next: TabsState) {
@@ -198,7 +221,40 @@
     });
   }
 
+  function loadSymbolInActiveTab(symbol: string, shortName: string) {
+    commitTabs({
+      ...tabsState,
+      groups: tabsState.groups.map((g) =>
+        g.id !== activeGroup.id
+          ? g
+          : {
+              ...g,
+              tabs: g.tabs.map((t) =>
+                t.id !== activeTab.id
+                  ? t
+                  : { ...t, symbol, title: shortName, quote: undefined }
+              )
+            }
+      )
+    });
+  }
+
+  function openSymbolInNewTab(symbol: string, shortName: string) {
+    const newTab = createTab({ title: shortName, symbol });
+    commitTabs({
+      ...tabsState,
+      groups: tabsState.groups.map((g) =>
+        g.id === activeGroup.id
+          ? { ...g, tabs: [...g.tabs, newTab], activeTabId: newTab.id }
+          : g
+      )
+    });
+  }
+
   function handleTabQuote(tabId: string, quote: ChartQuote) {
+    if (Number.isFinite(quote.price)) {
+      evaluateAlertsWithPrice(quote.symbol, quote.shortName, quote.price);
+    }
     let symbolChanged = false;
     const nextGroups = tabsState.groups.map((g) => {
       if (!g.tabs.some((t) => t.id === tabId)) return g;
@@ -286,8 +342,30 @@
       onCloseSettings={() => (settingsOpen = false)}
       onSaveChartSettings={updateChartSettings}
       onSelectLayout={updateLayout}
+      onSelectSymbol={loadSymbolInActiveTab}
+      onOpenSymbolInNewTab={openSymbolInNewTab}
     />
   </div>
+
+  {#if alertToasts.length > 0}
+    <div class="alert-toast-stack" aria-live="polite">
+      {#each alertToasts as toast (toast.id)}
+        <div class="alert-toast" class:light={theme === 'light'}>
+          <div class="toast-head">
+            <strong>{toast.title}</strong>
+            <button
+              type="button"
+              aria-label="Dismiss alert"
+              on:click={() => (alertToasts = alertToasts.filter((t) => t.id !== toast.id))}
+            >
+              ×
+            </button>
+          </div>
+          <div class="toast-body">{toast.message}</div>
+        </div>
+      {/each}
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -352,5 +430,64 @@
   .chart-slot :global(.chart-shell) {
     width: 100%;
     height: 100%;
+  }
+
+  .alert-toast-stack {
+    position: fixed;
+    left: 16px;
+    bottom: 16px;
+    z-index: 150;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 340px;
+  }
+
+  .alert-toast {
+    padding: 11px 13px;
+    border-radius: 10px;
+    color: #f0f0f0;
+    background: rgba(18, 18, 18, 0.9);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.12);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .alert-toast.light {
+    color: #131722;
+    background: #ffffff;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16), 0 0 0 1px #e0e3eb;
+  }
+
+  .toast-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12.5px;
+  }
+
+  .toast-head button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    opacity: 0.65;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+
+  .toast-head button:hover {
+    opacity: 1;
+  }
+
+  .toast-body {
+    font-size: 12px;
+    opacity: 0.85;
+    line-height: 1.4;
   }
 </style>
