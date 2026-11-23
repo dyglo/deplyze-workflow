@@ -49,9 +49,9 @@ function renderInline(raw: string): string {
     return `<a href="${escapeHtml(cleanUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   });
 
-  // Bold **text** or __text__
-  text = text.replace(/\*\*([^*]+)\*\*/g, (_m, inner: string) => renderBoldWithBias(inner));
-  text = text.replace(/__([^_]+)__/g, (_m, inner: string) => renderBoldWithBias(inner));
+  // Bold **text** or __text__ (non-greedy so inline symbols never break matching)
+  text = text.replace(/\*\*(.+?)\*\*/g, (_m, inner: string) => renderBoldWithBias(inner));
+  text = text.replace(/__(.+?)__/g, (_m, inner: string) => renderBoldWithBias(inner));
 
   // Italic *text*
   text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
@@ -125,11 +125,11 @@ export function renderMarkdown(source: string): string {
       continue;
     }
 
-    // Headings # .. ####
-    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    // Headings # .. ######
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
-      const tag = level === 1 ? 'h3' : level === 2 ? 'h3' : level === 3 ? 'h4' : 'h5';
+      const tag = level <= 2 ? 'h3' : level === 3 ? 'h4' : 'h5';
       html.push(`<${tag}>${renderInline(headingMatch[2])}</${tag}>`);
       i += 1;
       continue;
@@ -228,4 +228,121 @@ export function renderMarkdown(source: string): string {
   }
 
   return html.join('');
+}
+
+function stripInlineMarkdown(raw: string): string {
+  return raw
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1 ($2)')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .trim();
+}
+
+/**
+ * Converts Markdown AI output into clean, readable plain text for the plain-text Notes editor
+ * (no raw #, **, or |---| table syntax).
+ */
+export function markdownToCleanText(source: string): string {
+  if (!source) return '';
+  const lines = source.replace(/\r\n/g, '\n').split('\n');
+  const out: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const trimmed = lines[i].trim();
+
+    if (!trimmed) {
+      if (out.length > 0 && out[out.length - 1] !== '') {
+        out.push('');
+      }
+      i += 1;
+      continue;
+    }
+
+    // Fenced code block
+    if (trimmed.startsWith('```')) {
+      i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        out.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      continue;
+    }
+
+    // Horizontal rule -> blank separator
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+      i += 1;
+      continue;
+    }
+
+    // Headings
+    const headingMatch = trimmed.match(/^#{1,6}\s+(.+)$/);
+    if (headingMatch) {
+      if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+      out.push(stripInlineMarkdown(headingMatch[1]));
+      i += 1;
+      continue;
+    }
+
+    // GFM Table -> clean bulleted rows without raw pipes
+    if (trimmed.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      const headers = splitTableRow(lines[i]).map((h) => stripInlineMarkdown(h));
+      i += 2;
+      while (i < lines.length) {
+        const rowLine = lines[i].trim();
+        if (!rowLine || !rowLine.includes('|')) break;
+        const cells = splitTableRow(rowLine).map((c) => stripInlineMarkdown(c));
+        const first = cells[0] ?? '';
+        const rest: string[] = [];
+        for (let c = 1; c < cells.length; c++) {
+          const val = cells[c];
+          if (!val || val === '-' || val === '—') continue;
+          const label = headers[c];
+          rest.push(label ? `${label}: ${val}` : val);
+        }
+        if (first && rest.length > 0) {
+          out.push(`• ${first} — ${rest.join(' · ')}`);
+        } else if (first) {
+          out.push(`• ${first}`);
+        } else if (rest.length > 0) {
+          out.push(`• ${rest.join(' · ')}`);
+        }
+        i += 1;
+      }
+      out.push('');
+      continue;
+    }
+
+    // Blockquote
+    if (trimmed.startsWith('>')) {
+      out.push(stripInlineMarkdown(trimmed.replace(/^>\s?/, '')));
+      i += 1;
+      continue;
+    }
+
+    // Unordered list
+    if (/^[-*+]\s+/.test(trimmed)) {
+      out.push(`• ${stripInlineMarkdown(trimmed.replace(/^[-*+]\s+/, ''))}`);
+      i += 1;
+      continue;
+    }
+
+    // Ordered list
+    const orderedMatch = trimmed.match(/^(\d+\.)\s+(.+)$/);
+    if (orderedMatch) {
+      out.push(`${orderedMatch[1]} ${stripInlineMarkdown(orderedMatch[2])}`);
+      i += 1;
+      continue;
+    }
+
+    out.push(stripInlineMarkdown(trimmed));
+    i += 1;
+  }
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }

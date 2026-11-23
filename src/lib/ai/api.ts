@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { loadNotes, saveImageFromBlob, saveNotes } from '../notes/api';
 import type { Note, NoteAttachment } from '../notes/types';
+import { markdownToCleanText } from './markdown';
 import type {
   AiChartContext,
   AiConversation,
@@ -330,7 +331,7 @@ export async function saveAnalysisToNotes(params: {
   const note: Note = {
     id: noteId,
     title,
-    body: params.analysis.trim(),
+    body: markdownToCleanText(params.analysis),
     date,
     symbol: params.symbol,
     fullSymbol: params.fullSymbol,

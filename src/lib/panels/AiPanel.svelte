@@ -666,7 +666,7 @@
                   </details>
                 {/if}
 
-                {#if isStreaming && isLastAssistant && !msg.content}
+                {#if isStreaming && isLastAssistant && !msg.content && !(msg.reasoning && msg.reasoning.trim().length > 0)}
                   <div class="stream-status">
                     <span class="status-spinner"></span>
                     <span>{streamStatus || 'Analyzing...'}</span>
@@ -1063,6 +1063,8 @@
     width: 264px;
     max-height: 320px;
     overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
     padding: 6px;
     border-radius: 11px;
     border: 1px solid var(--ai-popover-border);
@@ -1070,6 +1072,10 @@
     box-shadow: var(--ai-popover-shadow);
     backdrop-filter: blur(18px);
     z-index: 20;
+  }
+
+  .chat-popover::-webkit-scrollbar {
+    display: none;
   }
 
   .chat-menu-new {
@@ -1214,8 +1220,14 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 12px 16px 14px;
-    scrollbar-width: thin;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+  }
+
+  .thread::-webkit-scrollbar {
+    display: none;
   }
 
   .thread.empty {
@@ -1363,15 +1375,22 @@
   }
 
   .reasoning-body {
-    padding: 0 10px 9px;
+    padding: 8px 10px 9px;
     color: var(--ai-secondary);
     line-height: 1.45;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
     word-break: break-word;
     max-height: 180px;
     overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
     border-top: 1px solid var(--ai-border-soft);
-    padding-top: 8px;
+  }
+
+  .reasoning-body::-webkit-scrollbar {
+    display: none;
   }
 
   .stream-status {
@@ -1485,6 +1504,11 @@
     border-radius: 8px;
     background: var(--ai-code-bg);
     overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .md-content :global(pre::-webkit-scrollbar) {
+    display: none;
   }
 
   .md-content :global(pre code) {
@@ -1518,6 +1542,11 @@
     border: 1px solid var(--ai-border);
     border-radius: 9px;
     overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .md-content :global(.md-table-wrap::-webkit-scrollbar) {
+    display: none;
   }
 
   .md-content :global(table) {
@@ -1528,18 +1557,19 @@
   }
 
   .md-content :global(th) {
-    padding: 7px 9px;
+    padding: 7px 8px;
     font-weight: 600;
     color: var(--ai-secondary);
     background: var(--ai-table-head);
     border-bottom: 1px solid var(--ai-border);
-    white-space: nowrap;
+    white-space: normal;
   }
 
   .md-content :global(td) {
-    padding: 7px 9px;
+    padding: 7px 8px;
     border-bottom: 1px solid var(--ai-border-soft);
     vertical-align: top;
+    overflow-wrap: anywhere;
   }
 
   .md-content :global(tbody tr:last-child td) {
