@@ -187,15 +187,15 @@
 
 <style>
   .color-popover {
-    --cp-bg: #1e222d;
-    --cp-border: #2a2e39;
-    --cp-divider: #2a2e39;
-    --cp-text: #d1d4dc;
-    --cp-secondary: #787b86;
-    --cp-ring: #d1d4dc;
-    --cp-checker-a: #363a45;
-    --cp-checker-b: #1e222d;
-    --cp-shadow: 0 12px 32px rgba(0, 0, 0, 0.65), 0 0 0 1px #2a2e39;
+    --cp-bg: rgba(22, 22, 22, 0.88);
+    --cp-border: rgba(255, 255, 255, 0.12);
+    --cp-divider: rgba(255, 255, 255, 0.09);
+    --cp-text: #f0f0f0;
+    --cp-secondary: #8c8c92;
+    --cp-ring: #f0f0f0;
+    --cp-checker-a: #343436;
+    --cp-checker-b: #1c1c1e;
+    --cp-shadow: 0 14px 36px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.1);
 
     position: fixed;
     z-index: 200;
@@ -204,6 +204,8 @@
     border-radius: 10px;
     color: var(--cp-text);
     background: var(--cp-bg);
+    -webkit-backdrop-filter: blur(20px) saturate(135%);
+    backdrop-filter: blur(20px) saturate(135%);
     box-shadow: var(--cp-shadow);
     user-select: none;
   }
@@ -218,6 +220,8 @@
     --cp-checker-a: #d5d8de;
     --cp-checker-b: #ffffff;
     --cp-shadow: 0 8px 28px rgba(0, 0, 0, 0.16), 0 1px 4px rgba(0, 0, 0, 0.08);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   .palette {

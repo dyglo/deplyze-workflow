@@ -725,25 +725,25 @@
 
 <style>
   .settings-modal {
-    --sm-bg: #131722;
-    --sm-border: #2a2e39;
-    --sm-divider: #2a2e39;
-    --sm-text: #d1d4dc;
-    --sm-secondary: #787b86;
-    --sm-nav-active: #1e222d;
-    --sm-nav-hover: rgba(255, 255, 255, 0.04);
-    --sm-control-bg: #131722;
-    --sm-control-muted: #1e222d;
-    --sm-control-border: #363a45;
-    --sm-check-bg: #d1d4dc;
-    --sm-check-fg: #000000;
-    --sm-check-border: #50535e;
-    --sm-ok-bg: #d1d4dc;
-    --sm-ok-fg: #000000;
-    --sm-cancel-border: #50535e;
-    --sm-checker-a: #2a2e39;
-    --sm-checker-b: #1a1e29;
-    --sm-shadow: 0 16px 48px rgba(0, 0, 0, 0.72), 0 0 0 1px #2a2e39;
+    --sm-bg: rgba(18, 18, 18, 0.84);
+    --sm-border: rgba(255, 255, 255, 0.1);
+    --sm-divider: rgba(255, 255, 255, 0.09);
+    --sm-text: #f0f0f0;
+    --sm-secondary: #8c8c92;
+    --sm-nav-active: rgba(255, 255, 255, 0.1);
+    --sm-nav-hover: rgba(255, 255, 255, 0.05);
+    --sm-control-bg: rgba(16, 16, 16, 0.62);
+    --sm-control-muted: rgba(255, 255, 255, 0.08);
+    --sm-control-border: rgba(255, 255, 255, 0.16);
+    --sm-check-bg: #f0f0f0;
+    --sm-check-fg: #0d0d0d;
+    --sm-check-border: rgba(255, 255, 255, 0.42);
+    --sm-ok-bg: #f0f0f0;
+    --sm-ok-fg: #0d0d0d;
+    --sm-cancel-border: rgba(255, 255, 255, 0.48);
+    --sm-checker-a: #343436;
+    --sm-checker-b: #1c1c1e;
+    --sm-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
 
     position: fixed;
     z-index: 100;
@@ -756,6 +756,8 @@
     border-radius: 12px;
     color: var(--sm-text);
     background: var(--sm-bg);
+    -webkit-backdrop-filter: blur(22px) saturate(135%);
+    backdrop-filter: blur(22px) saturate(135%);
     box-shadow: var(--sm-shadow);
     overflow: hidden;
     user-select: none;
@@ -782,6 +784,8 @@
     --sm-checker-a: #d5d8de;
     --sm-checker-b: #ffffff;
     --sm-shadow: 0 12px 40px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.08);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   /* Header */

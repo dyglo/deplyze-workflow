@@ -85,14 +85,14 @@
 
 <style>
   .layout-popover {
-    --lp-bg: #131722;
-    --lp-divider: #2a2e39;
-    --lp-text: #d1d4dc;
-    --lp-number: #787b86;
-    --lp-hover: rgba(255, 255, 255, 0.08);
-    --lp-selected-bg: #d1d4dc;
-    --lp-selected-fg: #000000;
-    --lp-shadow: 0 12px 36px rgba(0, 0, 0, 0.68), 0 0 0 1px #2a2e39;
+    --lp-bg: rgba(18, 18, 18, 0.84);
+    --lp-divider: rgba(255, 255, 255, 0.09);
+    --lp-text: #f0f0f0;
+    --lp-number: #8c8c92;
+    --lp-hover: rgba(255, 255, 255, 0.09);
+    --lp-selected-bg: #f0f0f0;
+    --lp-selected-fg: #0d0d0d;
+    --lp-shadow: 0 16px 44px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
 
     position: fixed;
     z-index: 150;
@@ -102,6 +102,8 @@
     border-radius: 10px;
     color: var(--lp-text);
     background: var(--lp-bg);
+    -webkit-backdrop-filter: blur(22px) saturate(135%);
+    backdrop-filter: blur(22px) saturate(135%);
     box-shadow: var(--lp-shadow);
     user-select: none;
     transition: color 150ms ease, background-color 150ms ease;
@@ -116,6 +118,8 @@
     --lp-selected-bg: #1e222d;
     --lp-selected-fg: #ffffff;
     --lp-shadow: 0 10px 32px rgba(0, 0, 0, 0.16), 0 1px 4px rgba(0, 0, 0, 0.08);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   .layout-row {
