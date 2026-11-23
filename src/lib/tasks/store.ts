@@ -37,6 +37,14 @@ export interface TasksState {
 
 const STORAGE_KEY = 'tasks';
 
+let tasksCache: TasksState | null = null;
+const tasksListeners = new Set<(s: TasksState) => void>();
+
+function emitTasks(next: TasksState) {
+  tasksCache = next;
+  for (const fn of tasksListeners) fn(next);
+}
+
 export function createDefaultTasksState(): TasksState {
   return {
     rules: [
@@ -76,16 +84,59 @@ export function createDefaultTasksState(): TasksState {
 export async function loadTasksState(): Promise<TasksState> {
   const def = createDefaultTasksState();
   const loaded = await loadWorkspaceJson<TasksState>(STORAGE_KEY, def);
-  if (!loaded || !Array.isArray(loaded.rules)) return def;
-  return {
-    rules: loaded.rules,
-    todos: Array.isArray(loaded.todos) ? loaded.todos : def.todos,
-    risk: { ...def.risk, ...(loaded.risk ?? {}) }
-  };
+  const normalized: TasksState =
+    !loaded || !Array.isArray(loaded.rules)
+      ? def
+      : {
+          rules: loaded.rules,
+          todos: Array.isArray(loaded.todos) ? loaded.todos : def.todos,
+          risk: { ...def.risk, ...(loaded.risk ?? {}) }
+        };
+  emitTasks(normalized);
+  return normalized;
 }
 
 export async function saveTasksState(state: TasksState): Promise<void> {
+  emitTasks(state);
   await saveWorkspaceJson(STORAGE_KEY, state);
+}
+
+export function subscribeTasks(fn: (s: TasksState) => void): () => void {
+  tasksListeners.add(fn);
+  if (tasksCache) {
+    fn(tasksCache);
+  } else {
+    fn(createDefaultTasksState());
+    void loadTasksState();
+  }
+  return () => {
+    tasksListeners.delete(fn);
+  };
+}
+
+export async function appendPreTradeRule(
+  rawLabel: string
+): Promise<{ added: boolean; duplicate: boolean }> {
+  const label = rawLabel.trim().slice(0, 120);
+  if (!label) return { added: false, duplicate: false };
+
+  const current = tasksCache ?? (await loadTasksState());
+  const exists = current.rules.some((r) => r.label.trim().toLowerCase() === label.toLowerCase());
+  if (exists) return { added: false, duplicate: true };
+
+  const next: TasksState = {
+    ...current,
+    rules: [
+      ...current.rules,
+      {
+        id: makeWorkspaceId('rule'),
+        label,
+        checked: false
+      }
+    ]
+  };
+  await saveTasksState(next);
+  return { added: true, duplicate: false };
 }
 
 export interface InstrumentSpec {

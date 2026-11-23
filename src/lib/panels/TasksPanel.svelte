@@ -1,14 +1,41 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import PanelShell from './PanelShell.svelte';
-  import { formatQuotePrice } from '../watchlist/store';
+  import {
+    fetchCalendarWeek,
+    getLocalTimeZone,
+    getTodayIso,
+    getWeekStart,
+    type EconomicEvent
+  } from '../calendar/api';
+  import {
+    computeAlignment,
+    fetchMacroRegime,
+    findNearestHighImpactForSymbol,
+    getCachedMacroRegime,
+    normalizeShortSymbol,
+    resolveMacroForSymbol,
+    type MacroRegimeResponse
+  } from '../insights/api';
+  import {
+    computePlaybookEdge,
+    formatRMultiple,
+    subscribePlaybook,
+    type PlaybookState
+  } from '../playbook/store';
+  import {
+    formatQuotePrice,
+    loadWatchlistState,
+    type BiasDirection,
+    type WatchlistState
+  } from '../watchlist/store';
   import { makeWorkspaceId } from '../workspace/storage';
   import {
     calculatePositionSize,
     createDefaultTasksState,
-    loadTasksState,
     logPreTradePlanToNotes,
     saveTasksState,
+    subscribeTasks,
     type TasksState
   } from '../tasks/store';
 
@@ -35,6 +62,61 @@
   let showContractOverride = $state(false);
   let loggedFeedback = $state(false);
 
+  // Live Pre-Trade Guardrail inputs (Calendar + Macro Regime + Watchlist Bias + Playbook Edge)
+  let playbookState = $state<PlaybookState>({ entries: [], customSetupTypes: [] });
+  let watchlistState = $state<WatchlistState | null>(null);
+  let macroRegime = $state<MacroRegimeResponse | null>(getCachedMacroRegime());
+  let calendarEventsByDate = $state<Record<string, EconomicEvent[]>>({});
+  let calendarLoaded = $state(false);
+
+  const normalizedActiveSym = $derived(normalizeShortSymbol(activeSymbol || 'XAUUSD'));
+
+  const upcomingNewsRisk = $derived(
+    findNearestHighImpactForSymbol(calendarEventsByDate, normalizedActiveSym, 12)
+  );
+
+  const symbolWatchlistBias = $derived.by((): BiasDirection => {
+    if (!watchlistState) return 'none';
+    const activeGroup =
+      watchlistState.groups.find((g) => g.id === watchlistState?.activeGroupId) ??
+      watchlistState.groups[0];
+    if (!activeGroup) return 'none';
+    for (const sec of activeGroup.sections) {
+      for (const item of sec.items) {
+        if (normalizeShortSymbol(item.shortName) === normalizedActiveSym) {
+          return item.bias;
+        }
+      }
+    }
+    return 'none';
+  });
+
+  const symbolMacro = $derived(resolveMacroForSymbol(macroRegime, normalizedActiveSym));
+  const macroAlignment = $derived(computeAlignment(symbolMacro?.bias, symbolWatchlistBias));
+
+  const symbolPlaybookEdge = $derived.by(() => {
+    const matching = playbookState.entries.filter(
+      (e) => normalizeShortSymbol(e.symbol) === normalizedActiveSym
+    );
+    return computePlaybookEdge(matching);
+  });
+
+  const guardrailStatus = $derived.by((): { tone: 'warn' | 'ok' | 'neutral'; label: string } => {
+    if (upcomingNewsRisk && (upcomingNewsRisk.level === 'danger' || upcomingNewsRisk.level === 'caution')) {
+      return { tone: 'warn', label: 'Caution' };
+    }
+    if (macroAlignment === 'conflict') {
+      return { tone: 'warn', label: 'Conflict' };
+    }
+    if (macroAlignment === 'aligned') {
+      return { tone: 'ok', label: 'Aligned' };
+    }
+    if (symbolMacro?.bias === 'tailwind' || symbolMacro?.bias === 'headwind') {
+      return { tone: 'neutral', label: symbolMacro.bias === 'tailwind' ? 'Tailwind' : 'Headwind' };
+    }
+    return { tone: 'neutral', label: 'Live' };
+  });
+
   const checkedCount = $derived(tasksState.rules.filter((r) => r.checked).length);
   const totalRules = $derived(tasksState.rules.length);
   const allReady = $derived(totalRules > 0 && checkedCount === totalRules);
@@ -51,9 +133,44 @@
   const openTodoCount = $derived(tasksState.todos.filter((t) => !t.done).length);
 
   onMount(() => {
-    void loadTasksState().then((loaded) => {
+    const unsubTasks = subscribeTasks((loaded) => {
       tasksState = loaded;
     });
+    const unsubPlaybook = subscribePlaybook((pb) => {
+      playbookState = pb;
+    });
+
+    void loadWatchlistState()
+      .then((wl) => {
+        watchlistState = wl;
+      })
+      .catch(() => {
+        // non-fatal
+      });
+
+    void fetchMacroRegime()
+      .then((r) => {
+        macroRegime = r;
+      })
+      .catch(() => {
+        // non-fatal
+      });
+
+    const tz = getLocalTimeZone();
+    const todayIso = getTodayIso(tz);
+    void fetchCalendarWeek(getWeekStart(todayIso), tz)
+      .then((res) => {
+        calendarEventsByDate = res.eventsByDate ?? {};
+        calendarLoaded = true;
+      })
+      .catch(() => {
+        calendarLoaded = true;
+      });
+
+    return () => {
+      unsubTasks();
+      unsubPlaybook();
+    };
   });
 
   function commit(next: TasksState) {
@@ -252,6 +369,83 @@
             {#if newRuleText.trim()}
               <button class="add-submit" type="button" onclick={addRule}>Add</button>
             {/if}
+          </div>
+        </div>
+
+        <!-- Live Pre-Trade Guardrail (Calendar Shield + Macro Alignment + Playbook Record) -->
+        <div class="section-card guardrail-card">
+          <div class="card-head">
+            <div class="head-left">
+              <span class="card-title">Live Guardrail</span>
+              <span class="sym-pill">{activeSymbol || 'XAUUSD'}</span>
+            </div>
+            <span
+              class="guard-status"
+              class:warn={guardrailStatus.tone === 'warn'}
+              class:ok={guardrailStatus.tone === 'ok'}
+            >
+              {guardrailStatus.label}
+            </span>
+          </div>
+
+          <div class="guard-rows">
+            <div class="guard-row">
+              <span
+                class="guard-dot"
+                class:danger={upcomingNewsRisk?.level === 'danger'}
+                class:warn={upcomingNewsRisk?.level === 'caution'}
+                class:ok={calendarLoaded && !upcomingNewsRisk}
+              ></span>
+              <span class="guard-key">News</span>
+              <span class="guard-val">
+                {#if upcomingNewsRisk}
+                  {upcomingNewsRisk.event.country} {upcomingNewsRisk.event.title} in {upcomingNewsRisk.countdownLabel}
+                {:else if calendarLoaded}
+                  Clear — no red-folder event in 12h
+                {:else}
+                  Checking schedule...
+                {/if}
+              </span>
+            </div>
+
+            <div class="guard-row">
+              <span
+                class="guard-dot"
+                class:ok={macroAlignment === 'aligned' || (macroAlignment === 'neutral' && symbolMacro?.bias === 'tailwind')}
+                class:warn={macroAlignment === 'conflict'}
+                class:danger={macroAlignment === 'neutral' && symbolMacro?.bias === 'headwind'}
+              ></span>
+              <span class="guard-key">Macro</span>
+              <span class="guard-val">
+                {#if symbolMacro}
+                  {#if macroAlignment === 'aligned'}
+                    {symbolMacro.bias === 'tailwind' ? 'Tailwind' : 'Headwind'} aligns with {symbolWatchlistBias} bias
+                  {:else if macroAlignment === 'conflict'}
+                    Conflict: {symbolMacro.bias === 'tailwind' ? 'Tailwind' : 'Headwind'} vs {symbolWatchlistBias} bias
+                  {:else}
+                    {symbolMacro.reason}
+                  {/if}
+                {:else}
+                  Reading macro yields & DXY...
+                {/if}
+              </span>
+            </div>
+
+            <div class="guard-row">
+              <span
+                class="guard-dot"
+                class:ok={symbolPlaybookEdge.totalR !== null && symbolPlaybookEdge.totalR > 0}
+                class:danger={symbolPlaybookEdge.totalR !== null && symbolPlaybookEdge.totalR < 0}
+              ></span>
+              <span class="guard-key">Edge</span>
+              <span class="guard-val">
+                {#if symbolPlaybookEdge.totalLogged > 0}
+                  {#if symbolPlaybookEdge.winRatePct !== null}{symbolPlaybookEdge.winRatePct}% Win · {/if}{#if symbolPlaybookEdge.totalR !== null}{formatRMultiple(symbolPlaybookEdge.totalR)} · {/if}{symbolPlaybookEdge.totalLogged} {symbolPlaybookEdge.totalLogged === 1 ? 'setup' : 'setups'}
+                {:else}
+                  No {activeSymbol || 'XAUUSD'} setups logged in Playbook
+                {/if}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -1025,5 +1219,83 @@
     text-align: center;
     font-size: 12.5px;
     color: var(--tk-secondary);
+  }
+
+  /* Live Pre-Trade Guardrail */
+  .guardrail-card {
+    gap: 8px;
+  }
+
+  .guard-status {
+    padding: 2px 7px;
+    border-radius: 99px;
+    font-size: 10.5px;
+    font-weight: 600;
+    background: var(--tk-surface);
+    color: var(--tk-secondary);
+  }
+
+  .guard-status.ok {
+    background: rgba(8, 153, 129, 0.14);
+    color: #089981;
+  }
+
+  .guard-status.warn {
+    background: rgba(245, 158, 11, 0.16);
+    color: #f59e0b;
+  }
+
+  .guard-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .guard-row {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    font-size: 11.5px;
+    line-height: 1.35;
+  }
+
+  .guard-dot {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    border-radius: 50%;
+    background: var(--tk-secondary);
+    opacity: 0.55;
+    transform: translateY(-1px);
+  }
+
+  .guard-dot.ok {
+    background: #089981;
+    opacity: 1;
+  }
+
+  .guard-dot.warn {
+    background: #f59e0b;
+    opacity: 1;
+  }
+
+  .guard-dot.danger {
+    background: #f23645;
+    opacity: 1;
+  }
+
+  .guard-key {
+    width: 38px;
+    flex: 0 0 38px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--tk-secondary);
+  }
+
+  .guard-val {
+    flex: 1;
+    min-width: 0;
+    color: var(--tk-text);
+    font-variant-numeric: tabular-nums;
   }
 </style>

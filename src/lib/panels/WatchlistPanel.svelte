@@ -4,6 +4,17 @@
   import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import { loadNotes } from '../notes/api';
   import { subscribeAlerts, type AlertsState } from '../alerts/store';
+  import {
+    computeAlignment,
+    fetchMacroRegime,
+    fetchSymbolBrief,
+    getCachedMacroRegime,
+    normalizeShortSymbol,
+    resolveMacroForSymbol,
+    type MacroBias,
+    type MacroRegimeResponse,
+    type SymbolBriefResponse
+  } from '../insights/api';
   import { makeWorkspaceId } from '../workspace/storage';
   import {
     SYMBOL_CATALOG,
@@ -51,6 +62,12 @@
   let quotes = $state<Record<string, MarketQuote>>({});
   let notesCountBySymbol = $state<Record<string, number>>({});
   let alertsState = $state<AlertsState>({ alerts: [], log: [] });
+  let macroRegime = $state<MacroRegimeResponse | null>(getCachedMacroRegime());
+  let briefOpen = $state(false);
+  let briefLoading = $state(false);
+  let briefError = $state<string | null>(null);
+  let symbolBrief = $state<SymbolBriefResponse | null>(null);
+  let briefForceNonce = $state(0);
 
   let selectedItemId = $state<string | null>(null);
   let groupMenuOpen = $state(false);
@@ -210,6 +227,13 @@
       void refreshQuotes();
     });
     void refreshNotesCounts();
+    void fetchMacroRegime()
+      .then((r) => {
+        macroRegime = r;
+      })
+      .catch(() => {
+        // non-fatal
+      });
 
     pollTimer = setInterval(() => {
       void refreshQuotes();
@@ -227,6 +251,65 @@
       unsubAlerts();
       if (pollTimer) clearInterval(pollTimer);
       window.removeEventListener('pointerdown', onDocDown);
+    };
+  });
+
+  function macroBiasLabel(bias: MacroBias): string {
+    if (bias === 'tailwind') return 'Tailwind';
+    if (bias === 'headwind') return 'Headwind';
+    return 'Neutral';
+  }
+
+  function sourceHost(url: string): string {
+    try {
+      return new URL(url).hostname.replace(/^www\./i, '');
+    } catch {
+      return 'source';
+    }
+  }
+
+  function shortDriverLabel(label: string): string {
+    if (label.includes('Real 10Y')) return 'Real 10Y';
+    if (label.includes('US 10Y')) return 'US 10Y';
+    if (label.includes('US 2Y')) return 'US 2Y';
+    if (label.includes('DXY')) return 'DXY';
+    if (label.includes('VIX')) return 'VIX';
+    if (label.includes('SPX')) return 'SPX';
+    if (label.includes('WTI')) return 'WTI';
+    return label.slice(0, 12);
+  }
+
+  $effect(() => {
+    if (!briefOpen) return;
+    const item = selectedItem;
+    if (!item) return;
+    const autoBias = quotes[item.symbol]?.autoBias;
+    const techBias = effectiveBias(item, autoBias).bias;
+    const force = briefForceNonce > 0;
+    const targetShort = normalizeShortSymbol(item.shortName);
+    const controller = new AbortController();
+
+    if (!symbolBrief || normalizeShortSymbol(symbolBrief.shortName) !== targetShort || force) {
+      briefLoading = true;
+    }
+    briefError = null;
+
+    fetchSymbolBrief(item.symbol, techBias, { force, signal: controller.signal })
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        symbolBrief = res;
+        briefLoading = false;
+        if (force) briefForceNonce = 0;
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        briefError = err instanceof Error ? err.message : 'Unable to load macro brief';
+        briefLoading = false;
+        if (force) briefForceNonce = 0;
+      });
+
+    return () => {
+      controller.abort();
     };
   });
 
@@ -644,6 +727,8 @@
           {#each sec.items as item (item.id)}
             {@const q = resolveQuote(item)}
             {@const eff = effectiveBias(item, q.autoBias)}
+            {@const rowMacro = resolveMacroForSymbol(macroRegime, item.shortName)}
+            {@const rowAlign = computeAlignment(rowMacro?.bias, eff.bias)}
             {@const isSelected = selectedItem?.id === item.id}
             {@const isUp = (q.changePercent ?? 0) > 0}
             {@const isDown = (q.changePercent ?? 0) < 0}
@@ -673,6 +758,19 @@
                     class:range={eff.bias === 'range'}
                     title="{eff.isAuto ? 'Auto HTF Bias' : 'Manual HTF Bias'}: {eff.bias}"
                   ></span>
+                {/if}
+
+                {#if rowAlign === 'aligned' || rowAlign === 'conflict'}
+                  <span
+                    class="macro-pip"
+                    class:aligned={rowAlign === 'aligned'}
+                    class:conflict={rowAlign === 'conflict'}
+                    title={rowAlign === 'aligned'
+                      ? `TA + Macro Aligned · ${rowMacro?.reason ?? ''}`
+                      : `TA vs Macro Conflict · ${rowMacro?.reason ?? ''}`}
+                  >
+                    M
+                  </span>
                 {/if}
               </div>
 
@@ -719,6 +817,14 @@
       {@const isDown = (sq.changePercent ?? 0) < 0}
       {@const noteCnt = notesCountFor(selectedItem.shortName)}
       {@const alertCnt = alertsCountFor(selectedItem)}
+      {@const selMacro = resolveMacroForSymbol(macroRegime, selectedItem.shortName)}
+      {@const activeBrief =
+        symbolBrief &&
+        normalizeShortSymbol(symbolBrief.shortName) === normalizeShortSymbol(selectedItem.shortName)
+          ? symbolBrief
+          : null}
+      {@const selFundBias = activeBrief?.fundamentalBias ?? selMacro?.bias ?? 'neutral'}
+      {@const selAlign = computeAlignment(selFundBias, seff.bias)}
       <div class="detail-sheet">
         <div class="detail-header">
           <div class="detail-title-wrap">
@@ -838,6 +944,116 @@
               <strong>{alertCnt}</strong>
             </button>
           </div>
+        </div>
+
+        <!-- Quiet Macro & Fundamental Brief (non-TA yields, cross-asset & catalyst layer) -->
+        <div class="macro-card" class:open={briefOpen}>
+          <div class="macro-head-row">
+            <button
+              class="macro-toggle"
+              type="button"
+              aria-expanded={briefOpen}
+              onclick={() => (briefOpen = !briefOpen)}
+            >
+              <span class="macro-title">Macro Brief</span>
+              <span
+                class="macro-pill"
+                class:tailwind={selFundBias === 'tailwind'}
+                class:headwind={selFundBias === 'headwind'}
+              >
+                {macroBiasLabel(selFundBias)}
+              </span>
+              {#if selAlign === 'aligned'}
+                <span class="align-pill aligned" title="Technical HTF bias aligns with macro backdrop">
+                  Aligned
+                </span>
+              {:else if selAlign === 'conflict'}
+                <span class="align-pill conflict" title="Technical HTF bias conflicts with macro backdrop">
+                  Conflict
+                </span>
+              {/if}
+              <svg class="macro-chev" class:open={briefOpen} viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+              </svg>
+            </button>
+
+            {#if briefOpen}
+              <button
+                class="macro-refresh"
+                type="button"
+                title="Refresh macro brief"
+                aria-label="Refresh macro brief"
+                disabled={briefLoading}
+                onclick={() => (briefForceNonce += 1)}
+              >
+                <svg class:spin={briefLoading} viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M13 8a5 5 0 1 1-1.3-3.36" />
+                  <path d="M13 3.25v2.75h-2.75" />
+                </svg>
+              </button>
+            {/if}
+          </div>
+
+          {#if briefOpen}
+            <div class="macro-body">
+              {#if briefLoading && !activeBrief}
+                <div class="macro-status">Reading yields, cross-asset flows & catalysts...</div>
+              {:else if briefError && !activeBrief}
+                <div class="macro-status">
+                  <span>Macro brief unavailable.</span>
+                  <button
+                    class="macro-retry"
+                    type="button"
+                    onclick={() => (briefForceNonce += 1)}
+                  >
+                    Retry
+                  </button>
+                </div>
+              {:else if activeBrief}
+                <div class="macro-headline">{activeBrief.headlineSummary}</div>
+
+                {#if activeBrief.drivers.length > 0}
+                  <div class="driver-grid">
+                    {#each activeBrief.drivers as d (d.label)}
+                      <div
+                        class="driver-tile"
+                        class:bull={d.impact === 'bull'}
+                        class:bear={d.impact === 'bear'}
+                        title="{d.label}: {d.note}"
+                      >
+                        <span class="drv-lbl">{shortDriverLabel(d.label)}</span>
+                        <span class="drv-val">{d.value}</span>
+                        <span class="drv-delta">{d.delta}</span>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+
+                <div class="catalyst-list">
+                  <div class="cat-line">
+                    <span class="cat-k">Driver</span>
+                    <span class="cat-v">{activeBrief.primaryDriver}</span>
+                  </div>
+                  <div class="cat-line">
+                    <span class="cat-k">Risk</span>
+                    <span class="cat-v">{activeBrief.keyRisk}</span>
+                  </div>
+                  <div class="cat-line">
+                    <span class="cat-k">Invalidation</span>
+                    <span class="cat-v">{activeBrief.invalidationCatalyst}</span>
+                  </div>
+                </div>
+
+                {#if activeBrief.sources.length > 0}
+                  <div class="macro-sources">
+                    {#each activeBrief.sources as src (src.url)}
+                      <span class="src-chip" title={src.title}>{sourceHost(src.url)}</span>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <!-- Performance 6-tile grid (like TradingView bottom sheet) -->
@@ -1631,5 +1847,310 @@
   .perf-lbl {
     font-size: 10.5px;
     color: var(--wl-secondary);
+  }
+
+  /* Row-level quiet Macro-TA alignment pip */
+  .macro-pip {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    border-radius: 4px;
+    display: grid;
+    place-items: center;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+  }
+
+  .macro-pip.aligned {
+    background: var(--wl-pos-bg);
+    color: #089981;
+  }
+
+  .macro-pip.conflict {
+    background: rgba(245, 158, 11, 0.16);
+    color: #f59e0b;
+  }
+
+  /* Bottom detail sheet Macro & Fundamental Brief card */
+  .macro-card {
+    border-radius: 9px;
+    border: 1px solid var(--wl-border-soft);
+    background: var(--wl-surface);
+    overflow: hidden;
+  }
+
+  .macro-card.open {
+    border-color: var(--wl-border);
+  }
+
+  .macro-head-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .macro-toggle {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 9px;
+    border: 0;
+    background: transparent;
+    color: var(--wl-text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .macro-toggle:hover {
+    background: var(--wl-hover);
+  }
+
+  .macro-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--wl-text);
+    white-space: nowrap;
+  }
+
+  .macro-pill,
+  .align-pill {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.45;
+    white-space: nowrap;
+  }
+
+  .macro-pill {
+    background: var(--wl-hover);
+    color: var(--wl-secondary);
+  }
+
+  .macro-pill.tailwind {
+    background: var(--wl-pos-bg);
+    color: #089981;
+  }
+
+  .macro-pill.headwind {
+    background: var(--wl-neg-bg);
+    color: #f23645;
+  }
+
+  .align-pill.aligned {
+    background: var(--wl-pos-bg);
+    color: #089981;
+  }
+
+  .align-pill.conflict {
+    background: rgba(245, 158, 11, 0.16);
+    color: #f59e0b;
+  }
+
+  .macro-chev {
+    margin-left: auto;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    fill: none;
+    stroke: var(--wl-secondary);
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform 140ms ease;
+  }
+
+  .macro-chev.open {
+    transform: rotate(180deg);
+  }
+
+  .macro-refresh {
+    width: 26px;
+    height: 26px;
+    margin-right: 4px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--wl-secondary);
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+
+  .macro-refresh:hover:not(:disabled) {
+    color: var(--wl-text);
+    background: var(--wl-hover);
+  }
+
+  .macro-refresh:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  .macro-refresh svg {
+    width: 13px;
+    height: 13px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .macro-refresh svg.spin {
+    animation: wl-spin 0.9s linear infinite;
+  }
+
+  @keyframes wl-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .macro-body {
+    padding: 0 9px 9px;
+    border-top: 1px solid var(--wl-border-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .macro-status {
+    padding-top: 8px;
+    font-size: 11.5px;
+    color: var(--wl-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .macro-retry {
+    border: 1px solid var(--wl-border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--wl-text);
+    padding: 2px 7px;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .macro-headline {
+    padding-top: 8px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--wl-text);
+    font-weight: 500;
+  }
+
+  .driver-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 5px;
+  }
+
+  .driver-tile {
+    padding: 6px 5px;
+    border-radius: 7px;
+    border: 1px solid var(--wl-border-soft);
+    background: var(--wl-bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .driver-tile.bull {
+    border-color: rgba(8, 153, 129, 0.28);
+  }
+
+  .driver-tile.bear {
+    border-color: rgba(242, 54, 69, 0.28);
+  }
+
+  .drv-lbl {
+    font-size: 9.5px;
+    color: var(--wl-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .drv-val {
+    font-size: 11.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--wl-text);
+  }
+
+  .drv-delta {
+    font-size: 10px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--wl-secondary);
+  }
+
+  .driver-tile.bull .drv-delta {
+    color: #089981;
+  }
+
+  .driver-tile.bear .drv-delta {
+    color: #f23645;
+  }
+
+  .catalyst-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .cat-line {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 11px;
+    line-height: 1.38;
+  }
+
+  .cat-k {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--wl-secondary);
+  }
+
+  .cat-v {
+    color: var(--wl-text);
+  }
+
+  .macro-sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-top: 2px;
+  }
+
+  .src-chip {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    color: var(--wl-secondary);
+    background: var(--wl-bg);
+    border: 1px solid var(--wl-border-soft);
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

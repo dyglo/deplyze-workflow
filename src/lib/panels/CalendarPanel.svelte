@@ -4,6 +4,12 @@
   import { subscribeAlerts, toggleNewsAlertForEvent } from '../alerts/store';
   import { FLAG_SVGS } from '../calendar/flags';
   import {
+    fetchEventPlaybook,
+    matchWatchlistExposure,
+    type EventPlaybookResponse
+  } from '../insights/api';
+  import { loadWatchlistState } from '../watchlist/store';
+  import {
     addDays,
     buildWeekDays,
     fetchCalendarWeek,
@@ -46,8 +52,35 @@
   let loadError = $state<string | null>(null);
   let refreshNonce = $state(0);
   let armedEventIds = $state<Record<string, boolean>>({});
+  let watchlistSymbols = $state<string[]>([]);
+  let expandedEventId = $state<string | null>(null);
+  let playbooks = $state<Record<string, EventPlaybookResponse>>({});
+  let playbookLoadingId = $state<string | null>(null);
+  let playbookErrors = $state<Record<string, string>>({});
 
   onMount(() => {
+    void loadWatchlistState()
+      .then((wl) => {
+        const syms: string[] = [];
+        const seen = new Set<string>();
+        const activeGroup = wl.groups.find((g) => g.id === wl.activeGroupId) ?? wl.groups[0];
+        if (activeGroup) {
+          for (const sec of activeGroup.sections) {
+            for (const item of sec.items) {
+              const s = item.shortName.toUpperCase();
+              if (!seen.has(s)) {
+                seen.add(s);
+                syms.push(s);
+              }
+            }
+          }
+        }
+        watchlistSymbols = syms;
+      })
+      .catch(() => {
+        // non-fatal
+      });
+
     return subscribeAlerts((s) => {
       const next: Record<string, boolean> = {};
       for (const a of s.alerts) {
@@ -58,6 +91,34 @@
       armedEventIds = next;
     });
   });
+
+  function toggleEventPlaybook(ev: EconomicEvent) {
+    if (ev.impact !== 'high') return;
+    if (expandedEventId === ev.id) {
+      expandedEventId = null;
+      return;
+    }
+    expandedEventId = ev.id;
+    if (playbooks[ev.id]) return;
+
+    playbookLoadingId = ev.id;
+    const nextErrs = { ...playbookErrors };
+    delete nextErrs[ev.id];
+    playbookErrors = nextErrs;
+
+    void fetchEventPlaybook(ev)
+      .then((res) => {
+        playbooks = { ...playbooks, [ev.id]: res };
+        if (playbookLoadingId === ev.id) playbookLoadingId = null;
+      })
+      .catch((err) => {
+        playbookErrors = {
+          ...playbookErrors,
+          [ev.id]: err instanceof Error ? err.message : 'Unable to load scenario playbook'
+        };
+        if (playbookLoadingId === ev.id) playbookLoadingId = null;
+      });
+  }
 
   function isUpcomingEvent(ts: number): boolean {
     return ts > Math.floor(Date.now() / 1000) + 60;
@@ -380,117 +441,215 @@
       {:else}
         {#each events as event (event.id)}
           {@const level = impactLevel(event.impact)}
-          <div class="event-row">
-            <div class="event-left">
-              <span class="time-badge" class:flagged={Boolean(event.flagged)}>
-                {event.time}
-              </span>
+          {@const isHigh = event.impact === 'high'}
+          {@const isExpanded = isHigh && expandedEventId === event.id}
+          {@const pb = isExpanded ? playbooks[event.id] : undefined}
+          {@const pbLoading = isExpanded && playbookLoadingId === event.id}
+          {@const pbErr = isExpanded ? playbookErrors[event.id] : undefined}
+          <div class="event-item" class:expanded={isExpanded}>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <div
+              class="event-row"
+              class:expandable={isHigh}
+              role={isHigh ? 'button' : undefined}
+              tabindex={isHigh ? 0 : undefined}
+              onclick={() => {
+                if (isHigh) toggleEventPlaybook(event);
+              }}
+              onkeydown={(e) => {
+                if (isHigh && (e.key === 'Enter' || e.key === ' ')) {
+                  e.preventDefault();
+                  toggleEventPlaybook(event);
+                }
+              }}
+            >
+              <div class="event-left">
+                <span class="time-badge" class:flagged={Boolean(event.flagged)}>
+                  {event.time}
+                </span>
 
-              <div class="event-indicators">
-                <svg
-                  class="flag-icon"
-                  viewBox="0 0 16 16"
-                  aria-label={event.country}
-                  role="img"
-                >
-                  {@html FLAG_SVGS[event.country] ?? FLAG_SVGS.US}
-                  <circle
-                    cx="8"
-                    cy="8"
-                    r="7.6"
-                    fill="none"
-                    stroke="var(--cal-flag-ring)"
-                    stroke-width="0.8"
-                  />
-                </svg>
-
-                <svg
-                  class="impact-bars"
-                  viewBox="0 0 14 12"
-                  aria-label="{event.impact} impact"
-                  role="img"
-                >
-                  <rect
-                    x="1"
-                    y="7"
-                    width="2.5"
-                    height="5"
-                    rx="0.9"
-                    class:filled={level >= 1}
-                  />
-                  <rect
-                    x="5.5"
-                    y="4"
-                    width="2.5"
-                    height="8"
-                    rx="0.9"
-                    class:filled={level >= 2}
-                  />
-                  <rect
-                    x="10"
-                    y="1"
-                    width="2.5"
-                    height="11"
-                    rx="0.9"
-                    class:filled={level >= 3}
-                  />
-                </svg>
-              </div>
-            </div>
-
-            <div class="event-main">
-              <div class="event-title-row">
-                <div class="event-title">{event.title}</div>
-                {#if isUpcomingEvent(event.ts)}
-                  {@const isArmed = Boolean(armedEventIds[event.id])}
-                  <button
-                    class="news-bell"
-                    class:armed={isArmed}
-                    type="button"
-                    title={isArmed
-                      ? '15-min pre-news alert active (click to remove)'
-                      : 'Notify me 15 min before release'}
-                    aria-label={isArmed ? 'Remove news alert' : 'Set 15-minute news alert'}
-                    onclick={() =>
-                      toggleNewsAlertForEvent({
-                        eventId: event.id,
-                        title: event.title,
-                        country: event.country,
-                        ts: event.ts,
-                        leadMinutes: 15
-                      })
-                    }
+                <div class="event-indicators">
+                  <svg
+                    class="flag-icon"
+                    viewBox="0 0 16 16"
+                    aria-label={event.country}
+                    role="img"
                   >
-                    <svg viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M8 2.25a3.75 3.75 0 0 0-3.75 3.75v2.2c0 .6-.22 1.18-.62 1.63l-.63.72h10l-.63-.72a2.45 2.45 0 0 1-.62-1.63V6A3.75 3.75 0 0 0 8 2.25Z" />
-                      <path d="M6.4 12.25a1.65 1.65 0 0 0 3.2 0" />
-                    </svg>
-                  </button>
+                    {@html FLAG_SVGS[event.country] ?? FLAG_SVGS.US}
+                    <circle
+                      cx="8"
+                      cy="8"
+                      r="7.6"
+                      fill="none"
+                      stroke="var(--cal-flag-ring)"
+                      stroke-width="0.8"
+                    />
+                  </svg>
+
+                  <svg
+                    class="impact-bars"
+                    viewBox="0 0 14 12"
+                    aria-label="{event.impact} impact"
+                    role="img"
+                  >
+                    <rect
+                      x="1"
+                      y="7"
+                      width="2.5"
+                      height="5"
+                      rx="0.9"
+                      class:filled={level >= 1}
+                    />
+                    <rect
+                      x="5.5"
+                      y="4"
+                      width="2.5"
+                      height="8"
+                      rx="0.9"
+                      class:filled={level >= 2}
+                    />
+                    <rect
+                      x="10"
+                      y="1"
+                      width="2.5"
+                      height="11"
+                      rx="0.9"
+                      class:filled={level >= 3}
+                    />
+                  </svg>
+                </div>
+              </div>
+
+              <div class="event-main">
+                <div class="event-title-row">
+                  <div class="event-title">{event.title}</div>
+                  <div class="event-row-actions">
+                    {#if isUpcomingEvent(event.ts)}
+                      {@const isArmed = Boolean(armedEventIds[event.id])}
+                      <button
+                        class="news-bell"
+                        class:armed={isArmed}
+                        type="button"
+                        title={isArmed
+                          ? '15-min pre-news alert active (click to remove)'
+                          : 'Notify me 15 min before release'}
+                        aria-label={isArmed ? 'Remove news alert' : 'Set 15-minute news alert'}
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          toggleNewsAlertForEvent({
+                            eventId: event.id,
+                            title: event.title,
+                            country: event.country,
+                            ts: event.ts,
+                            leadMinutes: 15
+                          });
+                        }}
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true">
+                          <path d="M8 2.25a3.75 3.75 0 0 0-3.75 3.75v2.2c0 .6-.22 1.18-.62 1.63l-.63.72h10l-.63-.72a2.45 2.45 0 0 1-.62-1.63V6A3.75 3.75 0 0 0 8 2.25Z" />
+                          <path d="M6.4 12.25a1.65 1.65 0 0 0 3.2 0" />
+                        </svg>
+                      </button>
+                    {/if}
+                    {#if isHigh}
+                      <span
+                        class="playbook-chev"
+                        class:open={isExpanded}
+                        title="Hot / Cold transmission playbook"
+                        aria-hidden="true"
+                      >
+                        <svg viewBox="0 0 16 16">
+                          <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                        </svg>
+                      </span>
+                    {/if}
+                  </div>
+                </div>
+                {#if event.actual || event.prior || event.forecast}
+                  <div class="event-meta">
+                    {#if event.actual}
+                      <span class="meta-pair">
+                        <span class="meta-label">Actual:</span>
+                        <span class="meta-value">{event.actual}</span>
+                      </span>
+                    {/if}
+                    {#if event.prior}
+                      <span class="meta-pair">
+                        <span class="meta-label">Prior:</span>
+                        <span class="meta-value">{event.prior}</span>
+                      </span>
+                    {/if}
+                    {#if event.forecast}
+                      <span class="meta-pair">
+                        <span class="meta-label">Forecast:</span>
+                        <span class="meta-value">{event.forecast}</span>
+                      </span>
+                    {/if}
+                  </div>
                 {/if}
               </div>
-              {#if event.actual || event.prior || event.forecast}
-                <div class="event-meta">
-                  {#if event.actual}
-                    <span class="meta-pair">
-                      <span class="meta-label">Actual:</span>
-                      <span class="meta-value">{event.actual}</span>
-                    </span>
-                  {/if}
-                  {#if event.prior}
-                    <span class="meta-pair">
-                      <span class="meta-label">Prior:</span>
-                      <span class="meta-value">{event.prior}</span>
-                    </span>
-                  {/if}
-                  {#if event.forecast}
-                    <span class="meta-pair">
-                      <span class="meta-label">Forecast:</span>
-                      <span class="meta-value">{event.forecast}</span>
-                    </span>
-                  {/if}
-                </div>
-              {/if}
             </div>
+
+            {#if isExpanded}
+              <div class="event-playbook">
+                {#if pbLoading && !pb}
+                  <div class="pb-state">Building Hot / Cold transmission playbook...</div>
+                {:else if pbErr && !pb}
+                  <div class="pb-state">Scenario playbook unavailable.</div>
+                {:else if pb}
+                  {@const exposed = matchWatchlistExposure(
+                    pb.affectedSymbols,
+                    event.country,
+                    watchlistSymbols
+                  )}
+                  <div class="pb-top">
+                    <span class="pb-cat">{pb.category} Playbook</span>
+                    {#if pb.recentTrend}
+                      <span class="pb-trend">{pb.recentTrend}</span>
+                    {/if}
+                  </div>
+
+                  <div class="pb-context">{pb.consensusContext}</div>
+
+                  <div class="pb-scenarios">
+                    <div class="pb-scen-row">
+                      <span class="pb-scen-lbl hot">If Hot</span>
+                      <div class="pb-moves">
+                        {#each pb.ifHot as mv (mv.symbol)}
+                          <span class="pb-move" class:up={mv.direction === 'up'} class:down={mv.direction === 'down'}>
+                            {mv.symbol} {mv.direction === 'up' ? '↑' : '↓'}
+                          </span>
+                        {/each}
+                      </div>
+                    </div>
+
+                    <div class="pb-scen-row">
+                      <span class="pb-scen-lbl cold">If Cold</span>
+                      <div class="pb-moves">
+                        {#each pb.ifCold as mv (mv.symbol)}
+                          <span class="pb-move" class:up={mv.direction === 'up'} class:down={mv.direction === 'down'}>
+                            {mv.symbol} {mv.direction === 'up' ? '↑' : '↓'}
+                          </span>
+                        {/each}
+                      </div>
+                    </div>
+                  </div>
+
+                  {#if exposed.length > 0}
+                    <div class="pb-exposure">
+                      <span class="pb-exp-lbl">Watchlist</span>
+                      <div class="pb-exp-chips">
+                        {#each exposed.slice(0, 6) as sym (sym)}
+                          <span class="pb-exp-chip">{sym}</span>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+
+                  <div class="pb-note">{pb.watchNote}</div>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/each}
       {/if}
@@ -954,13 +1113,20 @@
     color: var(--cal-secondary);
   }
 
+  .event-item {
+    border-bottom: 1px solid var(--cal-row-divider);
+  }
+
   .event-row {
     min-height: 62px;
     padding: 10px 16px;
-    border-bottom: 1px solid var(--cal-row-divider);
     display: flex;
     align-items: flex-start;
     transition: background-color 150ms ease, border-color 150ms ease;
+  }
+
+  .event-row.expandable {
+    cursor: pointer;
   }
 
   .event-row:hover {
@@ -1122,5 +1288,184 @@
   button:focus-visible {
     outline: 1px solid var(--cal-text);
     outline-offset: -2px;
+  }
+
+  .event-row-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+  }
+
+  .playbook-chev {
+    width: 18px;
+    height: 18px;
+    margin-top: -1px;
+    display: grid;
+    place-items: center;
+    color: var(--cal-secondary);
+    opacity: 0.6;
+    transition: transform 140ms ease, opacity 140ms ease;
+  }
+
+  .event-row:hover .playbook-chev,
+  .playbook-chev.open {
+    opacity: 1;
+  }
+
+  .playbook-chev.open {
+    transform: rotate(180deg);
+  }
+
+  .playbook-chev svg {
+    width: 13px;
+    height: 13px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .event-playbook {
+    margin: 0 14px 12px;
+    padding: 9px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--cal-card-border);
+    background: var(--cal-heading-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .pb-state {
+    font-size: 11.5px;
+    color: var(--cal-secondary);
+  }
+
+  .pb-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .pb-cat {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--cal-secondary);
+  }
+
+  .pb-trend {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--cal-secondary);
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--cal-pill-bg);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pb-context {
+    font-size: 11.5px;
+    line-height: 1.38;
+    color: var(--cal-text);
+  }
+
+  .pb-scenarios {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .pb-scen-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .pb-scen-lbl {
+    width: 44px;
+    flex: 0 0 44px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .pb-scen-lbl.hot {
+    color: #f59e0b;
+  }
+
+  .pb-scen-lbl.cold {
+    color: #38bdf8;
+  }
+
+  .pb-moves {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .pb-move {
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    background: var(--cal-pill-bg);
+    color: var(--cal-text);
+  }
+
+  .pb-move.up {
+    background: rgba(8, 153, 129, 0.14);
+    color: #089981;
+  }
+
+  .pb-move.down {
+    background: rgba(242, 54, 69, 0.14);
+    color: #f23645;
+  }
+
+  .pb-exposure {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding-top: 2px;
+    border-top: 1px solid var(--cal-row-divider);
+  }
+
+  .pb-exp-lbl {
+    width: 44px;
+    flex: 0 0 44px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--cal-secondary);
+  }
+
+  .pb-exp-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .pb-exp-chip {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--cal-text);
+    background: var(--cal-pill-bg);
+    border: 1px solid var(--cal-card-border);
+  }
+
+  .pb-note {
+    font-size: 11px;
+    line-height: 1.38;
+    color: var(--cal-secondary);
   }
 </style>

@@ -28,6 +28,8 @@
     type PlaybookOutcome,
     type PlaybookState
   } from '../playbook/store';
+  import { fetchEdgeAudit, type EdgeAuditResponse } from '../insights/api';
+  import { appendPreTradeRule } from '../tasks/store';
   import { makeWorkspaceId } from '../workspace/storage';
 
   interface Props {
@@ -61,6 +63,11 @@
   let lightboxState = $state<{ attachments: NoteAttachment[]; index: number; label: string } | null>(
     null
   );
+  let edgeAudit = $state<EdgeAuditResponse | null>(null);
+  let auditLoading = $state(false);
+  let auditError = $state<string | null>(null);
+  let auditOpen = $state(false);
+  let ruleAddedState = $state<'idle' | 'added' | 'duplicate'>('idle');
 
   let panelEl: HTMLDivElement | undefined = $state();
   let fileInputEl: HTMLInputElement | undefined = $state();
@@ -354,6 +361,27 @@
       void attachBlobs(files.map((f) => ({ blob: f, name: f.name })));
     }
   }
+
+  async function runEdgeAudit() {
+    if (auditLoading || playbookState.entries.length === 0) return;
+    auditOpen = true;
+    auditLoading = true;
+    auditError = null;
+    ruleAddedState = 'idle';
+    try {
+      const result = await fetchEdgeAudit(playbookState.entries);
+      edgeAudit = result;
+    } catch (err) {
+      auditError = err instanceof Error ? err.message : 'Unable to audit playbook right now';
+    }
+    auditLoading = false;
+  }
+
+  async function injectRuleToPreTradeGate() {
+    if (!edgeAudit?.nextWeekRule?.rule) return;
+    const res = await appendPreTradeRule(edgeAudit.nextWeekRule.rule);
+    ruleAddedState = res.duplicate ? 'duplicate' : res.added ? 'added' : 'idle';
+  }
 </script>
 
 <svelte:window onpaste={handlePaste} />
@@ -628,27 +656,124 @@
         {#if edge.totalLogged === 0}
           <span class="edge-muted">Star a Note or AI reply, or log your first A+ setup</span>
         {:else}
-          <span class="edge-stat">{edge.totalLogged} logged</span>
-          {#if edge.winRatePct !== null}
-            <span class="edge-dot">·</span>
-            <span class="edge-stat">{edge.winRatePct}% Win</span>
-          {/if}
-          {#if edge.totalR !== null}
-            <span class="edge-dot">·</span>
-            <span
-              class="edge-stat"
-              class:pos={edge.totalR > 0}
-              class:neg={edge.totalR < 0}
-            >
-              {formatRMultiple(edge.totalR)}
-            </span>
-          {/if}
-          {#if edge.bestSetup}
-            <span class="edge-dot">·</span>
-            <span class="edge-best" title="Best setup: {edge.bestSetup}">Best: {edge.bestSetup}</span>
-          {/if}
+          <div class="edge-metrics">
+            <span class="edge-stat">{edge.totalLogged} logged</span>
+            {#if edge.winRatePct !== null}
+              <span class="edge-dot">·</span>
+              <span class="edge-stat">{edge.winRatePct}% Win</span>
+            {/if}
+            {#if edge.totalR !== null}
+              <span class="edge-dot">·</span>
+              <span
+                class="edge-stat"
+                class:pos={edge.totalR > 0}
+                class:neg={edge.totalR < 0}
+              >
+                {formatRMultiple(edge.totalR)}
+              </span>
+            {/if}
+            {#if edge.bestSetup}
+              <span class="edge-dot">·</span>
+              <span class="edge-best" title="Best setup: {edge.bestSetup}">Best: {edge.bestSetup}</span>
+            {/if}
+          </div>
+
+          <button
+            class="audit-trigger"
+            class:active={auditOpen}
+            type="button"
+            disabled={auditLoading}
+            title="Run structured AI edge & leak diagnosis across your Playbook"
+            onclick={() => void runEdgeAudit()}
+          >
+            {auditLoading ? 'Auditing...' : 'Audit Edge'}
+          </button>
         {/if}
       </div>
+
+      {#if auditOpen}
+        <div class="audit-card">
+          <div class="audit-head">
+            <div class="audit-title-wrap">
+              <span class="audit-title">Edge Diagnosis</span>
+              {#if edgeAudit}
+                <span class="audit-meta">{edgeAudit.analyzedCount} trades</span>
+              {/if}
+            </div>
+            <div class="audit-actions">
+              <button
+                class="audit-icon-btn"
+                type="button"
+                title="Re-run edge audit"
+                aria-label="Re-run edge audit"
+                disabled={auditLoading}
+                onclick={() => void runEdgeAudit()}
+              >
+                <svg class:spin={auditLoading} viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M13 8a5 5 0 1 1-1.3-3.36" />
+                  <path d="M13 3.25v2.75h-2.75" />
+                </svg>
+              </button>
+              <button
+                class="audit-icon-btn"
+                type="button"
+                title="Close diagnosis"
+                aria-label="Close diagnosis"
+                onclick={() => (auditOpen = false)}
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          {#if auditLoading && !edgeAudit}
+            <div class="audit-status">Analyzing setup expectancy, R-multiples & mistake notes...</div>
+          {:else if auditError && !edgeAudit}
+            <div class="audit-status">{auditError}</div>
+          {:else if edgeAudit}
+            <div class="audit-section">
+              <div class="audit-k-row">
+                <span class="audit-dot edge"></span>
+                <span class="audit-k">True Edge</span>
+              </div>
+              <div class="audit-h">{edgeAudit.trueEdge.headline}</div>
+              <div class="audit-d">{edgeAudit.trueEdge.detail}</div>
+            </div>
+
+            <div class="audit-section">
+              <div class="audit-k-row">
+                <span class="audit-dot leak"></span>
+                <span class="audit-k">Primary Leak</span>
+              </div>
+              <div class="audit-h">{edgeAudit.primaryLeak.headline}</div>
+              <div class="audit-d">{edgeAudit.primaryLeak.detail}</div>
+            </div>
+
+            <div class="audit-section rule-box">
+              <div class="audit-k-row">
+                <span class="audit-dot rule"></span>
+                <span class="audit-k">Rule for Next Week</span>
+              </div>
+              <div class="audit-h">{edgeAudit.nextWeekRule.rule}</div>
+              <div class="audit-d">{edgeAudit.nextWeekRule.rationale}</div>
+              <button
+                class="inject-rule-btn"
+                class:done={ruleAddedState === 'added' || ruleAddedState === 'duplicate'}
+                type="button"
+                onclick={() => void injectRuleToPreTradeGate()}
+              >
+                {#if ruleAddedState === 'added'}
+                  ✓ Added to Pre-Trade Gate
+                {:else if ruleAddedState === 'duplicate'}
+                  ✓ Already in Pre-Trade Gate
+                {:else}
+                  + Add to Pre-Trade Gate
+                {/if}
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
       <!-- Filter Row + New -->
       <div class="pb-toolbar">
@@ -1849,5 +1974,213 @@
 
   .hidden-file {
     display: none;
+  }
+
+  .edge-metrics {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .audit-trigger {
+    margin-left: auto;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid var(--pb-border);
+    border-radius: 6px;
+    background: var(--pb-surface);
+    color: var(--pb-text);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    flex: 0 0 auto;
+    transition: background-color 120ms ease, border-color 120ms ease;
+  }
+
+  .audit-trigger:hover:not(:disabled),
+  .audit-trigger.active {
+    background: var(--pb-surface-alt);
+    border-color: var(--pb-secondary);
+  }
+
+  .audit-trigger:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .audit-card {
+    margin: 0 14px 10px;
+    padding: 10px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--pb-border);
+    background: var(--pb-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    flex: 0 0 auto;
+  }
+
+  .audit-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .audit-title-wrap {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .audit-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--pb-text);
+  }
+
+  .audit-meta {
+    font-size: 10.5px;
+    color: var(--pb-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .audit-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .audit-icon-btn {
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--pb-secondary);
+    font: inherit;
+    font-size: 14px;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+  }
+
+  .audit-icon-btn:hover:not(:disabled) {
+    color: var(--pb-text);
+    background: var(--pb-hover);
+  }
+
+  .audit-icon-btn svg {
+    width: 12.5px;
+    height: 12.5px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .audit-icon-btn svg.spin {
+    animation: pb-spin 0.9s linear infinite;
+  }
+
+  @keyframes pb-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .audit-status {
+    font-size: 11.5px;
+    color: var(--pb-secondary);
+    line-height: 1.4;
+  }
+
+  .audit-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .audit-k-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .audit-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex: 0 0 6px;
+  }
+
+  .audit-dot.edge {
+    background: #089981;
+  }
+
+  .audit-dot.leak {
+    background: #f59e0b;
+  }
+
+  .audit-dot.rule {
+    background: #2962ff;
+  }
+
+  .audit-k {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--pb-secondary);
+  }
+
+  .audit-h {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pb-text);
+    line-height: 1.35;
+  }
+
+  .audit-d {
+    font-size: 11px;
+    color: var(--pb-secondary);
+    line-height: 1.38;
+  }
+
+  .rule-box {
+    padding-top: 8px;
+    border-top: 1px solid var(--pb-border-soft);
+    gap: 3px;
+  }
+
+  .inject-rule-btn {
+    margin-top: 5px;
+    height: 27px;
+    padding: 0 10px;
+    border: 1px solid var(--pb-border);
+    border-radius: 7px;
+    background: var(--pb-surface-alt);
+    color: var(--pb-text);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+  }
+
+  .inject-rule-btn:hover {
+    border-color: var(--pb-secondary);
+  }
+
+  .inject-rule-btn.done {
+    border-color: rgba(8, 153, 129, 0.45);
+    background: rgba(8, 153, 129, 0.14);
+    color: #089981;
   }
 </style>

@@ -12,6 +12,13 @@ import {
 } from './routes/ai.js';
 import { getCalendarEventsPayload, getCalendarWeekPayload } from './routes/calendar.js';
 import { dispatchAlertWebhook, getQuotesPayload } from './quotes/service.js';
+import {
+  getEventPlaybookPayload,
+  getMacroRegimePayload,
+  getSymbolBriefPayload,
+  runEdgeAuditPayload
+} from './insights/service.js';
+import type { EdgeAuditEntryInput, TechBiasInput } from './insights/types.js';
 
 /** Load local .env files (repo root + server dir) without overriding real environment variables. */
 function loadLocalEnv(): void {
@@ -122,7 +129,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.4',
+        version: '0.1.7',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -136,13 +143,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.4',
+      version: '0.1.7',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
         'GET /api/calendar/events?date=YYYY-MM-DD&category=economic&tz=Africa/Nairobi',
         'GET /api/quotes?symbols=OANDA:XAUUSD,TVC:DXY',
         'POST /api/alerts/webhook',
+        'GET /api/insights/regime',
+        'GET /api/insights/symbol?symbol=OANDA:XAUUSD&bias=bull',
+        'GET /api/insights/event?title=Consumer%20Price%20Index%20YoY&country=US',
+        'POST /api/insights/edge-audit',
         'GET /api/ai/models',
         'POST /api/ai/chat'
       ]
@@ -194,6 +205,68 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       url.searchParams.get('tz')
     );
     sendJson(res, 200, payload);
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/insights/regime') {
+    const force = url.searchParams.get('force') === '1';
+    const payload = await getMacroRegimePayload(force);
+    sendJson(res, 200, payload, 'public, max-age=120');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/insights/symbol') {
+    const rawSym = (url.searchParams.get('symbol') ?? '').trim();
+    if (!rawSym) {
+      sendJson(res, 400, { error: 'Missing symbol query parameter' }, 'no-store');
+      return;
+    }
+    const rawBias = (url.searchParams.get('bias') ?? 'none').toLowerCase();
+    const techBias: TechBiasInput =
+      rawBias === 'bull' || rawBias === 'bear' || rawBias === 'range' ? rawBias : 'none';
+    const force = url.searchParams.get('force') === '1';
+    const payload = await getSymbolBriefPayload(rawSym, techBias, force);
+    sendJson(res, 200, payload, 'no-store');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/insights/event') {
+    const title = (url.searchParams.get('title') ?? '').trim();
+    if (!title) {
+      sendJson(res, 400, { error: 'Missing title query parameter' }, 'no-store');
+      return;
+    }
+    const country = (url.searchParams.get('country') ?? 'US').trim();
+    const forecast = url.searchParams.get('forecast') ?? undefined;
+    const prior = url.searchParams.get('prior') ?? undefined;
+    const actual = url.searchParams.get('actual') ?? undefined;
+    const payload = await getEventPlaybookPayload({ title, country, forecast, prior, actual });
+    sendJson(res, 200, payload, 'public, max-age=300');
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/insights/edge-audit') {
+    const ip = getClientIp(req);
+    if (!checkRateLimit(ip)) {
+      sendJson(
+        res,
+        429,
+        { error: 'Rate limit exceeded. Please wait a minute before auditing again.' },
+        'no-store'
+      );
+      return;
+    }
+
+    let body: { entries?: EdgeAuditEntryInput[] };
+    try {
+      body = await readJsonBody<{ entries?: EdgeAuditEntryInput[] }>(req, 512 * 1024);
+    } catch (err) {
+      sendJson(res, 400, { error: (err as Error).message }, 'no-store');
+      return;
+    }
+
+    const payload = await runEdgeAuditPayload(body.entries ?? []);
+    sendJson(res, 200, payload, 'no-store');
     return;
   }
 
