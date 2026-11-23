@@ -2,15 +2,18 @@
   import PanelShell from './PanelShell.svelte';
   import { FLAG_SVGS } from '../calendar/flags';
   import {
-    TODAY_ISO,
     addDays,
+    buildWeekDays,
+    fetchCalendarWeek,
     formatWeekRange,
-    getEconomicEvents,
-    getWeekDays,
+    getLocalTimeZone,
+    getTodayIso,
     getWeekStart,
     type CalendarCategory,
+    type DayCounts,
+    type EconomicEvent,
     type EventImpact
-  } from '../calendar/mock';
+  } from '../calendar/api';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -26,25 +29,36 @@
     { id: 'ipo', label: 'IPO' }
   ];
 
-  let weekStart = $state(getWeekStart(TODAY_ISO));
-  let selectedDate = $state(TODAY_ISO);
+  const timeZone = getLocalTimeZone();
+  const initialToday = getTodayIso(timeZone);
+
+  let weekStart = $state(getWeekStart(initialToday));
+  let selectedDate = $state(initialToday);
   let activeCategory = $state<CalendarCategory>('economic');
   let stripCollapsed = $state(false);
   let canScrollNext = $state(true);
 
+  let countsByDate = $state<Record<string, DayCounts>>({});
+  let eventsByDate = $state<Record<string, EconomicEvent[]>>({});
+  let loading = $state(true);
+  let loadError = $state<string | null>(null);
+  let refreshNonce = $state(0);
+
   let dateInput: HTMLInputElement | undefined = $state();
   let stripEl: HTMLDivElement | undefined = $state();
 
-  const weekDays = $derived(getWeekDays(weekStart));
+  const weekDays = $derived(buildWeekDays(weekStart, countsByDate));
   const weekRangeLabel = $derived(formatWeekRange(weekStart));
   const selectedDay = $derived(weekDays.find((d) => d.iso === selectedDate) ?? weekDays[0]);
   const events = $derived(
-    activeCategory === 'economic' ? getEconomicEvents(selectedDay.iso) : []
+    activeCategory === 'economic' ? (eventsByDate[selectedDay.iso] ?? []) : []
   );
 
   function jumpToToday() {
-    weekStart = getWeekStart(TODAY_ISO);
-    selectedDate = TODAY_ISO;
+    const today = getTodayIso(timeZone);
+    weekStart = getWeekStart(today);
+    selectedDate = today;
+    refreshNonce += 1;
     stripEl?.scrollTo({ left: 0, behavior: 'smooth' });
   }
 
@@ -85,6 +99,46 @@
     if (impact === 'medium') return 2;
     return 1;
   }
+
+  $effect(() => {
+    const currentWeekStart = weekStart;
+    const force = refreshNonce > 0;
+    const controller = new AbortController();
+
+    loading = true;
+    loadError = null;
+
+    fetchCalendarWeek(currentWeekStart, timeZone, { force, signal: controller.signal })
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        const nextCounts: Record<string, DayCounts> = {};
+        for (const d of res.days) {
+          nextCounts[d.iso] = d.counts;
+        }
+        countsByDate = nextCounts;
+        eventsByDate = res.eventsByDate ?? {};
+        loading = false;
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        loadError = err instanceof Error ? err.message : 'Unable to load economic calendar';
+        countsByDate = {};
+        eventsByDate = {};
+        loading = false;
+      });
+
+    return () => {
+      controller.abort();
+    };
+  });
+
+  $effect(() => {
+    // Periodic 15-minute refresh while panel stays open so newly released actuals appear
+    const timer = window.setInterval(() => {
+      refreshNonce += 1;
+    }, 15 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  });
 
   $effect(() => {
     // Re-evaluate scroll button visibility when strip mounts, expands, or week changes
@@ -298,6 +352,10 @@
     <div class="event-list">
       {#if activeCategory !== 'economic'}
         <div class="empty-state">No data yet</div>
+      {:else if loading}
+        <div class="empty-state">Loading events...</div>
+      {:else if loadError}
+        <div class="empty-state">Unable to load calendar data</div>
       {:else if events.length === 0}
         <div class="empty-state">No events scheduled</div>
       {:else}
@@ -316,7 +374,7 @@
                   aria-label={event.country}
                   role="img"
                 >
-                  {@html FLAG_SVGS[event.country]}
+                  {@html FLAG_SVGS[event.country] ?? FLAG_SVGS.US}
                   <circle
                     cx="8"
                     cy="8"
@@ -363,8 +421,14 @@
 
             <div class="event-main">
               <div class="event-title">{event.title}</div>
-              {#if event.prior || event.forecast}
+              {#if event.actual || event.prior || event.forecast}
                 <div class="event-meta">
+                  {#if event.actual}
+                    <span class="meta-pair">
+                      <span class="meta-label">Actual:</span>
+                      <span class="meta-value">{event.actual}</span>
+                    </span>
+                  {/if}
                   {#if event.prior}
                     <span class="meta-pair">
                       <span class="meta-label">Prior:</span>

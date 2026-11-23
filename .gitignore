@@ -21,6 +21,7 @@ src-tauri/gen/
 *.key
 
 # Local scratch & logs
+server/data/
 .work/
 outputs/
 *.log
