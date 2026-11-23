@@ -112,15 +112,26 @@ export function seedTabPanes(
   layoutId: LayoutId = tab.layoutId
 ): Record<number, ChartPaneState> {
   const count = getLayoutById(layoutId).count;
-  const next = clonePanes(tab.panes);
-  const fallbackSymbol = tab.symbol || 'OANDA:XAUUSD';
-  const fallbackShort = extractShortSymbol(fallbackSymbol);
+  const activeIdx =
+    typeof tab.activePane === 'number' && tab.activePane >= 0 ? tab.activePane : 0;
+  const activeEntry = tab.panes?.[activeIdx] ?? tab.panes?.[0];
+  const baseSymbol = activeEntry?.symbol?.trim() || tab.symbol || 'OANDA:XAUUSD';
+  const baseShort = activeEntry?.shortName?.trim() || extractShortSymbol(baseSymbol);
+  const baseInterval = activeEntry?.interval?.trim() || 'D';
+
+  const prevCount = getLayoutById(tab.layoutId).count;
+  const keepLimit = Math.min(count, prevCount);
+  const existing = clonePanes(tab.panes);
+  const next: Record<number, ChartPaneState> = {};
+
   for (let i = 0; i < count; i++) {
-    if (!next[i]) {
+    if (i < keepLimit && existing[i]) {
+      next[i] = existing[i];
+    } else {
       next[i] = {
-        symbol: fallbackSymbol,
-        shortName: fallbackShort,
-        interval: 'D'
+        symbol: baseSymbol,
+        shortName: baseShort,
+        interval: baseInterval
       };
     }
   }
@@ -151,13 +162,14 @@ function isValidLayoutId(val: unknown): val is LayoutId {
 function normalizePanes(
   raw: unknown,
   fallbackSymbol: string,
-  fallbackTitle: string
+  fallbackTitle: string,
+  maxPanes: number
 ): Record<number, ChartPaneState> {
   const out: Record<number, ChartPaneState> = {};
   if (raw && typeof raw === 'object') {
     for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
       const idx = Number(key);
-      if (!Number.isInteger(idx) || idx < 0 || idx >= MAX_PANE_SLOTS) continue;
+      if (!Number.isInteger(idx) || idx < 0 || idx >= maxPanes) continue;
       if (!val || typeof val !== 'object') continue;
       const obj = val as Partial<ChartPaneState>;
       const sym = typeof obj.symbol === 'string' && obj.symbol.trim() ? obj.symbol.trim() : '';
@@ -178,6 +190,11 @@ function normalizePanes(
       interval: 'D'
     };
   }
+  for (let i = 1; i < maxPanes; i++) {
+    if (!out[i]) {
+      out[i] = { ...out[0] };
+    }
+  }
   return out;
 }
 
@@ -194,14 +211,14 @@ export function normalizeTabsState(parsed: Partial<TabsState> | null | undefined
             .filter((t): t is WorkspaceTab => Boolean(t && typeof t.id === 'string'))
             .map((t) => {
               const layoutId: LayoutId = isValidLayoutId(t.layoutId) ? t.layoutId : '1-single';
+              const paneCount = getLayoutById(layoutId).count;
               const symbol =
                 typeof t.symbol === 'string' && t.symbol.trim() ? t.symbol.trim() : 'OANDA:XAUUSD';
               const title =
                 typeof t.title === 'string' && t.title.trim()
                   ? t.title.trim()
                   : extractShortSymbol(symbol);
-              const panes = normalizePanes(t.panes, symbol, title);
-              const paneCount = getLayoutById(layoutId).count;
+              const panes = normalizePanes(t.panes, symbol, title, paneCount);
               const rawActivePane =
                 typeof t.activePane === 'number' && Number.isInteger(t.activePane)
                   ? t.activePane

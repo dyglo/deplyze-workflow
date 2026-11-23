@@ -67,7 +67,10 @@
   let briefLoading = $state(false);
   let briefError = $state<string | null>(null);
   let symbolBrief = $state<SymbolBriefResponse | null>(null);
-  let briefForceNonce = $state(0);
+  let briefRefreshTick = $state(0);
+  let lastHandledRefreshTick = 0;
+  let lastBriefShort = '';
+  let briefAbort: AbortController | null = null;
 
   const SHEET_HEIGHT_KEY = 'deplyzeworkflow-wl-sheet-h';
   const DEFAULT_SHEET_HEIGHT = 320;
@@ -358,19 +361,32 @@
     if (!briefOpen || !selectedItem) return '';
     const autoBias = quotes[selectedItem.symbol]?.autoBias;
     const techBias = effectiveBias(selectedItem, autoBias).bias;
-    return `${selectedItem.symbol}|${selectedItem.shortName}|${techBias}`;
+    return `${selectedItem.symbol}|${selectedItem.shortName}|${techBias}|${briefRefreshTick}`;
   });
 
   $effect(() => {
     const key = briefTargetKey;
-    if (!key) return;
-    const [sym, shortName, rawBias] = key.split('|');
-    const techBias = (rawBias || 'none') as BiasDirection;
-    const force = briefForceNonce > 0;
-    const targetShort = normalizeShortSymbol(shortName);
-    const controller = new AbortController();
+    if (!key) {
+      briefAbort?.abort();
+      briefAbort = null;
+      return;
+    }
+    const parts = key.split('|');
+    const sym = parts[0];
+    const shortName = parts[1];
+    const techBias = (parts[2] || 'none') as BiasDirection;
+    const tick = Number(parts[3]) || 0;
+    const force = tick > lastHandledRefreshTick;
+    lastHandledRefreshTick = tick;
 
-    if (!symbolBrief || normalizeShortSymbol(symbolBrief.shortName) !== targetShort || force) {
+    const targetShort = normalizeShortSymbol(shortName);
+    const sameSymbolAsLoaded = lastBriefShort === targetShort;
+
+    briefAbort?.abort();
+    const controller = new AbortController();
+    briefAbort = controller;
+
+    if (!sameSymbolAsLoaded || force) {
       briefLoading = true;
     }
     briefError = null;
@@ -378,15 +394,14 @@
     fetchSymbolBrief(sym, techBias, { force, signal: controller.signal })
       .then((res) => {
         if (controller.signal.aborted) return;
+        lastBriefShort = targetShort;
         symbolBrief = res;
         briefLoading = false;
-        if (force) briefForceNonce = 0;
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
         briefError = err instanceof Error ? err.message : 'Unable to load macro brief';
         briefLoading = false;
-        if (force) briefForceNonce = 0;
       });
 
     return () => {
@@ -1083,7 +1098,7 @@
                 title="Refresh macro brief"
                 aria-label="Refresh macro brief"
                 disabled={briefLoading}
-                onclick={() => (briefForceNonce += 1)}
+                onclick={() => (briefRefreshTick += 1)}
               >
                 <svg class:spin={briefLoading} viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M13 8a5 5 0 1 1-1.3-3.36" />
@@ -1103,7 +1118,7 @@
                   <button
                     class="macro-retry"
                     type="button"
-                    onclick={() => (briefForceNonce += 1)}
+                    onclick={() => (briefRefreshTick += 1)}
                   >
                     Retry
                   </button>
@@ -1113,7 +1128,7 @@
 
                 {#if activeBrief.drivers.length > 0}
                   <div class="driver-grid">
-                    {#each activeBrief.drivers as d (d.label)}
+                    {#each activeBrief.drivers as d, dIdx (`${d.label}|${dIdx}`)}
                       <div
                         class="driver-tile"
                         class:bull={d.impact === 'bull'}
@@ -1145,7 +1160,7 @@
 
                 {#if activeBrief.sources.length > 0}
                   <div class="macro-sources">
-                    {#each activeBrief.sources as src (src.url)}
+                    {#each activeBrief.sources as src, sIdx (`${src.url}|${sIdx}`)}
                       <span class="src-chip" title={src.title}>{sourceHost(src.url)}</span>
                     {/each}
                   </div>
