@@ -14,6 +14,7 @@
     streamAiChat
   } from '../ai/api';
   import { renderMarkdown } from '../ai/markdown';
+  import { saveAiAnalysisToPlaybook } from '../playbook/store';
   import {
     AI_EFFORTS,
     AI_MODELS,
@@ -64,6 +65,7 @@
   let modelMenuOpen = $state(false);
   let copiedMsgId = $state<string | null>(null);
   let savedNoteMsgId = $state<string | null>(null);
+  let savedPlaybookMsgId = $state<string | null>(null);
 
   // Keep latest captured chart per assistant message ID in memory so "Save to Notes" includes the screenshot
   const capturedChartsByMsgId = new Map<string, string>();
@@ -312,6 +314,25 @@
       }, 2200);
     } catch {
       errorBanner = 'Could not save analysis to Notes.';
+    }
+  }
+
+  async function handleSaveToPlaybook(msg: AiMessage, idx: number) {
+    const prevUser = idx > 0 && messages[idx - 1]?.role === 'user' ? messages[idx - 1].content : '';
+    try {
+      await saveAiAnalysisToPlaybook({
+        symbol: activeChat?.symbol || activeSymbol || 'XAUUSD',
+        fullSymbol: activeChat?.fullSymbol || activeFullSymbol || 'OANDA:XAUUSD',
+        prompt: prevUser,
+        analysis: msg.content,
+        chartDataUrl: capturedChartsByMsgId.get(msg.id) ?? null
+      });
+      savedPlaybookMsgId = msg.id;
+      setTimeout(() => {
+        if (savedPlaybookMsgId === msg.id) savedPlaybookMsgId = null;
+      }, 2200);
+    } catch {
+      errorBanner = 'Could not save analysis to Playbook.';
     }
   }
 
@@ -714,6 +735,13 @@
                       onclick={() => void handleSaveToNotes(msg, idx)}
                     >
                       {savedNoteMsgId === msg.id ? 'Saved to Notes' : 'Save to Notes'}
+                    </button>
+                    <button
+                      class="action-btn"
+                      type="button"
+                      onclick={() => void handleSaveToPlaybook(msg, idx)}
+                    >
+                      {savedPlaybookMsgId === msg.id ? 'Saved to Playbook' : 'Save to Playbook'}
                     </button>
                   </div>
                 {/if}

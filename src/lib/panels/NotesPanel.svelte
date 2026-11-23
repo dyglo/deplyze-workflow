@@ -23,6 +23,7 @@
     type Note,
     type NoteAttachment
   } from '../notes/types';
+  import { saveNoteToPlaybook, subscribePlaybook } from '../playbook/store';
 
   type NotesTab = 'all' | 'symbol' | 'pinned';
 
@@ -48,6 +49,8 @@
 
   let lightboxState = $state<{ index: number } | null>(null);
   let undoToast = $state<{ noteId: string; title: string } | null>(null);
+  let playbookNoteIds = $state<Record<string, boolean>>({});
+  let playbookSavedId = $state<string | null>(null);
 
   let panelEl: HTMLDivElement | undefined = $state();
   let titleInputEl: HTMLInputElement | undefined = $state();
@@ -202,6 +205,18 @@
     target.pinned = !target.pinned;
     target.updatedAt = new Date().toISOString();
     persistNow();
+  }
+
+  async function handleSaveNoteToPlaybook(note: Note) {
+    try {
+      await saveNoteToPlaybook($state.snapshot(note));
+      playbookSavedId = note.id;
+      setTimeout(() => {
+        if (playbookSavedId === note.id) playbookSavedId = null;
+      }, 1800);
+    } catch {
+      // ignore
+    }
   }
 
   function softDeleteNote(noteId: string) {
@@ -464,6 +479,16 @@
   });
 
   $effect(() => {
+    return subscribePlaybook((pb) => {
+      const next: Record<string, boolean> = {};
+      for (const entry of pb.entries) {
+        if (entry.sourceNoteId) next[entry.sourceNoteId] = true;
+      }
+      playbookNoteIds = next;
+    });
+  });
+
+  $effect(() => {
     void activeNote?.body;
     if (activeNote && bodyEl) {
       resizeTextarea();
@@ -502,7 +527,22 @@
         </button>
 
         <div class="editor-actions">
-          <span class="save-status">{saving ? 'Saving…' : 'Saved'}</span>
+          <span class="save-status">
+            {playbookSavedId === activeNote.id ? 'In Playbook' : saving ? 'Saving…' : 'Saved'}
+          </span>
+
+          <button
+            class="icon-action"
+            class:starred={Boolean(playbookNoteIds[activeNote.id])}
+            type="button"
+            aria-label={playbookNoteIds[activeNote.id] ? 'Update in Playbook' : 'Save to Playbook'}
+            title={playbookNoteIds[activeNote.id] ? 'Saved in Playbook (click to sync)' : 'Save to Playbook'}
+            onclick={() => void handleSaveNoteToPlaybook(activeNote)}
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="m10 3.25 2.05 4.2 4.6.65-3.32 3.25.78 4.6L10 13.75 5.89 15.95l.78-4.6L3.35 8.1l4.6-.65L10 3.25Z" />
+            </svg>
+          </button>
 
           <button
             class="icon-action"
@@ -765,6 +805,22 @@
                   </span>
 
                   <div class="row-actions">
+                    <button
+                      class="row-icon-btn"
+                      class:is-starred={Boolean(playbookNoteIds[note.id])}
+                      type="button"
+                      aria-label={playbookNoteIds[note.id] ? 'Saved in Playbook' : 'Save to Playbook'}
+                      title={playbookNoteIds[note.id] ? 'Saved in Playbook (click to update)' : 'Save to Playbook'}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        void handleSaveNoteToPlaybook(note);
+                      }}
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="m10 3.25 2.05 4.2 4.6.65-3.32 3.25.78 4.6L10 13.75 5.89 15.95l.78-4.6L3.35 8.1l4.6-.65L10 3.25Z" />
+                      </svg>
+                    </button>
+
                     <button
                       class="row-icon-btn"
                       class:is-pinned={note.pinned}
@@ -1168,12 +1224,21 @@
 
   .note-row:hover .row-icon-btn,
   .row-icon-btn:focus-visible,
-  .row-icon-btn.is-pinned {
+  .row-icon-btn.is-pinned,
+  .row-icon-btn.is-starred {
     opacity: 1;
   }
 
   .row-icon-btn.is-pinned {
     color: var(--np-text);
+  }
+
+  .row-icon-btn.is-starred {
+    color: #f59e0b;
+  }
+
+  .row-icon-btn.is-starred svg path {
+    fill: currentColor;
   }
 
   .row-icon-btn:hover {
@@ -1375,6 +1440,14 @@
 
   .icon-action.pinned {
     background: var(--np-pill-bg);
+  }
+
+  .icon-action.starred {
+    color: #f59e0b;
+  }
+
+  .icon-action.starred svg path {
+    fill: currentColor;
   }
 
   .icon-action.danger:hover {

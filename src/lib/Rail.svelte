@@ -2,9 +2,12 @@
   import AiPanel from './panels/AiPanel.svelte';
   import AlertsPanel from './panels/AlertsPanel.svelte';
   import CalendarPanel from './panels/CalendarPanel.svelte';
+  import CloudPanel from './panels/CloudPanel.svelte';
   import CreateAlertModal from './panels/CreateAlertModal.svelte';
+  import FavoritesPanel from './panels/FavoritesPanel.svelte';
   import LayoutPopover from './panels/LayoutPopover.svelte';
   import NotesPanel from './panels/NotesPanel.svelte';
+  import RoutinesPanel from './panels/RoutinesPanel.svelte';
   import SettingsModal from './panels/SettingsModal.svelte';
   import TasksPanel from './panels/TasksPanel.svelte';
   import TrashPanel from './panels/TrashPanel.svelte';
@@ -161,8 +164,20 @@
     {onSelectSymbol}
     onClose={closePanel}
   />
+{:else if active === 'routines'}
+  <RoutinesPanel {theme} onClose={closePanel} />
+{:else if active === 'favorites'}
+  <FavoritesPanel
+    {theme}
+    {activeSymbol}
+    {activeFullSymbol}
+    {onSelectSymbol}
+    onClose={closePanel}
+  />
 {:else if active === 'trash'}
   <TrashPanel {theme} onClose={closePanel} />
+{:else if active === 'cloud'}
+  <CloudPanel {theme} onClose={closePanel} />
 {/if}
 
 {#if alertModalState}

@@ -11,6 +11,7 @@
     subscribeAlertToasts,
     type InAppAlertToast
   } from './lib/alerts/store';
+  import { startCloudAutoSync } from './lib/cloud/api';
   import { saveLayoutId, type LayoutId } from './lib/chart/layouts';
   import {
     loadChartSettings,
@@ -59,6 +60,7 @@
 
   onMount(() => {
     const stopAlerts = startAlertMonitor();
+    const stopCloudSync = startCloudAutoSync();
     const unsubToasts = subscribeAlertToasts((toast) => {
       alertToasts = [toast, ...alertToasts].slice(0, 4);
       setTimeout(() => {
@@ -79,6 +81,7 @@
 
     return () => {
       stopAlerts();
+      stopCloudSync();
       unsubToasts();
       cleanupMq?.();
     };
