@@ -13,20 +13,39 @@
   import { getLayoutById, type LayoutId } from './chart/layouts';
   import type { ChartSettings } from './settings/chartSettings';
 
-  export let theme: 'dark' | 'light';
-  export let chartSettings: ChartSettings;
-  export let layoutId: LayoutId;
-  export let activeSymbol: string;
-  export let activeFullSymbol: string;
-  export let activePrice: number | undefined = undefined;
-  export let activeChangePercent: number | undefined = undefined;
-  export let settingsOpen: boolean;
-  export let onToggleSettings: () => void;
-  export let onCloseSettings: () => void;
-  export let onSaveChartSettings: (next: ChartSettings) => void;
-  export let onSelectLayout: (next: LayoutId) => void;
-  export let onSelectSymbol: (symbol: string, shortName: string) => void;
-  export let onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
+  interface Props {
+    theme: 'dark' | 'light';
+    chartSettings: ChartSettings;
+    layoutId: LayoutId;
+    activeSymbol: string;
+    activeFullSymbol: string;
+    activePrice?: number;
+    activeChangePercent?: number;
+    settingsOpen: boolean;
+    onToggleSettings: () => void;
+    onCloseSettings: () => void;
+    onSaveChartSettings: (next: ChartSettings) => void;
+    onSelectLayout: (next: LayoutId) => void;
+    onSelectSymbol: (symbol: string, shortName: string) => void;
+    onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
+  }
+
+  let {
+    theme,
+    chartSettings,
+    layoutId,
+    activeSymbol,
+    activeFullSymbol,
+    activePrice = undefined,
+    activeChangePercent = undefined,
+    settingsOpen,
+    onToggleSettings,
+    onCloseSettings,
+    onSaveChartSettings,
+    onSelectLayout,
+    onSelectSymbol,
+    onOpenSymbolInNewTab
+  }: Props = $props();
 
   type RailId =
     | 'list'
@@ -40,16 +59,18 @@
     | 'trash'
     | 'cloud';
 
-  let active: RailId | null = null;
-  let layoutAnchor: DOMRect | null = null;
-  let alertModalState: {
+  let active = $state<RailId | null>(null);
+  let layoutAnchor = $state<DOMRect | null>(null);
+  let alertModalSeq = 0;
+  let alertModalState = $state<{
+    key: number;
     symbol: string;
     shortName: string;
     price?: number;
     editing: TradingAlert | null;
-  } | null = null;
+  } | null>(null);
 
-  $: activeLayoutDef = getLayoutById(layoutId);
+  const activeLayoutDef = $derived(getLayoutById(layoutId));
 
   function openCreateAlertModal(
     symbol = activeFullSymbol || 'OANDA:XAUUSD',
@@ -57,7 +78,16 @@
     price = activePrice,
     editing: TradingAlert | null = null
   ) {
-    alertModalState = { symbol, shortName, price, editing };
+    alertModalSeq += 1;
+    alertModalState = { key: alertModalSeq, symbol, shortName, price, editing };
+  }
+
+  function handleSaveAlert(saved: TradingAlert) {
+    upsertAlert(saved);
+  }
+
+  function closeAlertModal() {
+    alertModalState = null;
   }
 
   function select(id: RailId) {
@@ -136,15 +166,17 @@
 {/if}
 
 {#if alertModalState}
-  <CreateAlertModal
-    {theme}
-    initialSymbol={alertModalState.symbol}
-    initialShortName={alertModalState.shortName}
-    initialPrice={alertModalState.price}
-    editingAlert={alertModalState.editing}
-    onSave={(saved) => upsertAlert(saved)}
-    onClose={() => (alertModalState = null)}
-  />
+  {#key alertModalState.key}
+    <CreateAlertModal
+      {theme}
+      initialSymbol={alertModalState.symbol}
+      initialShortName={alertModalState.shortName}
+      initialPrice={alertModalState.price}
+      editingAlert={alertModalState.editing}
+      onSave={handleSaveAlert}
+      onClose={closeAlertModal}
+    />
+  {/key}
 {/if}
 
 {#if layoutAnchor}
@@ -174,7 +206,7 @@
     aria-label="Lists"
     title="Lists"
     aria-pressed={active === 'list'}
-    on:click={() => select('list')}
+    onclick={() => select('list')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M3.5 5.5h.01M3.5 10h.01M3.5 14.5h.01" />
@@ -189,7 +221,7 @@
     aria-label="Calendar"
     title="Calendar"
     aria-pressed={active === 'calendar'}
-    on:click={() => select('calendar')}
+    onclick={() => select('calendar')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <rect x="2.75" y="2.75" width="14.5" height="14.5" rx="3.75" />
@@ -205,7 +237,7 @@
     aria-label="Tasks"
     title="Tasks"
     aria-pressed={active === 'tasks'}
-    on:click={() => select('tasks')}
+    onclick={() => select('tasks')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <rect x="2.75" y="2.75" width="14.5" height="14.5" rx="3.75" />
@@ -222,7 +254,7 @@
     aria-label="Note"
     title="Note"
     aria-pressed={active === 'note'}
-    on:click={() => select('note')}
+    onclick={() => select('note')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M2.75 6h5.5M4.25 9.25h2.75" />
@@ -237,7 +269,7 @@
     aria-label="AI"
     title="AI"
     aria-pressed={active === 'ai'}
-    on:click={() => select('ai')}
+    onclick={() => select('ai')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M10 2.75c.65 4.2 3.05 6.6 7.25 7.25-4.2.65-6.6 3.05-7.25 7.25-.65-4.2-3.05-6.6-7.25-7.25 4.2-.65 6.6-3.05 7.25-7.25Z" />
@@ -251,7 +283,7 @@
     aria-label="Alerts"
     title="Alerts"
     aria-pressed={active === 'alerts'}
-    on:click={() => select('alerts')}
+    onclick={() => select('alerts')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <circle cx="15" cy="5" r="2.25" />
@@ -267,7 +299,7 @@
     aria-label="Routines"
     title="Routines"
     aria-pressed={active === 'routines'}
-    on:click={() => select('routines')}
+    onclick={() => select('routines')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M11 6.25h2.5a3.75 3.75 0 0 1 0 7.5h-7a3.75 3.75 0 0 1 0-7.5" />
@@ -282,7 +314,7 @@
     aria-label="Favorites"
     title="Favorites"
     aria-pressed={active === 'favorites'}
-    on:click={() => select('favorites')}
+    onclick={() => select('favorites')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M7.75 15.25s-5-3.1-5-6.6a3 3 0 0 1 5-2.2 3 3 0 0 1 5 2.2c0 3.5-5 6.6-5 6.6Z" />
@@ -298,7 +330,7 @@
     aria-label="Trash"
     title="Trash"
     aria-pressed={active === 'trash'}
-    on:click={() => select('trash')}
+    onclick={() => select('trash')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <ellipse cx="10" cy="5.25" rx="4.75" ry="1.75" />
@@ -316,7 +348,7 @@
     title="Chart layout"
     aria-haspopup="dialog"
     aria-expanded={Boolean(layoutAnchor)}
-    on:click={toggleLayoutPopover}
+    onclick={toggleLayoutPopover}
   >
     <svg viewBox="0 0 20 16" aria-hidden="true">
       <rect x="2" y="2" width="16" height="12" rx="2.5" />
@@ -333,7 +365,7 @@
     aria-label="Cloud"
     title="Cloud"
     aria-pressed={active === 'cloud'}
-    on:click={() => select('cloud')}
+    onclick={() => select('cloud')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M6.5 15.25h7.75a3 3 0 0 0 .5-5.95 4.25 4.25 0 0 0-8.15-.65 3.35 3.35 0 0 0-.1 6.6Z" />
@@ -347,7 +379,7 @@
     aria-label="Settings"
     title="Settings"
     aria-pressed={settingsOpen}
-    on:click={toggleSettings}
+    onclick={toggleSettings}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M7.2 4h5.6a1.5 1.5 0 0 1 1.3.75l2.8 4.5a1.5 1.5 0 0 1 0 1.5l-2.8 4.5a1.5 1.5 0 0 1-1.3.75H7.2a1.5 1.5 0 0 1-1.3-.75l-2.8-4.5a1.5 1.5 0 0 1 0-1.5l2.8-4.5A1.5 1.5 0 0 1 7.2 4Z" />

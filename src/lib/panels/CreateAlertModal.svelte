@@ -70,6 +70,39 @@
     { id: 'sessions', label: 'Sessions (07:00–22:00)' }
   ];
 
+  function parseTargetPrice(raw: unknown): number | null {
+    const text = String(raw ?? '').replace(/,/g, '').trim();
+    if (!text) return null;
+    const num = Number(text);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function formatExpiryDate(iso: string): string {
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return 'Open-ended';
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(new Date(ms));
+  }
+
+  function isEditingCustomMessage(alert: TradingAlert | null): boolean {
+    if (!alert || !alert.message.trim()) return false;
+    if (typeof alert.targetPrice === 'number' && Number.isFinite(alert.targetPrice)) {
+      const auto = formatAlertDefaultMessage(
+        alert.shortName,
+        alert.operator ?? 'crossing',
+        alert.targetPrice
+      );
+      return alert.message.trim() !== auto.trim();
+    }
+    return true;
+  }
+
   // svelte-ignore state_referenced_locally
   let symbol = $state(editingAlert?.symbol ?? initialSymbol ?? 'OANDA:XAUUSD');
   // svelte-ignore state_referenced_locally
@@ -77,7 +110,7 @@
   // svelte-ignore state_referenced_locally
   let operator = $state<AlertOperator>(editingAlert?.operator ?? 'crossing');
   // svelte-ignore state_referenced_locally
-  let valueStr = $state(
+  let valueStr = $state<string>(
     editingAlert?.targetPrice !== undefined
       ? String(editingAlert.targetPrice)
       : typeof initialPrice === 'number' && Number.isFinite(initialPrice)
@@ -91,9 +124,12 @@
     editingAlert ? (editingAlert.expiresAt === null ? 'open' : '30d') : '30d'
   );
   // svelte-ignore state_referenced_locally
+  let preservedExpiresAt = $state<string | null>(editingAlert?.expiresAt ?? null);
+  let expiryChanged = $state(false);
+  // svelte-ignore state_referenced_locally
   let customMessage = $state(editingAlert?.message ?? '');
   // svelte-ignore state_referenced_locally
-  let messageEdited = $state(Boolean(editingAlert));
+  let messageEdited = $state(isEditingCustomMessage(editingAlert));
 
   // Committed notification prefs
   // svelte-ignore state_referenced_locally
@@ -121,7 +157,7 @@
     editingAlert?.notifications?.schedule ?? DEFAULT_NOTIFICATIONS.schedule
   );
 
-  // Draft values for Notifications sub-view (plain primitive $state — zero proxy spreading issues)
+  // Draft values for Notifications sub-view (plain primitive $state)
   let draftDesktop = $state(true);
   let draftToast = $state(true);
   let draftSound = $state(true);
@@ -133,6 +169,7 @@
   let openMenu = $state<OpenMenu>(null);
   let symbolQuery = $state('');
   let formError = $state<string | null>(null);
+  let notifError = $state<string | null>(null);
 
   // Floating modal drag state (clamped cleanly inside window)
   let posX = $state(
@@ -146,11 +183,13 @@
   let dragging = $state(false);
   let dragOffsetX = 0;
   let dragOffsetY = 0;
+  let dragPointerId: number | null = null;
   let modalEl: HTMLDivElement | undefined = $state();
+  let headerEl: HTMLElement | undefined = $state();
 
   const autoMessage = $derived.by(() => {
-    const num = Number(valueStr);
-    if (Number.isFinite(num) && valueStr.trim() !== '') {
+    const num = parseTargetPrice(valueStr);
+    if (num !== null) {
       return formatAlertDefaultMessage(shortName, operator, num);
     }
     return `${shortName} ${OPERATOR_LABELS[operator]}`;
@@ -159,17 +198,12 @@
   const displayedMessage = $derived(messageEdited ? customMessage : autoMessage);
 
   const expiryDisplayLabel = $derived.by(() => {
+    if (!expiryChanged && preservedExpiresAt !== null) {
+      return formatExpiryDate(preservedExpiresAt);
+    }
     const opt = EXPIRY_OPTIONS.find((o) => o.id === expiryPreset);
     if (!opt || opt.days === null) return 'Open-ended';
-    const d = new Date(Date.now() + opt.days * 86_400_000);
-    return new Intl.DateTimeFormat('en-US', {
-      month: 'long',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    }).format(d);
+    return formatExpiryDate(new Date(Date.now() + opt.days * 86_400_000).toISOString());
   });
 
   const notificationSummary = $derived.by(() => {
@@ -177,12 +211,12 @@
     if (notifyDesktop) parts.push('Desktop');
     if (showToast) parts.push('Toasts');
     if (playSound) parts.push('Sound');
-    if (webhookEnabled && webhookUrl.trim()) parts.push('Webhook');
+    if (webhookEnabled && String(webhookUrl ?? '').trim()) parts.push('Webhook');
     return parts.length > 0 ? parts.join(', ') : 'Muted';
   });
 
   const filteredSymbols = $derived.by(() => {
-    const q = symbolQuery.trim().toUpperCase();
+    const q = String(symbolQuery ?? '').trim().toUpperCase();
     if (!q) return SYMBOL_CATALOG.slice(0, 10);
     return SYMBOL_CATALOG.filter(
       (s) =>
@@ -192,27 +226,66 @@
     ).slice(0, 10);
   });
 
-  function clampPosition(x: number, y: number): { x: number; y: number } {
+  function clampPosition(x: number, y: number, ensureFullHeight = false): { x: number; y: number } {
     if (typeof window === 'undefined') return { x, y };
     const w = modalEl?.offsetWidth ?? MODAL_WIDTH;
+    const h = modalEl?.offsetHeight ?? 420;
     const minVisible = 120;
-    const minX = -w + minVisible;
-    const maxX = window.innerWidth - minVisible;
+    const minX = ensureFullHeight ? 12 : -w + minVisible;
+    const maxX = ensureFullHeight
+      ? Math.max(12, window.innerWidth - w - 12)
+      : window.innerWidth - minVisible;
     const minY = TITLE_BAR_HEIGHT + 4;
-    const maxY = Math.max(minY, window.innerHeight - 64);
+    const maxY = ensureFullHeight
+      ? Math.max(minY, window.innerHeight - h - 12)
+      : Math.max(minY, window.innerHeight - 64);
     return {
       x: Math.round(Math.min(maxX, Math.max(minX, x))),
       y: Math.round(Math.min(maxY, Math.max(minY, y)))
     };
   }
 
+  function keepModalInViewport() {
+    if (typeof window === 'undefined') return;
+    requestAnimationFrame(() => {
+      if (!modalEl) return;
+      const h = modalEl.offsetHeight;
+      if (posY + h > window.innerHeight - 12) {
+        const next = clampPosition(posX, posY, true);
+        posX = next.x;
+        posY = next.y;
+      }
+    });
+  }
+
+  function endDrag() {
+    if (dragPointerId !== null && headerEl) {
+      try {
+        if (headerEl.hasPointerCapture(dragPointerId)) {
+          headerEl.releasePointerCapture(dragPointerId);
+        }
+      } catch {
+        // ignore if already released
+      }
+    }
+    dragPointerId = null;
+    if (dragging) dragging = false;
+  }
+
   function onHeaderPointerDown(e: PointerEvent) {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest('button, input, [data-am-menu]')) return;
+    const target = e.target as Element | null;
+    if (target?.closest?.('button, input, textarea, select, [data-am-menu]')) return;
     openMenu = null;
     dragging = true;
+    dragPointerId = e.pointerId;
     dragOffsetX = e.clientX - posX;
     dragOffsetY = e.clientY - posY;
+    try {
+      headerEl?.setPointerCapture(e.pointerId);
+    } catch {
+      // fallback to window listeners + drag-shield
+    }
     e.preventDefault();
   }
 
@@ -224,13 +297,25 @@
   }
 
   function onWindowPointerUp() {
-    if (dragging) dragging = false;
+    endDrag();
+  }
+
+  function onWindowBlur() {
+    endDrag();
+    openMenu = null;
+  }
+
+  function onWindowResize() {
+    openMenu = null;
+    const next = clampPosition(posX, posY, true);
+    posX = next.x;
+    posY = next.y;
   }
 
   function onWindowPointerDown(e: PointerEvent) {
     if (!openMenu) return;
-    const target = e.target as HTMLElement | null;
-    if (target && !target.closest('[data-am-menu]')) {
+    const target = e.target as Element | null;
+    if (!target || !target.closest?.('[data-am-menu]')) {
       openMenu = null;
     }
   }
@@ -240,8 +325,9 @@
       if (openMenu) {
         openMenu = null;
       } else if (view === 'notifications') {
-        view = 'main';
+        cancelNotifications();
       } else {
+        endDrag();
         onClose();
       }
     }
@@ -260,7 +346,9 @@
   }
 
   function openNotificationsSubView() {
+    endDrag();
     openMenu = null;
+    notifError = null;
     draftDesktop = notifyDesktop;
     draftToast = showToast;
     draftSound = playSound;
@@ -268,45 +356,85 @@
     draftWebhookUrl = webhookUrl;
     draftSchedule = schedule;
     view = 'notifications';
+    keepModalInViewport();
   }
 
   function cancelNotifications() {
+    endDrag();
     openMenu = null;
+    notifError = null;
     view = 'main';
   }
 
   function applyNotifications() {
+    const trimmedUrl = String(draftWebhookUrl ?? '').trim();
+    if (draftWebhookEnabled && trimmedUrl) {
+      let validHttps = false;
+      try {
+        const parsed = new URL(trimmedUrl);
+        validHttps = parsed.protocol === 'https:';
+      } catch {
+        validHttps = false;
+      }
+      if (!validHttps) {
+        notifError = 'Webhook URL must be a valid https:// URL.';
+        return;
+      }
+    }
+
     notifyDesktop = draftDesktop;
     showToast = draftToast;
     playSound = draftSound;
     webhookEnabled = draftWebhookEnabled;
-    webhookUrl = draftWebhookUrl;
+    webhookUrl = trimmedUrl;
     schedule = draftSchedule;
     openMenu = null;
+    notifError = null;
     view = 'main';
   }
 
   function submitAlert() {
-    const num = Number(valueStr);
-    if (!Number.isFinite(num) || valueStr.trim() === '' || num <= 0) {
+    const num = parseTargetPrice(valueStr);
+    if (num === null || num <= 0) {
       formError = 'Enter a valid target price.';
       return;
     }
 
-    const expOpt = EXPIRY_OPTIONS.find((o) => o.id === expiryPreset);
-    const expiresAt =
-      expOpt && expOpt.days !== null
-        ? new Date(Date.now() + expOpt.days * 86_400_000).toISOString()
-        : null;
+    let expiresAt: string | null;
+    if (!expiryChanged && editingAlert) {
+      expiresAt = preservedExpiresAt;
+    } else {
+      const expOpt = EXPIRY_OPTIONS.find((o) => o.id === expiryPreset);
+      expiresAt =
+        expOpt && expOpt.days !== null
+          ? new Date(Date.now() + expOpt.days * 86_400_000).toISOString()
+          : null;
+    }
 
     const notifPrefs: AlertNotificationPrefs = {
       notifyDesktop,
       showToast,
       playSound,
       webhookEnabled,
-      webhookUrl: webhookUrl.trim(),
+      webhookUrl: String(webhookUrl ?? '').trim(),
       schedule
     };
+
+    const sameEditingSymbol =
+      Boolean(editingAlert) &&
+      (editingAlert?.symbol ?? '').toUpperCase() === symbol.toUpperCase();
+
+    const conditionChanged =
+      !sameEditingSymbol ||
+      editingAlert?.operator !== operator ||
+      editingAlert?.targetPrice !== num;
+
+    const initialSeedPrice =
+      typeof initialPrice === 'number' &&
+      Number.isFinite(initialPrice) &&
+      shortName.toUpperCase() === (initialShortName ?? '').toUpperCase()
+        ? initialPrice
+        : undefined;
 
     const nowIso = new Date().toISOString();
     const alert: TradingAlert = {
@@ -316,22 +444,22 @@
       shortName,
       operator,
       targetPrice: num,
-      lastSeenPrice:
-        editingAlert?.lastSeenPrice ??
-        (typeof initialPrice === 'number' &&
-        Number.isFinite(initialPrice) &&
-        shortName.toUpperCase() === initialShortName.toUpperCase()
-          ? initialPrice
-          : undefined),
+      lastSeenPrice: sameEditingSymbol ? editingAlert?.lastSeenPrice : initialSeedPrice,
       trigger,
       expiresAt,
-      message: (messageEdited ? customMessage.trim() : autoMessage) || autoMessage,
+      message: (messageEdited ? String(customMessage ?? '').trim() : autoMessage) || autoMessage,
       status: editingAlert?.status === 'paused' ? 'paused' : 'active',
       notifications: notifPrefs,
       createdAt: editingAlert?.createdAt ?? nowIso,
-      lastTriggeredAt: editingAlert?.lastTriggeredAt
+      lastTriggeredAt:
+        conditionChanged ||
+        editingAlert?.status === 'triggered' ||
+        editingAlert?.status === 'expired'
+          ? undefined
+          : editingAlert?.lastTriggeredAt
     };
 
+    endDrag();
     onSave(alert);
     onClose();
   }
@@ -343,6 +471,8 @@
   onpointermove={onWindowPointerMove}
   onpointerup={onWindowPointerUp}
   onpointercancel={onWindowPointerUp}
+  onblur={onWindowBlur}
+  onresize={onWindowResize}
 />
 
 {#if dragging}
@@ -362,7 +492,12 @@
 >
   <!-- Single persistent draggable header (never unmounted on view switch) -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <header class="modal-header" onpointerdown={onHeaderPointerDown}>
+  <header
+    bind:this={headerEl}
+    class="modal-header"
+    onpointerdown={onHeaderPointerDown}
+    onlostpointercapture={endDrag}
+  >
     {#if view === 'main'}
       <div class="header-left">
         <span class="modal-title">{editingAlert ? 'Edit alert on' : 'Create alert on'}</span>
@@ -417,7 +552,15 @@
       </div>
     {/if}
 
-    <button class="close-btn" type="button" aria-label="Close" onclick={onClose}>
+    <button
+      class="close-btn"
+      type="button"
+      aria-label="Close"
+      onclick={() => {
+        endDrag();
+        onClose();
+      }}
+    >
       <svg viewBox="0 0 18 18" aria-hidden="true">
         <path d="m4.5 4.5 9 9m0-9-9 9" />
       </svg>
@@ -467,11 +610,22 @@
             <div class="value-kind">Value</div>
             <input
               class="tv-input num"
-              type="number"
-              step="any"
+              type="text"
+              inputmode="decimal"
+              autocomplete="off"
+              spellcheck="false"
               placeholder="Target price"
-              bind:value={valueStr}
-              oninput={() => (formError = null)}
+              value={valueStr}
+              oninput={(e) => {
+                valueStr = (e.currentTarget as HTMLInputElement).value;
+                formError = null;
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' && !openMenu) {
+                  e.preventDefault();
+                  submitAlert();
+                }
+              }}
             />
           </div>
         </div>
@@ -535,10 +689,11 @@
                 {#each EXPIRY_OPTIONS as opt (opt.id)}
                   <button
                     class="menu-opt"
-                    class:active={expiryPreset === opt.id}
+                    class:active={expiryChanged && expiryPreset === opt.id}
                     type="button"
                     onclick={() => {
                       expiryPreset = opt.id;
+                      expiryChanged = true;
                       openMenu = null;
                     }}
                   >
@@ -587,7 +742,16 @@
     </div>
 
     <div class="modal-footer">
-      <button class="btn-cancel" type="button" onclick={onClose}>Cancel</button>
+      <button
+        class="btn-cancel"
+        type="button"
+        onclick={() => {
+          endDrag();
+          onClose();
+        }}
+      >
+        Cancel
+      </button>
       <button class="btn-primary" type="button" onclick={submitAlert}>
         {editingAlert ? 'Save' : 'Create'}
       </button>
@@ -655,7 +819,7 @@
             <span class="check-desc">Plays an audio cue when your alert triggers.</span>
           </span>
         </button>
-        <button class="test-sound" type="button" onclick={playAlertChime}>Test</button>
+        <button class="test-sound" type="button" onclick={() => playAlertChime()}>Test</button>
       </div>
 
       <div class="webhook-block">
@@ -664,7 +828,11 @@
           type="button"
           role="checkbox"
           aria-checked={draftWebhookEnabled}
-          onclick={() => (draftWebhookEnabled = !draftWebhookEnabled)}
+          onclick={() => {
+            draftWebhookEnabled = !draftWebhookEnabled;
+            notifError = null;
+            if (draftWebhookEnabled) keepModalInViewport();
+          }}
         >
           <span class="cb-box" class:checked={draftWebhookEnabled}>
             {#if draftWebhookEnabled}
@@ -683,7 +851,11 @@
             class="tv-input webhook-input"
             type="url"
             placeholder="https://discord.com/api/webhooks/..."
-            bind:value={draftWebhookUrl}
+            value={draftWebhookUrl}
+            oninput={(e) => {
+              draftWebhookUrl = (e.currentTarget as HTMLInputElement).value;
+              notifError = null;
+            }}
           />
         {/if}
       </div>
@@ -725,6 +897,10 @@
         </div>
         <span class="check-desc">Notifications are muted outside this schedule.</span>
       </div>
+
+      {#if notifError}
+        <div class="form-err">{notifError}</div>
+      {/if}
     </div>
 
     <div class="modal-footer">

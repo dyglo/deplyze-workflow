@@ -95,12 +95,36 @@ export const DEFAULT_NOTIFICATIONS: AlertNotificationPrefs = {
 
 const STORAGE_KEY = 'alerts';
 const REPEAT_COOLDOWN_MS = 60_000;
+const LIVE_FEED_FRESH_MS = 20_000;
 
 let state: AlertsState = { alerts: [], log: [] };
 let hydrated = false;
+let hydrationPromise: Promise<AlertsState> | null = null;
 const stateListeners = new Set<(s: AlertsState) => void>();
 const toastListeners = new Set<(toast: InAppAlertToast) => void>();
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
+let pollInFlight = false;
+
+// Track per-alert last seen prices in memory so 1-second chart ticks never spam disk I/O or UI re-renders.
+const lastSeenPrices = new Map<string, number>();
+// Track symbols receiving live chart ticks so background polling does not inject stale cached quotes.
+const lastLiveTickAt = new Map<string, number>();
+
+function stripExchange(sym: string): string {
+  const upper = sym.trim().toUpperCase();
+  const idx = upper.indexOf(':');
+  return idx >= 0 ? upper.slice(idx + 1) : upper;
+}
+
+function normalizeLoadedAlert(raw: TradingAlert): TradingAlert {
+  return {
+    ...raw,
+    notifications: {
+      ...DEFAULT_NOTIFICATIONS,
+      ...(raw.notifications ?? {})
+    }
+  };
+}
 
 function emitState() {
   for (const fn of stateListeners) fn(state);
@@ -111,16 +135,49 @@ function emitToast(toast: InAppAlertToast) {
 }
 
 export async function initAlertsStore(): Promise<AlertsState> {
-  if (!hydrated) {
-    hydrated = true;
-    const loaded = await loadWorkspaceJson<AlertsState>(STORAGE_KEY, { alerts: [], log: [] });
-    state = {
-      alerts: Array.isArray(loaded.alerts) ? loaded.alerts : [],
-      log: Array.isArray(loaded.log) ? loaded.log : []
-    };
-    emitState();
+  if (hydrated) return state;
+  if (!hydrationPromise) {
+    hydrationPromise = loadWorkspaceJson<AlertsState>(STORAGE_KEY, { alerts: [], log: [] })
+      .then((loaded) => {
+        const diskAlerts = Array.isArray(loaded?.alerts)
+          ? loaded.alerts.map(normalizeLoadedAlert)
+          : [];
+        const diskLog = Array.isArray(loaded?.log) ? loaded.log : [];
+
+        // Preserve any alerts/logs created in-memory before hydration finished
+        const memAlertIds = new Set(state.alerts.map((a) => a.id));
+        const mergedAlerts = [
+          ...state.alerts,
+          ...diskAlerts.filter((a) => !memAlertIds.has(a.id))
+        ];
+
+        const memLogIds = new Set(state.log.map((l) => l.id));
+        const mergedLog = [
+          ...state.log,
+          ...diskLog.filter((l) => !memLogIds.has(l.id))
+        ].slice(0, 100);
+
+        for (const a of mergedAlerts) {
+          if (
+            typeof a.lastSeenPrice === 'number' &&
+            Number.isFinite(a.lastSeenPrice) &&
+            !lastSeenPrices.has(a.id)
+          ) {
+            lastSeenPrices.set(a.id, a.lastSeenPrice);
+          }
+        }
+
+        state = { alerts: mergedAlerts, log: mergedLog };
+        hydrated = true;
+        emitState();
+        return state;
+      })
+      .catch(() => {
+        hydrated = true;
+        return state;
+      });
   }
-  return state;
+  return hydrationPromise;
 }
 
 export function getAlertsSnapshot(): AlertsState {
@@ -161,14 +218,22 @@ export function formatAlertDefaultMessage(
 }
 
 export function upsertAlert(alert: TradingAlert): void {
-  const exists = state.alerts.some((a) => a.id === alert.id);
+  const normalized = normalizeLoadedAlert(alert);
+  if (typeof normalized.lastSeenPrice === 'number' && Number.isFinite(normalized.lastSeenPrice)) {
+    lastSeenPrices.set(normalized.id, normalized.lastSeenPrice);
+  } else {
+    lastSeenPrices.delete(normalized.id);
+  }
+
+  const exists = state.alerts.some((a) => a.id === normalized.id);
   const alerts = exists
-    ? state.alerts.map((a) => (a.id === alert.id ? alert : a))
-    : [alert, ...state.alerts];
+    ? state.alerts.map((a) => (a.id === normalized.id ? normalized : a))
+    : [normalized, ...state.alerts];
   commitState({ ...state, alerts });
 }
 
 export function deleteAlertById(id: string): void {
+  lastSeenPrices.delete(id);
   commitState({
     ...state,
     alerts: state.alerts.filter((a) => a.id !== id)
@@ -181,7 +246,14 @@ export function togglePauseAlert(id: string): void {
     alerts: state.alerts.map((a) => {
       if (a.id !== id) return a;
       if (a.status === 'active') return { ...a, status: 'paused' };
-      return { ...a, status: 'active' };
+      // Resuming or restarting: clear stale baseline price so crossing alerts re-seed cleanly
+      lastSeenPrices.delete(a.id);
+      return {
+        ...a,
+        status: 'active',
+        lastSeenPrice: undefined,
+        lastTriggeredAt: a.status === 'triggered' ? undefined : a.lastTriggeredAt
+      };
     })
   });
 }
@@ -196,7 +268,11 @@ export function pauseAllAlerts(): void {
 export function resumeAllAlerts(): void {
   commitState({
     ...state,
-    alerts: state.alerts.map((a) => (a.status === 'paused' ? { ...a, status: 'active' } : a))
+    alerts: state.alerts.map((a) => {
+      if (a.status !== 'paused') return a;
+      lastSeenPrices.delete(a.id);
+      return { ...a, status: 'active', lastSeenPrice: undefined };
+    })
   });
 }
 
@@ -207,11 +283,14 @@ export function clearAlertLog(): void {
 export function countActiveAlertsForSymbol(symbol: string, shortName: string): number {
   const s1 = symbol.toUpperCase();
   const s2 = shortName.toUpperCase();
+  const s2Bare = stripExchange(shortName);
   return state.alerts.filter(
     (a) =>
       a.status === 'active' &&
       a.kind === 'price' &&
-      (a.symbol.toUpperCase() === s1 || a.shortName.toUpperCase() === s2)
+      (a.symbol.toUpperCase() === s1 ||
+        a.shortName.toUpperCase() === s2 ||
+        stripExchange(a.symbol) === s2Bare)
   ).length;
 }
 
@@ -230,8 +309,17 @@ export function toggleNewsAlertForEvent(params: {
 }): boolean {
   const existing = state.alerts.find((a) => a.kind === 'news' && a.eventId === params.eventId);
   if (existing) {
-    deleteAlertById(existing.id);
-    return false;
+    if (existing.status === 'active') {
+      deleteAlertById(existing.id);
+      return false;
+    }
+    upsertAlert({
+      ...existing,
+      status: 'active',
+      eventTs: params.ts,
+      expiresAt: new Date((params.ts + 3600) * 1000).toISOString()
+    });
+    return true;
   }
 
   const lead = params.leadMinutes ?? 15;
@@ -329,12 +417,15 @@ async function fireAlertNotification(alert: TradingAlert, currentPrice?: number)
   }
 
   if (prefs.webhookEnabled && prefs.webhookUrl.trim()) {
+    const summaryText = `${title} — ${body}`;
     void fetch(`${getApiBaseUrl()}/api/alerts/webhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: prefs.webhookUrl.trim(),
         payload: {
+          content: summaryText,
+          text: summaryText,
           source: 'DeplyzeWorkflow',
           title,
           message: body,
@@ -351,33 +442,50 @@ async function fireAlertNotification(alert: TradingAlert, currentPrice?: number)
   }
 }
 
+function alertMatchesSymbol(alert: TradingAlert, sFull: string, sShort: string, sBare: string): boolean {
+  const aFull = alert.symbol.toUpperCase();
+  const aShort = alert.shortName.toUpperCase();
+  return (
+    aFull === sFull ||
+    aShort === sShort ||
+    stripExchange(aFull) === sBare ||
+    stripExchange(aShort) === sBare
+  );
+}
+
 /** Feed live price updates (from active chart or backend polling) into active price alerts. */
 export function evaluateAlertsWithPrice(
   symbol: string,
   shortName: string,
-  price: number
+  price: number,
+  source: 'live' | 'poll' = 'poll'
 ): void {
-  if (!Number.isFinite(price) || state.alerts.length === 0) return;
+  if (!Number.isFinite(price)) return;
   const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
   const sFull = symbol.toUpperCase();
   const sShort = shortName.toUpperCase();
+  const sBare = stripExchange(shortName || symbol);
 
-  let changed = false;
+  if (source === 'live') {
+    lastLiveTickAt.set(sFull, nowMs);
+    lastLiveTickAt.set(sShort, nowMs);
+    lastLiveTickAt.set(sBare, nowMs);
+  }
+
+  if (state.alerts.length === 0) return;
+
+  const nowIso = new Date(nowMs).toISOString();
+  let stateChanged = false;
   const nextLogs: AlertLogEntry[] = [];
   const toFire: TradingAlert[] = [];
 
   const nextAlerts = state.alerts.map((alert) => {
     if (alert.kind !== 'price' || alert.status !== 'active') return alert;
-    if (
-      alert.symbol.toUpperCase() !== sFull &&
-      alert.shortName.toUpperCase() !== sShort
-    ) {
-      return alert;
-    }
+    if (!alertMatchesSymbol(alert, sFull, sShort, sBare)) return alert;
 
     if (alert.expiresAt && Date.parse(alert.expiresAt) <= nowMs) {
-      changed = true;
+      stateChanged = true;
+      lastSeenPrices.delete(alert.id);
       return { ...alert, status: 'expired' as AlertStatus };
     }
 
@@ -385,18 +493,22 @@ export function evaluateAlertsWithPrice(
     const op = alert.operator ?? 'crossing';
     if (typeof target !== 'number' || !Number.isFinite(target)) return alert;
 
-    const prevPrice = alert.lastSeenPrice;
+    const prevPrice = lastSeenPrices.has(alert.id)
+      ? lastSeenPrices.get(alert.id)
+      : alert.lastSeenPrice;
+
     // Seed initial baseline price cleanly on first tick for Crossing alerts so they don't misfire
     if (prevPrice === undefined && (op === 'crossing' || op === 'crossing_up' || op === 'crossing_down')) {
-      changed = true;
-      return { ...alert, lastSeenPrice: price };
+      lastSeenPrices.set(alert.id, price);
+      return alert;
     }
 
     const cooldownOk =
       !alert.lastTriggeredAt || nowMs - Date.parse(alert.lastTriggeredAt) >= REPEAT_COOLDOWN_MS;
 
     if (cooldownOk && matchesPriceCondition(op, target, price, prevPrice)) {
-      changed = true;
+      stateChanged = true;
+      lastSeenPrices.set(alert.id, price);
       toFire.push(alert);
       nextLogs.push({
         id: makeWorkspaceId('log'),
@@ -417,14 +529,12 @@ export function evaluateAlertsWithPrice(
       };
     }
 
-    if (prevPrice !== price) {
-      changed = true;
-      return { ...alert, lastSeenPrice: price };
-    }
+    // Update in-memory baseline only — zero disk writes or UI re-renders on normal price ticks
+    lastSeenPrices.set(alert.id, price);
     return alert;
   });
 
-  if (changed) {
+  if (stateChanged) {
     commitState({
       alerts: nextAlerts,
       log: nextLogs.length > 0 ? [...nextLogs, ...state.log] : state.log
@@ -433,6 +543,28 @@ export function evaluateAlertsWithPrice(
 
   for (const a of toFire) {
     void fireAlertNotification(a, price);
+  }
+}
+
+function expireStalePriceAlerts(): void {
+  if (state.alerts.length === 0) return;
+  const nowMs = Date.now();
+  let changed = false;
+  const nextAlerts = state.alerts.map((alert) => {
+    if (
+      alert.kind === 'price' &&
+      alert.status === 'active' &&
+      alert.expiresAt &&
+      Date.parse(alert.expiresAt) <= nowMs
+    ) {
+      changed = true;
+      lastSeenPrices.delete(alert.id);
+      return { ...alert, status: 'expired' as AlertStatus };
+    }
+    return alert;
+  });
+  if (changed) {
+    commitState({ ...state, alerts: nextAlerts });
   }
 }
 
@@ -492,35 +624,56 @@ function evaluateNewsAlerts(): void {
   }
 }
 
+function hasFreshLiveFeed(alert: TradingAlert, nowMs: number): boolean {
+  const keys = [
+    alert.symbol.toUpperCase(),
+    alert.shortName.toUpperCase(),
+    stripExchange(alert.symbol)
+  ];
+  for (const key of keys) {
+    const ts = lastLiveTickAt.get(key);
+    if (ts !== undefined && nowMs - ts < LIVE_FEED_FRESH_MS) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function pollBackgroundPriceAlerts(): Promise<void> {
+  if (pollInFlight) return;
+  const nowMs = Date.now();
   const activePriceSymbols = Array.from(
     new Set(
       state.alerts
-        .filter((a) => a.kind === 'price' && a.status === 'active')
+        .filter((a) => a.kind === 'price' && a.status === 'active' && !hasFreshLiveFeed(a, nowMs))
         .map((a) => a.symbol)
     )
   );
   if (activePriceSymbols.length === 0) return;
 
+  pollInFlight = true;
   try {
     const quotes = await fetchMarketQuotes(activePriceSymbols);
     for (const q of Object.values(quotes)) {
-      evaluateAlertsWithPrice(q.symbol, q.shortName, q.price);
+      evaluateAlertsWithPrice(q.symbol, q.shortName, q.price, 'poll');
     }
   } catch {
     // Non-fatal offline tick
   }
+  pollInFlight = false;
 }
 
 /** Starts background polling for price alerts (non-active symbols) and calendar news alerts. */
 export function startAlertMonitor(): () => void {
   void initAlertsStore().then(() => {
+    expireStalePriceAlerts();
     evaluateNewsAlerts();
     void pollBackgroundPriceAlerts();
   });
 
   if (monitorInterval) clearInterval(monitorInterval);
   monitorInterval = setInterval(() => {
+    expireStalePriceAlerts();
     evaluateNewsAlerts();
     void pollBackgroundPriceAlerts();
   }, 15_000);

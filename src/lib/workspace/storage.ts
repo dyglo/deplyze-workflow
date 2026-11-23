@@ -82,6 +82,11 @@ export function playAlertChime(): void {
       window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtx) return;
     const ctx = new AudioCtx();
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {
+        // ignore autoplay restriction
+      });
+    }
     const now = ctx.currentTime;
 
     const notes = [880, 1174.66]; // A5 -> D6 clean harmonic interval
@@ -100,7 +105,9 @@ export function playAlertChime(): void {
     }
 
     setTimeout(() => {
-      void ctx.close();
+      void ctx.close().catch(() => {
+        // ignore already closed
+      });
     }, 900);
   } catch {
     // ignore autoplay restriction

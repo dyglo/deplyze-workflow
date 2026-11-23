@@ -253,8 +253,9 @@
 
   function handleTabQuote(tabId: string, quote: ChartQuote) {
     if (Number.isFinite(quote.price)) {
-      evaluateAlertsWithPrice(quote.symbol, quote.shortName, quote.price);
+      evaluateAlertsWithPrice(quote.symbol, quote.shortName, quote.price, 'live');
     }
+    let changed = false;
     let symbolChanged = false;
     const nextGroups = tabsState.groups.map((g) => {
       if (!g.tabs.some((t) => t.id === tabId)) return g;
@@ -262,6 +263,15 @@
         ...g,
         tabs: g.tabs.map((t) => {
           if (t.id !== tabId) return t;
+          if (
+            t.symbol === quote.symbol &&
+            t.title === quote.shortName &&
+            t.quote?.price === quote.price &&
+            t.quote?.changePercent === quote.changePercent
+          ) {
+            return t;
+          }
+          changed = true;
           if (t.symbol !== quote.symbol || t.title !== quote.shortName) {
             symbolChanged = true;
           }
@@ -278,6 +288,7 @@
       };
     });
 
+    if (!changed) return;
     const nextState: TabsState = { ...tabsState, groups: nextGroups };
     tabsState = nextState;
     if (symbolChanged) {

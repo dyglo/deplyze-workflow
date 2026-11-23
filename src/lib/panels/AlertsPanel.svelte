@@ -70,15 +70,26 @@
       alertsState = s;
     });
     const onDocDown = (e: PointerEvent) => {
-      const el = e.target as HTMLElement | null;
-      if (moreMenuOpen && el && !el.closest('[data-al-more]')) {
+      const el = e.target as Element | null;
+      if (moreMenuOpen && (!el || !el.closest?.('[data-al-more]'))) {
         moreMenuOpen = false;
       }
     };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (pendingDelete) {
+          pendingDelete = null;
+        } else if (moreMenuOpen) {
+          moreMenuOpen = false;
+        }
+      }
+    };
     window.addEventListener('pointerdown', onDocDown);
+    window.addEventListener('keydown', onKeyDown);
     return () => {
       unsub();
       window.removeEventListener('pointerdown', onDocDown);
+      window.removeEventListener('keydown', onKeyDown);
     };
   });
 
@@ -323,11 +334,15 @@
 
                 <!-- Hover quick actions matching Screenshot 7 -->
                 <div class="alert-actions">
-                  {#if alert.status === 'active' || alert.status === 'paused'}
+                  {#if alert.status === 'active' || alert.status === 'paused' || (alert.kind === 'price' && alert.status === 'triggered')}
                     <button
                       class="row-icon"
                       type="button"
-                      title={alert.status === 'active' ? 'Pause alert' : 'Resume alert'}
+                      title={alert.status === 'active'
+                        ? 'Pause alert'
+                        : alert.status === 'triggered'
+                          ? 'Restart alert'
+                          : 'Resume alert'}
                       onclick={(e) => {
                         e.stopPropagation();
                         togglePauseAlert(alert.id);
@@ -444,7 +459,7 @@
     --al-tab-active: #242938;
     --al-cta-bg: #e6e9f0;
     --al-cta-fg: #0b0d12;
-    --al-popover-bg: rgba(20, 23, 31, 0.96);
+    --al-popover-bg: rgba(18, 18, 18, 0.86);
     --al-popover-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
 
     flex: 1;
@@ -560,7 +575,8 @@
     border: 1px solid var(--al-border);
     background: var(--al-popover-bg);
     box-shadow: var(--al-popover-shadow);
-    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(22px) saturate(135%);
+    backdrop-filter: blur(22px) saturate(135%);
     z-index: 25;
   }
 
@@ -750,7 +766,8 @@
     transition: opacity 120ms ease;
   }
 
-  .alert-row:hover .alert-actions {
+  .alert-row:hover .alert-actions,
+  .alert-row:focus-within .alert-actions {
     opacity: 1;
   }
 
@@ -835,7 +852,7 @@
     padding: 20px;
     border-radius: 12px;
     color: #f0f0f0;
-    background: rgba(18, 18, 18, 0.88);
+    background: rgba(18, 18, 18, 0.86);
     -webkit-backdrop-filter: blur(22px) saturate(135%);
     backdrop-filter: blur(22px) saturate(135%);
     box-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
