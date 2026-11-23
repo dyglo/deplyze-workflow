@@ -1,6 +1,7 @@
 <script lang="ts">
   import CalendarPanel from './panels/CalendarPanel.svelte';
   import LayoutPopover from './panels/LayoutPopover.svelte';
+  import NotesPanel from './panels/NotesPanel.svelte';
   import SettingsModal from './panels/SettingsModal.svelte';
   import { getLayoutById, type LayoutId } from './chart/layouts';
   import type { ChartSettings } from './settings/chartSettings';
@@ -8,6 +9,8 @@
   export let theme: 'dark' | 'light';
   export let chartSettings: ChartSettings;
   export let layoutId: LayoutId;
+  export let activeSymbol: string;
+  export let activeFullSymbol: string;
   export let settingsOpen: boolean;
   export let onToggleSettings: () => void;
   export let onCloseSettings: () => void;
@@ -56,6 +59,8 @@
 
 {#if active === 'calendar'}
   <CalendarPanel {theme} onClose={closePanel} />
+{:else if active === 'note'}
+  <NotesPanel {theme} {activeSymbol} {activeFullSymbol} onClose={closePanel} />
 {/if}
 
 {#if layoutAnchor}

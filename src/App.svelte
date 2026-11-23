@@ -277,6 +277,8 @@
       {theme}
       {chartSettings}
       layoutId={activeTab.layoutId}
+      activeSymbol={activeTab.title}
+      activeFullSymbol={activeTab.symbol}
       {settingsOpen}
       onToggleSettings={() => (settingsOpen = !settingsOpen)}
       onCloseSettings={() => (settingsOpen = false)}
