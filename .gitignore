@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Build outputs
+dist/
+server/dist/
+src-tauri/target/
+src-tauri/gen/
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local scratch & logs
+.work/
+outputs/
+*.log
+npm-debug.log*
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
