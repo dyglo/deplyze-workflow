@@ -1,3 +1,5 @@
+mod ai;
+mod capture;
 mod notes;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -10,6 +12,9 @@ pub fn run() {
             notes::notes_save_image_bytes,
             notes::notes_copy_image_file,
             notes::notes_delete_image,
+            capture::capture_chart_region,
+            ai::ai_chats_load,
+            ai::ai_chats_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

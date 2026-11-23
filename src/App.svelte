@@ -279,6 +279,8 @@
       layoutId={activeTab.layoutId}
       activeSymbol={activeTab.title}
       activeFullSymbol={activeTab.symbol}
+      activePrice={activeTab.quote?.price}
+      activeChangePercent={activeTab.quote?.changePercent}
       {settingsOpen}
       onToggleSettings={() => (settingsOpen = !settingsOpen)}
       onCloseSettings={() => (settingsOpen = false)}

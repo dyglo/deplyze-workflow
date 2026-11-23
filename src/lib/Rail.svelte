@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AiPanel from './panels/AiPanel.svelte';
   import CalendarPanel from './panels/CalendarPanel.svelte';
   import LayoutPopover from './panels/LayoutPopover.svelte';
   import NotesPanel from './panels/NotesPanel.svelte';
@@ -12,6 +13,8 @@
   export let layoutId: LayoutId;
   export let activeSymbol: string;
   export let activeFullSymbol: string;
+  export let activePrice: number | undefined = undefined;
+  export let activeChangePercent: number | undefined = undefined;
   export let settingsOpen: boolean;
   export let onToggleSettings: () => void;
   export let onCloseSettings: () => void;
@@ -62,6 +65,15 @@
   <CalendarPanel {theme} onClose={closePanel} />
 {:else if active === 'note'}
   <NotesPanel {theme} {activeSymbol} {activeFullSymbol} onClose={closePanel} />
+{:else if active === 'ai'}
+  <AiPanel
+    {theme}
+    {activeSymbol}
+    {activeFullSymbol}
+    {activePrice}
+    {activeChangePercent}
+    onClose={closePanel}
+  />
 {:else if active === 'trash'}
   <TrashPanel {theme} onClose={closePanel} />
 {/if}
