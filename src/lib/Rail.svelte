@@ -7,11 +7,11 @@
   import CreateAlertModal from './panels/CreateAlertModal.svelte';
   import FavoritesPanel from './panels/FavoritesPanel.svelte';
   import LayoutPopover from './panels/LayoutPopover.svelte';
+  import NewsFlowPanel from './panels/NewsFlowPanel.svelte';
   import NotesPanel from './panels/NotesPanel.svelte';
   import RoutinesPanel from './panels/RoutinesPanel.svelte';
   import SettingsModal from './panels/SettingsModal.svelte';
   import TasksPanel from './panels/TasksPanel.svelte';
-  import TrashPanel from './panels/TrashPanel.svelte';
   import WatchlistPanel from './panels/WatchlistPanel.svelte';
   import { upsertAlert, type TradingAlert } from './alerts/store';
   import { getLayoutById, type LayoutId } from './chart/layouts';
@@ -33,6 +33,7 @@
     onSelectLayout: (next: LayoutId) => void;
     onSelectSymbol: (symbol: string, shortName: string) => void;
     onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
+    onOpenOnChart: (symbol: string, shortName: string) => void;
   }
 
   let {
@@ -49,7 +50,8 @@
     onSaveChartSettings,
     onSelectLayout,
     onSelectSymbol,
-    onOpenSymbolInNewTab
+    onOpenSymbolInNewTab,
+    onOpenOnChart
   }: Props = $props();
 
   type RailId =
@@ -61,7 +63,7 @@
     | 'alerts'
     | 'routines'
     | 'favorites'
-    | 'trash'
+    | 'news'
     | 'cloud';
 
   const VALID_RAIL_IDS: readonly RailId[] = [
@@ -73,7 +75,7 @@
     'alerts',
     'routines',
     'favorites',
-    'trash',
+    'news',
     'cloud'
   ];
   const RAIL_STORAGE_KEY = 'deplyzeworkflow-rail';
@@ -243,8 +245,16 @@
     {onSelectSymbol}
     onClose={closePanel}
   />
-{:else if active === 'trash'}
-  <TrashPanel {theme} onClose={closePanel} />
+{:else if active === 'news'}
+  <NewsFlowPanel
+    {theme}
+    {activeSymbol}
+    {activeFullSymbol}
+    {activePrice}
+    {activeChangePercent}
+    {onOpenOnChart}
+    onClose={closePanel}
+  />
 {:else if active === 'cloud'}
   <CloudPanel {theme} onClose={closePanel} />
 {/if}
@@ -409,17 +419,20 @@
 
   <button
     class="rail-button"
-    class:active={active === 'trash'}
+    class:active={active === 'news'}
     type="button"
-    aria-label="Trash"
-    title="Trash"
-    aria-pressed={active === 'trash'}
-    onclick={() => select('trash')}
+    aria-label="News Flow"
+    title="News Flow"
+    aria-pressed={active === 'news'}
+    onclick={() => select('news')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
-      <ellipse cx="10" cy="5.25" rx="4.75" ry="1.75" />
-      <path d="M5.25 5.25l.9 9.4a2.35 2.35 0 0 0 2.35 2.1h3a2.35 2.35 0 0 0 2.35-2.1l.9-9.4" />
-      <path d="m8.6 10.35 2.8 2.8m0-2.8-2.8 2.8" />
+      <path d="M9.9 17.25H4.5a1.5 1.5 0 0 1-1.5-1.5V4.25a1.5 1.5 0 0 1 1.5-1.5h9.75a1.5 1.5 0 0 1 1.5 1.5V9.2" />
+      <rect x="5.5" y="5.5" width="3.5" height="3.5" rx="0.5" />
+      <path d="M11.25 6.75h2.25" />
+      <path d="M5.5 12h3.75" />
+      <circle cx="14.25" cy="14.25" r="3.4" />
+      <path d="M14.25 14.25 15.7 12.8" />
     </svg>
   </button>
 

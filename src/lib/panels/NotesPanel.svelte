@@ -4,14 +4,19 @@
   import ImageLightbox from './ImageLightbox.svelte';
   import PanelShell from './PanelShell.svelte';
   import {
+    NOTE_UNDO_WINDOW_MS,
     deleteImageFile,
     getImageUrl,
     getImagesDir,
+    getRecentDeletedNotes,
     isSupportedImagePath,
     loadNotes,
+    permanentlyDeleteNote,
+    purgeExpiredDeletedNotes,
     saveImageFromBlob,
     saveImageFromPath,
-    saveNotes
+    saveNotes,
+    subscribeNotesChanged
   } from '../notes/api';
   import {
     formatDateHeading,
@@ -48,7 +53,9 @@
   let symbolDraft = $state('');
 
   let lightboxState = $state<{ index: number } | null>(null);
-  let undoToast = $state<{ noteId: string; title: string } | null>(null);
+  let undoToast = $state<{ noteId: string; title: string; deletedAtMs: number } | null>(null);
+  let restoredBanner = $state<string | null>(null);
+  let clockTickMs = $state(Date.now());
   let playbookNoteIds = $state<Record<string, boolean>>({});
   let playbookSavedId = $state<string | null>(null);
 
@@ -59,10 +66,39 @@
   let symbolInputEl: HTMLInputElement | undefined = $state();
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
-  let undoTimer: ReturnType<typeof setTimeout> | undefined;
+  let restoredTimer: ReturnType<typeof setTimeout> | undefined;
   let dragDepth = 0;
 
   const activeNotes = $derived(notes.filter((n) => !n.deletedAt));
+  const recentDeletedNotes = $derived(getRecentDeletedNotes(notes, clockTickMs));
+  const activeUndoTarget = $derived.by(() => {
+    if (undoToast) {
+      const stillValid = recentDeletedNotes.find((n) => n.id === undoToast?.noteId);
+      if (stillValid && stillValid.deletedAt) {
+        return {
+          noteId: stillValid.id,
+          title: stillValid.title.trim() || stillValid.symbol || 'Note',
+          deletedAtMs: Date.parse(stillValid.deletedAt)
+        };
+      }
+    }
+    const latest = recentDeletedNotes[0];
+    if (latest && latest.deletedAt) {
+      return {
+        noteId: latest.id,
+        title: latest.title.trim() || latest.symbol || 'Note',
+        deletedAtMs: Date.parse(latest.deletedAt)
+      };
+    }
+    return null;
+  });
+
+  function formatCountdown(deletedAtMs: number, nowMs: number): string {
+    const remainingSec = Math.max(0, Math.ceil((deletedAtMs + NOTE_UNDO_WINDOW_MS - nowMs) / 1000));
+    const mins = Math.floor(remainingSec / 60);
+    const secs = remainingSec % 60;
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  }
 
   const symbolCount = $derived(
     activeNotes.filter((n) => n.symbol.toUpperCase() === activeSymbol.toUpperCase()).length
@@ -219,46 +255,92 @@
     }
   }
 
-  function softDeleteNote(noteId: string) {
+  function softDeleteNote(noteId: string, permanent = false) {
     const target = notes.find((n) => n.id === noteId);
     if (!target) return;
 
-    if (isNoteEmpty(target)) {
-      notes = notes.filter((n) => n.id !== noteId);
+    if (permanent || isNoteEmpty(target)) {
       if (activeNoteId === noteId) activeNoteId = null;
-      persistNow();
+      if (undoToast?.noteId === noteId) undoToast = null;
+      void permanentlyDeleteNote($state.snapshot(notes), noteId).then((remaining) => {
+        notes = remaining;
+      });
       return;
     }
 
-    target.deletedAt = new Date().toISOString();
+    const nowMs = Date.now();
+    target.deletedAt = new Date(nowMs).toISOString();
     if (activeNoteId === noteId) {
       activeNoteId = null;
     }
+    clockTickMs = nowMs;
     persistNow();
 
-    if (undoTimer) clearTimeout(undoTimer);
     undoToast = {
       noteId: target.id,
-      title: target.title.trim() || target.symbol || 'Note'
+      title: target.title.trim() || target.symbol || 'Note',
+      deletedAtMs: nowMs
     };
-    undoTimer = setTimeout(() => {
-      undoToast = null;
-      undoTimer = undefined;
-    }, 5000);
   }
 
-  function undoDelete() {
-    if (!undoToast) return;
-    const target = notes.find((n) => n.id === undoToast?.noteId);
+  function undoDelete(specificNoteId?: string) {
+    const targetId = specificNoteId ?? activeUndoTarget?.noteId;
+    if (!targetId) return;
+    const target = notes.find((n) => n.id === targetId && Boolean(n.deletedAt));
+    if (!target) {
+      undoToast = null;
+      return;
+    }
+    const deletedMs = Date.parse(target.deletedAt ?? '');
+    if (!Number.isFinite(deletedMs) || Date.now() - deletedMs >= NOTE_UNDO_WINDOW_MS) {
+      void purgeExpiredDeletedNotes($state.snapshot(notes)).then((res) => {
+        notes = res.notes;
+      });
+      undoToast = null;
+      return;
+    }
+
+    const restoredTitle = target.title.trim() || target.symbol || 'Note';
+    delete target.deletedAt;
+    target.updatedAt = new Date().toISOString();
+    persistNow();
+
+    if (undoToast?.noteId === targetId) {
+      undoToast = null;
+    }
+    if (restoredTimer) clearTimeout(restoredTimer);
+    restoredBanner = `Restored “${restoredTitle}”`;
+    restoredTimer = setTimeout(() => {
+      restoredBanner = null;
+      restoredTimer = undefined;
+    }, 2400);
+  }
+
+  function deletePermanentlyNow(noteId: string) {
+    if (undoToast?.noteId === noteId) {
+      undoToast = null;
+    }
+    void permanentlyDeleteNote($state.snapshot(notes), noteId).then((remaining) => {
+      notes = remaining;
+    });
+  }
+
+  function handleWindowKeyDown(e: KeyboardEvent) {
+    if (lightboxState) return;
+    const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z';
+    if (!isUndo) return;
+
+    const target = e.target as HTMLElement | null;
     if (target) {
-      delete target.deletedAt;
-      persistNow();
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) return;
     }
-    if (undoTimer) {
-      clearTimeout(undoTimer);
-      undoTimer = undefined;
+
+    if (activeUndoTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      undoDelete(activeUndoTarget.noteId);
     }
-    undoToast = null;
   }
 
   function startSymbolEdit() {
@@ -413,30 +495,69 @@
   }
 
   $effect(() => {
-    // Load notes and images dir once on mount
+    // Load notes and images dir once on mount, purging any deleted notes older than 3 minutes
     let cancelled = false;
     void Promise.all([loadNotes(), getImagesDir()])
-      .then(([loadedNotes, dir]) => {
+      .then(async ([loadedNotes, dir]) => {
         if (cancelled) return;
-        notes = loadedNotes;
+        const { notes: cleaned } = await purgeExpiredDeletedNotes(loadedNotes);
+        if (cancelled) return;
+        notes = cleaned;
         imagesDir = dir;
+        clockTickMs = Date.now();
         loaded = true;
       })
       .catch(() => {
         if (!cancelled) loaded = true;
       });
 
+    const unsubNotes = subscribeNotesChanged(() => {
+      void loadNotes().then((reloaded) => {
+        if (!cancelled) {
+          notes = reloaded;
+          clockTickMs = Date.now();
+        }
+      });
+    });
+
     return () => {
       cancelled = true;
+      unsubNotes();
       if (saveTimer) {
         clearTimeout(saveTimer);
         saveTimer = undefined;
       }
-      if (undoTimer) {
-        clearTimeout(undoTimer);
-        undoTimer = undefined;
+      if (restoredTimer) {
+        clearTimeout(restoredTimer);
+        restoredTimer = undefined;
       }
     };
+  });
+
+  $effect(() => {
+    // Keep countdown live & auto-purge as soon as any soft-deleted note exceeds 3 minutes
+    const hasPendingDeleted = notes.some((n) => Boolean(n.deletedAt));
+    if (!hasPendingDeleted) return;
+
+    const timer = setInterval(() => {
+      const nowMs = Date.now();
+      clockTickMs = nowMs;
+      const hasExpired = notes.some((n) => {
+        if (!n.deletedAt) return false;
+        const ms = Date.parse(n.deletedAt);
+        return !Number.isFinite(ms) || nowMs - ms >= NOTE_UNDO_WINDOW_MS;
+      });
+      if (hasExpired) {
+        void purgeExpiredDeletedNotes($state.snapshot(notes), nowMs).then((res) => {
+          notes = res.notes;
+          if (undoToast && !notes.some((n) => n.id === undoToast?.noteId)) {
+            undoToast = null;
+          }
+        });
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
   });
 
   $effect(() => {
@@ -496,7 +617,7 @@
   });
 </script>
 
-<svelte:window onpaste={handlePaste} />
+<svelte:window onpaste={handlePaste} onkeydown={handleWindowKeyDown} />
 
 <PanelShell {theme} title="Notes" onClose={handlePanelClose}>
   {#snippet icon()}
@@ -509,6 +630,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     bind:this={panelEl}
+    data-notes-panel="true"
     class="notes-panel"
     class:light={theme === 'light'}
     ondragenter={handleDragEnter}
@@ -576,8 +698,8 @@
             class="icon-action danger"
             type="button"
             aria-label="Delete note"
-            title="Delete"
-            onclick={() => softDeleteNote(activeNote.id)}
+            title="Delete (Ctrl+Z undo for 3m · Shift+Click to delete permanently)"
+            onclick={(e) => softDeleteNote(activeNote.id, e.shiftKey)}
           >
             <svg viewBox="0 0 20 20" aria-hidden="true">
               <ellipse cx="10" cy="5.25" rx="4.75" ry="1.75" />
@@ -841,10 +963,10 @@
                       class="row-icon-btn"
                       type="button"
                       aria-label="Delete note"
-                      title="Delete"
+                      title="Delete (Ctrl+Z undo for 3m · Shift+Click to delete permanently)"
                       onclick={(e) => {
                         e.stopPropagation();
-                        softDeleteNote(note.id);
+                        softDeleteNote(note.id, e.shiftKey);
                       }}
                     >
                       <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -913,10 +1035,33 @@
       </div>
     {/if}
 
-    {#if undoToast}
+    {#if activeUndoTarget}
       <div class="undo-toast" role="status" aria-live="polite">
-        <span class="toast-text">Deleted “{undoToast.title}”</span>
-        <button class="toast-undo" type="button" onclick={undoDelete}>Undo</button>
+        <span class="toast-text" title="Press Ctrl+Z to restore within 3 minutes">
+          Deleted “{activeUndoTarget.title}” · {formatCountdown(activeUndoTarget.deletedAtMs, clockTickMs)}
+        </span>
+        <div class="toast-actions">
+          <button
+            class="toast-undo"
+            type="button"
+            title="Restore note (Ctrl+Z)"
+            onclick={() => undoDelete(activeUndoTarget.noteId)}
+          >
+            Undo
+          </button>
+          <button
+            class="toast-purge"
+            type="button"
+            title="Permanently delete now"
+            onclick={() => deletePermanentlyNow(activeUndoTarget.noteId)}
+          >
+            Delete now
+          </button>
+        </div>
+      </div>
+    {:else if restoredBanner}
+      <div class="undo-toast" role="status" aria-live="polite">
+        <span class="toast-text">{restoredBanner}</span>
       </div>
     {/if}
   </div>
@@ -1754,6 +1899,13 @@
     text-overflow: ellipsis;
   }
 
+  .toast-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+
   .toast-undo {
     padding: 4px 10px;
     border: 0;
@@ -1768,6 +1920,26 @@
 
   .toast-undo:hover {
     opacity: 0.9;
+  }
+
+  .toast-purge {
+    padding: 4px 8px;
+    border: 1px solid var(--np-toast-border);
+    border-radius: 6px;
+    color: var(--np-toast-fg);
+    background: transparent;
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    opacity: 0.8;
+    cursor: pointer;
+    transition: opacity 140ms ease, color 140ms ease, border-color 140ms ease;
+  }
+
+  .toast-purge:hover {
+    opacity: 1;
+    color: #f23645;
+    border-color: rgba(242, 54, 69, 0.5);
   }
 
   button:focus-visible {

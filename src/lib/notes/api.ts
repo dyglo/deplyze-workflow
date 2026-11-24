@@ -1,5 +1,11 @@
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
-import { makeAttachmentId, type Note, type NoteAttachment } from './types';
+import {
+  makeAttachmentId,
+  makeNoteId,
+  todayNairobiIso,
+  type Note,
+  type NoteAttachment
+} from './types';
 
 interface SavedImageResult {
   filename: string;
@@ -7,9 +13,29 @@ interface SavedImageResult {
   mimeType: string;
 }
 
+export const NOTE_UNDO_WINDOW_MS = 3 * 60 * 1000; // 3 minutes
+
 const FALLBACK_KEY = 'deplyzeworkflow-notes-fallback';
 const fallbackUrls = new Map<string, string>();
 let cachedImagesDir: string | null = null;
+const noteChangeListeners = new Set<() => void>();
+
+export function subscribeNotesChanged(listener: () => void): () => void {
+  noteChangeListeners.add(listener);
+  return () => {
+    noteChangeListeners.delete(listener);
+  };
+}
+
+export function notifyNotesChanged(): void {
+  for (const listener of noteChangeListeners) {
+    try {
+      listener();
+    } catch {
+      // ignore
+    }
+  }
+}
 
 function extFromMime(mime: string, name?: string): string {
   const lower = mime.toLowerCase();
@@ -136,4 +162,114 @@ export async function deleteImageFile(filename: string): Promise<void> {
 export function isSupportedImagePath(path: string): boolean {
   const ext = path.split('.').pop()?.toLowerCase();
   return ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'webp' || ext === 'gif';
+}
+
+export function isDeletedWithinUndoWindow(note: Note, nowMs = Date.now()): boolean {
+  if (!note.deletedAt) return false;
+  const deletedMs = Date.parse(note.deletedAt);
+  if (!Number.isFinite(deletedMs)) return false;
+  return nowMs - deletedMs < NOTE_UNDO_WINDOW_MS;
+}
+
+export function getRecentDeletedNotes(notes: Note[], nowMs = Date.now()): Note[] {
+  return notes
+    .filter((n) => isDeletedWithinUndoWindow(n, nowMs))
+    .sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? ''));
+}
+
+export async function purgeExpiredDeletedNotes(
+  notes: Note[],
+  nowMs = Date.now()
+): Promise<{ notes: Note[]; purgedCount: number }> {
+  const expired: Note[] = [];
+  const kept: Note[] = [];
+
+  for (const n of notes) {
+    if (n.deletedAt && !isDeletedWithinUndoWindow(n, nowMs)) {
+      expired.push(n);
+    } else {
+      kept.push(n);
+    }
+  }
+
+  if (expired.length === 0) {
+    return { notes, purgedCount: 0 };
+  }
+
+  await saveNotes(kept);
+  for (const n of expired) {
+    for (const att of n.attachments) {
+      try {
+        await deleteImageFile(att.filename);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
+  notifyNotesChanged();
+  return { notes: kept, purgedCount: expired.length };
+}
+
+export async function permanentlyDeleteNote(notes: Note[], noteId: string): Promise<Note[]> {
+  const target = notes.find((n) => n.id === noteId);
+  if (!target) return notes;
+
+  const filenames = target.attachments.map((a) => a.filename);
+  const remaining = notes.filter((n) => n.id !== noteId);
+  await saveNotes(remaining);
+
+  for (const filename of filenames) {
+    try {
+      await deleteImageFile(filename);
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+  notifyNotesChanged();
+  return remaining;
+}
+
+export async function restoreMostRecentDeletedNote(): Promise<Note | null> {
+  const loaded = await loadNotes();
+  const { notes } = await purgeExpiredDeletedNotes(loaded);
+  const recent = getRecentDeletedNotes(notes);
+  if (recent.length === 0) return null;
+
+  const target = recent[0];
+  const restored: Note = {
+    ...target,
+    updatedAt: new Date().toISOString()
+  };
+  delete restored.deletedAt;
+
+  const updated = notes.map((n) => (n.id === restored.id ? restored : n));
+  await saveNotes(updated);
+  notifyNotesChanged();
+  return restored;
+}
+
+export async function saveNewsItemToNotes(params: {
+  title: string;
+  body: string;
+  symbol: string;
+  fullSymbol: string;
+}): Promise<Note> {
+  const loaded = await loadNotes();
+  const { notes } = await purgeExpiredDeletedNotes(loaded);
+  const now = new Date().toISOString();
+  const note: Note = {
+    id: makeNoteId(),
+    title: params.title.trim().slice(0, 120) || `News — ${params.symbol}`,
+    body: params.body.trim(),
+    date: todayNairobiIso(),
+    symbol: params.symbol || 'XAUUSD',
+    fullSymbol: params.fullSymbol || params.symbol || 'OANDA:XAUUSD',
+    pinned: false,
+    attachments: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  await saveNotes([note, ...notes]);
+  notifyNotesChanged();
+  return note;
 }

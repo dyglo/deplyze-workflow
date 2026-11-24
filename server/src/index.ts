@@ -11,7 +11,12 @@ import {
   type AiChatRequest
 } from './routes/ai.js';
 import { getCalendarEventsPayload, getCalendarWeekPayload } from './routes/calendar.js';
-import { dispatchAlertWebhook, getQuotesPayload } from './quotes/service.js';
+import { dispatchAlertWebhook, getQuotesPayload, getSparklinePayload } from './quotes/service.js';
+import {
+  getNewsArticlePayload,
+  getNewsFlowPayload,
+  listNewsProviders
+} from './news/service.js';
 import {
   getEventPlaybookPayload,
   getMacroRegimePayload,
@@ -129,7 +134,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.7',
+        version: '0.1.12',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -143,12 +148,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.7',
+      version: '0.1.12',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
         'GET /api/calendar/events?date=YYYY-MM-DD&category=economic&tz=Africa/Nairobi',
         'GET /api/quotes?symbols=OANDA:XAUUSD,TVC:DXY',
+        'GET /api/quotes/sparkline?symbol=OANDA:XAUUSD',
+        'GET /api/news?mode=symbol&symbol=OANDA:XAUUSD',
+        'GET /api/news/article?url=...',
+        'GET /api/news/providers',
         'POST /api/alerts/webhook',
         'GET /api/insights/regime',
         'GET /api/insights/symbol?symbol=OANDA:XAUUSD&bias=bull',
@@ -158,6 +167,68 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         'POST /api/ai/chat'
       ]
     });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/quotes/sparkline') {
+    const rawSym = (url.searchParams.get('symbol') ?? '').trim();
+    if (!rawSym) {
+      sendJson(res, 400, { error: 'Missing symbol query parameter' }, 'no-store');
+      return;
+    }
+    const payload = await getSparklinePayload(rawSym);
+    sendJson(res, 200, payload, 'public, max-age=60');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/news/providers') {
+    sendJson(res, 200, { providers: listNewsProviders() }, 'public, max-age=3600');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/news/article') {
+    const rawUrl = (url.searchParams.get('url') ?? '').trim();
+    if (!rawUrl) {
+      sendJson(res, 400, { error: 'Missing url query parameter' }, 'no-store');
+      return;
+    }
+    const payload = await getNewsArticlePayload(rawUrl);
+    sendJson(res, 200, payload, 'public, max-age=600');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/news') {
+    const rawMode = (url.searchParams.get('mode') ?? '').trim().toLowerCase();
+    const symbol = (url.searchParams.get('symbol') ?? '').trim();
+    const rawSymbols = (url.searchParams.get('symbols') ?? '').trim();
+    const symbols = rawSymbols
+      ? rawSymbols
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+
+    const mode: 'symbol' | 'watchlist' | 'full' =
+      rawMode === 'symbol' || rawMode === 'watchlist' || rawMode === 'full'
+        ? rawMode
+        : symbol
+          ? 'symbol'
+          : symbols && symbols.length > 0
+            ? 'watchlist'
+            : 'full';
+
+    const payload = await getNewsFlowPayload({
+      mode,
+      symbol: symbol || undefined,
+      symbols,
+      market: url.searchParams.get('market') ?? undefined,
+      topic: url.searchParams.get('topic') ?? undefined,
+      country: url.searchParams.get('country') ?? undefined,
+      provider: url.searchParams.get('provider') ?? undefined,
+      q: url.searchParams.get('q') ?? undefined,
+      force: url.searchParams.get('force') === '1'
+    });
+    sendJson(res, 200, payload, 'no-store');
     return;
   }
 

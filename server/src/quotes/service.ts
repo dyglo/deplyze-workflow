@@ -425,6 +425,120 @@ export async function getQuotesPayload(rawSymbols: string[]): Promise<{
   return { quotes, updatedAt: new Date().toISOString() };
 }
 
+export interface SymbolSparkline {
+  symbol: string;
+  shortName: string;
+  description: string;
+  price: number | null;
+  change: number | null;
+  changePercent: number | null;
+  currency: string;
+  points: number[];
+  periodLabel: string;
+  updatedAt: string;
+}
+
+const SPARKLINE_TTL_MS = 5 * 60 * 1000; // 5m intraday sparkline cache
+const sparklineCache = new Map<string, { data: SymbolSparkline; fetchedAt: number }>();
+
+function guessCurrency(short: string): string {
+  const s = short.toUpperCase();
+  if (s === 'DXY' || s === 'VIX' || s === 'US10Y') return '';
+  if (s.length === 6 && /^[A-Z]{6}$/.test(s) && !s.startsWith('XAU') && !s.startsWith('XAG')) {
+    return s.slice(3, 6);
+  }
+  return 'USD';
+}
+
+export async function getSparklinePayload(rawSymbol: string): Promise<SymbolSparkline> {
+  const requested = rawSymbol.trim() || 'OANDA:XAUUSD';
+  const short = shortTicker(requested);
+  const nowMs = Date.now();
+
+  const cached = sparklineCache.get(short);
+  if (cached && nowMs - cached.fetchedAt < SPARKLINE_TTL_MS) {
+    return { ...cached.data, symbol: requested };
+  }
+
+  const mapped = YAHOO_SYMBOL_MAP[short];
+  const yahooSym = mapped?.yahoo ?? short;
+
+  const [quoteRes, chartPoints] = await Promise.all([
+    getQuotesPayload([requested]),
+    (async (): Promise<{ points: number[]; periodLabel: string; currency?: string }> => {
+      const tryFetch = async (range: string, interval: string): Promise<{ points: number[]; currency?: string } | null> => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+        try {
+          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?range=${range}&interval=${interval}`;
+          const res = await fetch(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 DeplyzeWorkflow/0.1.12' },
+            signal: controller.signal
+          });
+          if (!res.ok) return null;
+          const json = (await res.json()) as {
+            chart?: {
+              result?: {
+                meta?: { currency?: string };
+                indicators?: { quote?: { close?: (number | null)[] }[] };
+              }[];
+            };
+          };
+          const r = json.chart?.result?.[0];
+          const closes = (r?.indicators?.quote?.[0]?.close ?? []).filter(
+            (v): v is number => typeof v === 'number' && Number.isFinite(v)
+          );
+          if (closes.length < 4) return null;
+          // Downsample to ~48 points max for crisp lightweight SVG rendering
+          const maxPts = 48;
+          const sampled: number[] = [];
+          if (closes.length <= maxPts) {
+            sampled.push(...closes);
+          } else {
+            for (let i = 0; i < maxPts; i++) {
+              const idx = Math.round((i / (maxPts - 1)) * (closes.length - 1));
+              sampled.push(closes[idx]);
+            }
+          }
+          return { points: sampled, currency: r?.meta?.currency };
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+
+      const d1 = await tryFetch('1d', '15m');
+      if (d1) return { points: d1.points, periodLabel: '1 day', currency: d1.currency };
+      const d5 = await tryFetch('5d', '1h');
+      if (d5) return { points: d5.points, periodLabel: '5 days', currency: d5.currency };
+      return { points: [], periodLabel: '1 day' };
+    })()
+  ]);
+
+  const quote = quoteRes.quotes[requested];
+  const data: SymbolSparkline = {
+    symbol: requested,
+    shortName: quote?.shortName ?? short,
+    description: quote?.description ?? mapped?.desc ?? short,
+    price: quote?.price ?? (chartPoints.points.length > 0 ? chartPoints.points[chartPoints.points.length - 1] : null),
+    change: quote?.change ?? null,
+    changePercent: quote?.changePercent ?? null,
+    currency: chartPoints.currency || guessCurrency(short),
+    points: chartPoints.points,
+    periodLabel: chartPoints.periodLabel,
+    updatedAt: new Date(nowMs).toISOString()
+  };
+
+  sparklineCache.set(short, { data, fetchedAt: nowMs });
+  if (sparklineCache.size > 60) {
+    const oldest = sparklineCache.keys().next().value;
+    if (oldest) sparklineCache.delete(oldest);
+  }
+
+  return data;
+}
+
 export async function dispatchAlertWebhook(
   urlStr: string,
   payload: Record<string, unknown>

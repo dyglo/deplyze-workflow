@@ -14,6 +14,11 @@
   import { startCloudAutoSync } from './lib/cloud/api';
   import { getLayoutById, saveLayoutId, type LayoutId } from './lib/chart/layouts';
   import {
+    loadNotes,
+    purgeExpiredDeletedNotes,
+    restoreMostRecentDeletedNote
+  } from './lib/notes/api';
+  import {
     loadChartSettings,
     saveChartSettings,
     type ChartSettings
@@ -76,11 +81,51 @@
     });
 
     const unsubToasts = subscribeAlertToasts((toast) => {
-      alertToasts = [toast, ...alertToasts].slice(0, 4);
-      setTimeout(() => {
-        alertToasts = alertToasts.filter((t) => t.id !== toast.id);
-      }, 8000);
+      pushToast(toast);
     });
+
+    // Purge any notes whose 3-minute undo window has expired
+    const runExpiredNotePurge = () => {
+      void loadNotes().then((loaded) => purgeExpiredDeletedNotes(loaded));
+    };
+    runExpiredNotePurge();
+    const notePurgeTimer = window.setInterval(runExpiredNotePurge, 60_000);
+
+    // Global Ctrl+Z undo for deleted notes within 3 minutes when Notes panel is closed
+    let undoBusy = false;
+    const handleGlobalUndoKey = (e: KeyboardEvent) => {
+      const isUndo =
+        (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z';
+      if (!isUndo || e.defaultPrevented || undoBusy) return;
+      if (document.querySelector('[data-notes-panel="true"]')) return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) return;
+      }
+      undoBusy = true;
+      void restoreMostRecentDeletedNote()
+        .then((restored) => {
+          if (restored) {
+            pushToast({
+              id: `note-undo-${Date.now()}`,
+              title: 'Note restored',
+              message: `Restored “${restored.title.trim() || 'Untitled note'}” to Notes.`,
+              symbol: restored.symbol,
+              createdAt: new Date().toISOString()
+            });
+          }
+        })
+        .then(
+          () => {
+            undoBusy = false;
+          },
+          () => {
+            undoBusy = false;
+          }
+        );
+    };
+    window.addEventListener('keydown', handleGlobalUndoKey);
 
     let cleanupMq: (() => void) | undefined;
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -97,9 +142,18 @@
       stopAlerts();
       stopCloudSync();
       unsubToasts();
+      window.clearInterval(notePurgeTimer);
+      window.removeEventListener('keydown', handleGlobalUndoKey);
       cleanupMq?.();
     };
   });
+
+  function pushToast(toast: InAppAlertToast) {
+    alertToasts = [toast, ...alertToasts].slice(0, 4);
+    setTimeout(() => {
+      alertToasts = alertToasts.filter((t) => t.id !== toast.id);
+    }, 8000);
+  }
 
   function commitTabs(next: TabsState) {
     tabsState = next;
@@ -302,6 +356,21 @@
     });
   }
 
+  function focusOrOpenSymbolTab(symbol: string, shortName: string) {
+    const targetFull = symbol.trim().toUpperCase();
+    const targetShort = (shortName || extractShortSymbol(symbol)).trim().toUpperCase();
+    const existing = activeGroup.tabs.find((t) => {
+      const tabFull = (t.symbol || '').trim().toUpperCase();
+      const tabShort = extractShortSymbol(t.symbol || t.title || '').trim().toUpperCase();
+      return tabFull === targetFull || tabShort === targetShort;
+    });
+    if (existing) {
+      selectTab(existing.id);
+      return;
+    }
+    openSymbolInNewTab(symbol, shortName || targetShort);
+  }
+
   function handleActivePaneChange(tabId: string, paneIdx: number) {
     let changed = false;
     const nextGroups = tabsState.groups.map((g) => {
@@ -499,6 +568,7 @@
       onSelectLayout={updateLayout}
       onSelectSymbol={loadSymbolInActiveTab}
       onOpenSymbolInNewTab={openSymbolInNewTab}
+      onOpenOnChart={focusOrOpenSymbolTab}
     />
   </div>
 
