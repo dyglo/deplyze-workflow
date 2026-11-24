@@ -935,22 +935,22 @@
 
 <style>
   .notes-panel {
-    --np-bg: #000000;
-    --np-border: #2a2e39;
-    --np-row-divider: #2a2e39;
-    --np-text: #d1d4dc;
-    --np-secondary: #787b86;
-    --np-pill-bg: #1e222d;
-    --np-pill-text: #d1d4dc;
-    --np-pill-active-bg: #d1d4dc;
-    --np-pill-active-text: #000000;
-    --np-heading-bg: #0d1017;
-    --np-heading-accent: #d1d4dc;
-    --np-hover: rgba(255, 255, 255, 0.04);
-    --np-control-hover: rgba(255, 255, 255, 0.06);
-    --np-toast-bg: rgba(24, 24, 24, 0.94);
-    --np-toast-fg: #f0f0f0;
-    --np-toast-border: rgba(255, 255, 255, 0.12);
+    --np-bg: var(--dark-bg-panel);
+    --np-border: var(--dark-border);
+    --np-row-divider: var(--dark-border);
+    --np-text: var(--dark-text-primary);
+    --np-secondary: var(--dark-text-secondary);
+    --np-pill-bg: var(--dark-bg-surface-alt);
+    --np-pill-text: var(--dark-text-primary);
+    --np-pill-active-bg: var(--dark-cta-bg);
+    --np-pill-active-text: var(--dark-cta-fg);
+    --np-heading-bg: var(--dark-bg-subtle);
+    --np-heading-accent: var(--dark-text-primary);
+    --np-hover: var(--dark-hover);
+    --np-control-hover: var(--dark-hover-strong);
+    --np-toast-bg: var(--dark-bg-toast);
+    --np-toast-fg: var(--dark-text-strong);
+    --np-toast-border: var(--dark-border-glass);
 
     position: relative;
     container-type: inline-size;

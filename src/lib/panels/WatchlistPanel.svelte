@@ -1200,16 +1200,16 @@
 
 <style>
   .watchlist {
-    --wl-bg: #000000;
-    --wl-surface: #0c0e14;
-    --wl-border: #262a36;
-    --wl-border-soft: rgba(255, 255, 255, 0.08);
-    --wl-text: #e6e9f0;
-    --wl-secondary: #868993;
-    --wl-hover: rgba(255, 255, 255, 0.04);
-    --wl-active-ring: #d1d4dc;
-    --wl-popover-bg: rgba(20, 23, 31, 0.96);
-    --wl-popover-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+    --wl-bg: var(--dark-bg-panel);
+    --wl-surface: var(--dark-bg-surface);
+    --wl-border: var(--dark-border);
+    --wl-border-soft: var(--dark-border-subtle);
+    --wl-text: var(--dark-text-primary);
+    --wl-secondary: var(--dark-text-secondary);
+    --wl-hover: var(--dark-hover);
+    --wl-active-ring: var(--dark-text-primary);
+    --wl-popover-bg: var(--dark-bg-glass-strong);
+    --wl-popover-shadow: var(--dark-shadow-popover);
     --wl-pos-bg: rgba(8, 153, 129, 0.14);
     --wl-neg-bg: rgba(242, 54, 69, 0.14);
 

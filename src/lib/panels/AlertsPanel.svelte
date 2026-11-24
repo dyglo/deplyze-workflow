@@ -448,19 +448,19 @@
 
 <style>
   .alerts-panel {
-    --al-bg: #000000;
-    --al-surface: #141822;
-    --al-border: #262a36;
-    --al-border-soft: rgba(255, 255, 255, 0.08);
-    --al-text: #e6e9f0;
-    --al-secondary: #868993;
-    --al-hover: rgba(255, 255, 255, 0.04);
-    --al-tab-bg: #141822;
-    --al-tab-active: #242938;
-    --al-cta-bg: #e6e9f0;
-    --al-cta-fg: #0b0d12;
-    --al-popover-bg: rgba(18, 18, 18, 0.86);
-    --al-popover-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+    --al-bg: var(--dark-bg-panel);
+    --al-surface: var(--dark-bg-surface-alt);
+    --al-border: var(--dark-border);
+    --al-border-soft: var(--dark-border-subtle);
+    --al-text: var(--dark-text-primary);
+    --al-secondary: var(--dark-text-secondary);
+    --al-hover: var(--dark-hover);
+    --al-tab-bg: var(--dark-bg-surface-alt);
+    --al-tab-active: var(--dark-bg-active);
+    --al-cta-bg: var(--dark-cta-bg);
+    --al-cta-fg: var(--dark-cta-fg);
+    --al-popover-bg: var(--dark-bg-glass);
+    --al-popover-shadow: var(--dark-shadow-popover);
 
     flex: 1;
     min-height: 0;
@@ -851,11 +851,11 @@
     max-width: calc(100vw - 32px);
     padding: 20px;
     border-radius: 12px;
-    color: #f0f0f0;
-    background: rgba(18, 18, 18, 0.86);
+    color: var(--dark-text-strong);
+    background: var(--dark-bg-glass);
     -webkit-backdrop-filter: blur(22px) saturate(135%);
     backdrop-filter: blur(22px) saturate(135%);
-    box-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    box-shadow: var(--dark-shadow-modal);
     display: flex;
     flex-direction: column;
     gap: 12px;

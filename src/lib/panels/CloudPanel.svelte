@@ -447,17 +447,17 @@
 
 <style>
   .cloud-panel {
-    --cl-bg: #000000;
-    --cl-surface: #0e1118;
-    --cl-surface-alt: #141822;
-    --cl-border: #252a36;
-    --cl-border-soft: rgba(255, 255, 255, 0.07);
-    --cl-text: #e6e9f0;
-    --cl-secondary: #868993;
-    --cl-hover: rgba(255, 255, 255, 0.05);
-    --cl-cta-bg: #e6e9f0;
-    --cl-cta-fg: #0b0d12;
-    --cl-check-border: rgba(255, 255, 255, 0.36);
+    --cl-bg: var(--dark-bg-panel);
+    --cl-surface: var(--dark-bg-surface);
+    --cl-surface-alt: var(--dark-bg-surface-alt);
+    --cl-border: var(--dark-border);
+    --cl-border-soft: var(--dark-border-subtle);
+    --cl-text: var(--dark-text-primary);
+    --cl-secondary: var(--dark-text-secondary);
+    --cl-hover: var(--dark-hover);
+    --cl-cta-bg: var(--dark-cta-bg);
+    --cl-cta-fg: var(--dark-cta-fg);
+    --cl-check-border: var(--dark-border-check);
 
     flex: 1;
     min-height: 0;
@@ -801,11 +801,11 @@
     max-width: calc(100vw - 32px);
     padding: 20px;
     border-radius: 12px;
-    color: #f0f0f0;
-    background: rgba(18, 18, 18, 0.86);
+    color: var(--dark-text-strong);
+    background: var(--dark-bg-glass);
     -webkit-backdrop-filter: blur(22px) saturate(135%);
     backdrop-filter: blur(22px) saturate(135%);
-    box-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    box-shadow: var(--dark-shadow-modal);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -878,8 +878,8 @@
 
   .modal-confirm {
     border: 0;
-    background: #f0f0f0;
-    color: #0d0d0d;
+    background: var(--dark-cta-bg);
+    color: var(--dark-cta-fg);
   }
 
   .confirm-modal.light .modal-confirm {

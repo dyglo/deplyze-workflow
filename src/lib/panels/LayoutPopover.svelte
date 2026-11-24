@@ -85,14 +85,14 @@
 
 <style>
   .layout-popover {
-    --lp-bg: rgba(18, 18, 18, 0.84);
-    --lp-divider: rgba(255, 255, 255, 0.09);
-    --lp-text: #f0f0f0;
-    --lp-number: #8c8c92;
-    --lp-hover: rgba(255, 255, 255, 0.09);
-    --lp-selected-bg: #f0f0f0;
-    --lp-selected-fg: #0d0d0d;
-    --lp-shadow: 0 16px 44px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    --lp-bg: var(--dark-bg-glass);
+    --lp-divider: var(--dark-border-subtle);
+    --lp-text: var(--dark-text-strong);
+    --lp-number: var(--dark-text-secondary);
+    --lp-hover: var(--dark-hover-strong);
+    --lp-selected-bg: var(--dark-cta-bg);
+    --lp-selected-fg: var(--dark-cta-fg);
+    --lp-shadow: 0 16px 44px rgba(0, 0, 0, 0.72), 0 0 0 1px var(--dark-border-glass);
 
     position: fixed;
     z-index: 150;

@@ -114,7 +114,7 @@
     height: 100%;
     display: grid;
     gap: 0;
-    background: #1f1f1f;
+    background: var(--dark-bg-gutter);
     overflow: hidden;
     transition: background-color 150ms ease;
   }
@@ -134,7 +134,7 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
-    background: #000000;
+    background: var(--dark-bg-base);
     transition: background-color 150ms ease;
   }
 
@@ -146,7 +146,7 @@
     content: '';
     position: absolute;
     inset: 0;
-    border: 1.5px solid #50535e;
+    border: 1.5px solid var(--dark-handle);
     pointer-events: none;
     z-index: 2;
   }

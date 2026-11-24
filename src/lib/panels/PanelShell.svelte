@@ -161,9 +161,9 @@
     flex-grow: 0;
     flex-shrink: 0;
     height: 100%;
-    color: #d1d4dc;
-    background: #000000;
-    border-left: 1px solid #2a2e39;
+    color: var(--dark-text-primary);
+    background: var(--dark-bg-panel);
+    border-left: 1px solid var(--dark-border);
     transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
   }
 
@@ -199,7 +199,7 @@
     width: 3px;
     height: 56px;
     border-radius: 999px;
-    background: #50535e;
+    background: var(--dark-handle);
     transition: background-color 150ms ease;
   }
 
@@ -210,7 +210,7 @@
   .resize-handle:hover .resize-pill,
   .resize-handle:focus-visible .resize-pill,
   .panel-shell.dragging .resize-pill {
-    background: #787b86;
+    background: var(--dark-handle-hover);
   }
 
   .panel-shell.light .resize-handle:hover .resize-pill,

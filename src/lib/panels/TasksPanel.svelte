@@ -688,18 +688,18 @@
 
 <style>
   .tasks-panel {
-    --tk-bg: #000000;
-    --tk-card: #0c0e14;
-    --tk-surface: #141822;
-    --tk-border: #262a36;
-    --tk-border-soft: rgba(255, 255, 255, 0.08);
-    --tk-text: #e6e9f0;
-    --tk-secondary: #868993;
-    --tk-hover: rgba(255, 255, 255, 0.04);
-    --tk-tab-bg: #141822;
-    --tk-tab-active: #242938;
-    --tk-btn-bg: #e6e9f0;
-    --tk-btn-fg: #0b0d12;
+    --tk-bg: var(--dark-bg-panel);
+    --tk-card: var(--dark-bg-surface);
+    --tk-surface: var(--dark-bg-surface-alt);
+    --tk-border: var(--dark-border);
+    --tk-border-soft: var(--dark-border-subtle);
+    --tk-text: var(--dark-text-primary);
+    --tk-secondary: var(--dark-text-secondary);
+    --tk-hover: var(--dark-hover);
+    --tk-tab-bg: var(--dark-bg-surface-alt);
+    --tk-tab-active: var(--dark-bg-active);
+    --tk-btn-bg: var(--dark-cta-bg);
+    --tk-btn-fg: var(--dark-cta-fg);
 
     flex: 1;
     min-height: 0;

@@ -396,13 +396,13 @@
 
 <style>
   .tab-bar {
-    --tb-strip-bg: #2f2f2f;
-    --tb-active-bg: #000000;
-    --tb-text: #f2f2f2;
+    --tb-strip-bg: var(--dark-bg-chrome);
+    --tb-active-bg: var(--dark-bg-base);
+    --tb-text: var(--dark-text-strong);
     --tb-muted: rgba(255, 255, 255, 0.72);
     --tb-subtle: rgba(255, 255, 255, 0.45);
     --tb-hover: rgba(255, 255, 255, 0.09);
-    --tb-open-bg: #4f4f4f;
+    --tb-open-bg: var(--dark-bg-chrome-active);
     --tb-sep: rgba(255, 255, 255, 0.16);
 
     height: 100%;
@@ -719,14 +719,14 @@
 
   /* Group dropdown */
   .group-dropdown {
-    --gd-bg: #1f1f1f;
-    --gd-border: #333333;
-    --gd-divider: #333333;
-    --gd-text: #f0f0f0;
-    --gd-hover: #303030;
-    --gd-active-bg: #f2f2f2;
-    --gd-active-fg: #111111;
-    --gd-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+    --gd-bg: var(--dark-bg-elevated);
+    --gd-border: var(--dark-border-strong);
+    --gd-divider: var(--dark-border-strong);
+    --gd-text: var(--dark-text-strong);
+    --gd-hover: var(--dark-bg-elevated-hover);
+    --gd-active-bg: var(--dark-text-strong);
+    --gd-active-fg: var(--dark-cta-fg);
+    --gd-shadow: var(--dark-shadow-popover);
 
     position: fixed;
     z-index: 160;

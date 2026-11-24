@@ -95,18 +95,18 @@
   }
 
   .create-group-modal {
-    --cg-bg: #1f1f1f;
-    --cg-text: #f0f0f0;
-    --cg-secondary: #8e929b;
-    --cg-input-bg: #1f1f1f;
-    --cg-input-border: #434651;
+    --cg-bg: var(--dark-bg-elevated);
+    --cg-text: var(--dark-text-strong);
+    --cg-secondary: var(--dark-text-secondary);
+    --cg-input-bg: var(--dark-bg-input);
+    --cg-input-border: var(--dark-border-strong);
     --cg-cancel-border: #4a4a4a;
-    --cg-cancel-hover: rgba(255, 255, 255, 0.08);
+    --cg-cancel-hover: var(--dark-hover-strong);
     --cg-disabled-bg: #303030;
-    --cg-disabled-fg: #6b6b6b;
-    --cg-submit-bg: #f2f2f2;
-    --cg-submit-fg: #111111;
-    --cg-shadow: 0 18px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px #323232;
+    --cg-disabled-fg: var(--dark-text-muted);
+    --cg-submit-bg: var(--dark-text-strong);
+    --cg-submit-fg: var(--dark-cta-fg);
+    --cg-shadow: 0 18px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--dark-border-strong);
 
     position: relative;
     width: 392px;

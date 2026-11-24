@@ -228,14 +228,14 @@
 
 <style>
   .trash-panel {
-    --tp-bg: #000000;
-    --tp-border: #2a2e39;
-    --tp-row-divider: #2a2e39;
-    --tp-text: #d1d4dc;
-    --tp-secondary: #787b86;
-    --tp-pill-bg: #1e222d;
-    --tp-hover: rgba(255, 255, 255, 0.04);
-    --tp-control-hover: rgba(255, 255, 255, 0.07);
+    --tp-bg: var(--dark-bg-panel);
+    --tp-border: var(--dark-border);
+    --tp-row-divider: var(--dark-border);
+    --tp-text: var(--dark-text-primary);
+    --tp-secondary: var(--dark-text-secondary);
+    --tp-pill-bg: var(--dark-bg-surface-alt);
+    --tp-hover: var(--dark-hover);
+    --tp-control-hover: var(--dark-hover-strong);
 
     flex: 1;
     min-height: 0;

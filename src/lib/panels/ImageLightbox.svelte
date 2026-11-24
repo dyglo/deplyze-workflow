@@ -189,7 +189,7 @@
     z-index: 260;
     display: flex;
     flex-direction: column;
-    color: #f0f0f0;
+    color: var(--dark-text-strong);
     background: rgba(12, 12, 12, 0.86);
     -webkit-backdrop-filter: blur(20px) saturate(130%);
     backdrop-filter: blur(20px) saturate(130%);
@@ -215,11 +215,11 @@
   .lightbox-counter {
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    color: #f0f0f0;
+    color: var(--dark-text-strong);
   }
 
   .lightbox-label {
-    color: #8c8c92;
+    color: var(--dark-text-secondary);
   }
 
   .lightbox-actions {

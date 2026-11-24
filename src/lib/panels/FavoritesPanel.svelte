@@ -1026,17 +1026,19 @@
 
 <style>
   .playbook-panel {
-    --pb-bg: #000000;
-    --pb-surface: #0e1118;
-    --pb-surface-alt: #141822;
-    --pb-border: #252a36;
-    --pb-border-soft: rgba(255, 255, 255, 0.07);
-    --pb-text: #e6e9f0;
-    --pb-secondary: #868993;
-    --pb-hover: rgba(255, 255, 255, 0.045);
-    --pb-active-bg: #e6e9f0;
-    --pb-active-fg: #0b0d12;
-    --pb-popover-bg: rgba(18, 18, 18, 0.86);
+    --pb-bg: var(--dark-bg-panel);
+    --pb-surface: var(--dark-bg-surface);
+    --pb-surface-alt: var(--dark-bg-surface-alt);
+    --pb-border: var(--dark-border);
+    --pb-border-soft: var(--dark-border-subtle);
+    --pb-text: var(--dark-text-primary);
+    --pb-secondary: var(--dark-text-secondary);
+    --pb-hover: var(--dark-hover);
+    --pb-active-bg: var(--dark-cta-bg);
+    --pb-active-fg: var(--dark-cta-fg);
+    --pb-popover-bg: var(--dark-bg-glass);
+    --pb-media-bg: var(--dark-bg-media);
+    --pb-overlay-chip-bg: rgba(12, 12, 12, 0.78);
 
     position: relative;
     flex: 1;
@@ -1059,6 +1061,8 @@
     --pb-active-bg: #131722;
     --pb-active-fg: #ffffff;
     --pb-popover-bg: #ffffff;
+    --pb-media-bg: #080a0f;
+    --pb-overlay-chip-bg: rgba(12, 12, 14, 0.78);
   }
 
   .edge-bar {
@@ -1366,7 +1370,7 @@
     padding: 0;
     border: 0;
     display: block;
-    background: #080a0f;
+    background: var(--pb-media-bg);
     cursor: zoom-in;
     overflow: hidden;
   }
@@ -1384,7 +1388,7 @@
     bottom: 8px;
     padding: 2px 6px;
     border-radius: 5px;
-    background: rgba(12, 12, 14, 0.78);
+    background: var(--pb-overlay-chip-bg);
     color: #f0f0f0;
     font-size: 10.5px;
     font-weight: 600;
@@ -1858,7 +1862,7 @@
     border-radius: 8px;
     overflow: hidden;
     border: 1px solid var(--pb-border-soft);
-    background: #080a0f;
+    background: var(--pb-media-bg);
   }
 
   .att-preview {
@@ -1886,7 +1890,7 @@
     padding: 0;
     border: 0;
     border-radius: 50%;
-    background: rgba(12, 12, 14, 0.78);
+    background: var(--pb-overlay-chip-bg);
     color: #f0f0f0;
     display: grid;
     place-items: center;

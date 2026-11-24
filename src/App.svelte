@@ -530,8 +530,8 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    color: #f5f5f5;
-    background: #000000;
+    color: var(--dark-text-strong);
+    background: var(--dark-bg-base);
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     transition: color 150ms ease, background-color 150ms ease;
   }
@@ -546,7 +546,7 @@
     height: calc(100vh - 34px);
     display: flex;
     gap: 4px;
-    background: #1f1f1f;
+    background: var(--dark-bg-gutter);
     transition: background-color 150ms ease;
   }
 
@@ -560,7 +560,7 @@
     min-width: 480px;
     height: 100%;
     overflow: hidden;
-    background: #000000;
+    background: var(--dark-bg-base);
     transition: background-color 150ms ease;
   }
 
@@ -601,11 +601,11 @@
   .alert-toast {
     padding: 11px 13px;
     border-radius: 10px;
-    color: #f0f0f0;
-    background: rgba(18, 18, 18, 0.9);
+    color: var(--dark-text-strong);
+    background: var(--dark-bg-toast);
     -webkit-backdrop-filter: blur(18px);
     backdrop-filter: blur(18px);
-    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--dark-border-glass);
     display: flex;
     flex-direction: column;
     gap: 4px;

@@ -484,8 +484,8 @@
     padding: 8px 0;
     overflow-y: auto;
     scrollbar-width: none;
-    color: #f5f5f5;
-    background: #000000;
+    color: var(--dark-text-strong);
+    background: var(--dark-bg-base);
     border-left: 1px solid color-mix(in srgb, currentColor 10%, transparent);
     user-select: none;
     transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;

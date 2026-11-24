@@ -2,6 +2,75 @@
   color-scheme: dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+
+  /* Shared Neutral Dark Theme Tokens (achromatic — zero blue cast) */
+  --dark-bg-base: #000000;
+  --dark-bg-panel: #000000;
+  --dark-bg-chrome: #2f2f2f;
+  --dark-bg-chrome-active: #4f4f4f;
+  --dark-bg-gutter: #1f1f1f;
+  --dark-bg-subtle: #0e0e0e;
+  --dark-bg-surface: #121212;
+  --dark-bg-surface-alt: #1a1a1a;
+  --dark-bg-elevated: #1f1f1f;
+  --dark-bg-elevated-hover: #2a2a2a;
+  --dark-bg-active: #2c2c2c;
+  --dark-bg-input: #141414;
+  --dark-bg-input-glass: rgba(16, 16, 16, 0.65);
+  --dark-bg-glass: rgba(18, 18, 18, 0.86);
+  --dark-bg-glass-strong: rgba(22, 22, 22, 0.96);
+  --dark-bg-toast: rgba(24, 24, 24, 0.94);
+  --dark-bg-media: #0a0a0a;
+
+  --dark-hover: rgba(255, 255, 255, 0.045);
+  --dark-hover-strong: rgba(255, 255, 255, 0.08);
+  --dark-track: rgba(255, 255, 255, 0.08);
+
+  --dark-border: #2a2a2a;
+  --dark-border-strong: #3a3a3a;
+  --dark-border-subtle: rgba(255, 255, 255, 0.08);
+  --dark-border-glass: rgba(255, 255, 255, 0.12);
+  --dark-border-control: rgba(255, 255, 255, 0.16);
+  --dark-border-check: rgba(255, 255, 255, 0.36);
+
+  --dark-text-primary: #ebebeb;
+  --dark-text-strong: #f2f2f2;
+  --dark-text-secondary: #8c8c8c;
+  --dark-text-muted: #6e6e6e;
+  --dark-text-soft: #b5b5b5;
+
+  --dark-cta-bg: #ebebeb;
+  --dark-cta-fg: #0d0d0d;
+
+  --dark-handle: #525252;
+  --dark-handle-hover: #7a7a7a;
+  --dark-checker-a: #343434;
+  --dark-checker-b: #1c1c1c;
+
+  --dark-scrollbar-track: transparent;
+  --dark-scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --dark-scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+
+  --dark-shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --dark-shadow-modal: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+:where(main:not(.light) *)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+:where(main:not(.light) *)::-webkit-scrollbar-track {
+  background: var(--dark-scrollbar-track);
+}
+
+:where(main:not(.light) *)::-webkit-scrollbar-thumb {
+  background: var(--dark-scrollbar-thumb);
+  border-radius: 999px;
+}
+
+:where(main:not(.light) *)::-webkit-scrollbar-thumb:hover {
+  background: var(--dark-scrollbar-thumb-hover);
 }
 
 html,

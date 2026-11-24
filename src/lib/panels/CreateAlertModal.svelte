@@ -920,21 +920,21 @@
 
   /* Exact dark glass tokens matching SettingsModal.svelte */
   .alert-modal {
-    --am-bg: rgba(18, 18, 18, 0.86);
-    --am-menu-bg: rgba(24, 24, 28, 0.96);
-    --am-border: rgba(255, 255, 255, 0.12);
-    --am-divider: rgba(255, 255, 255, 0.09);
-    --am-text: #f0f0f0;
-    --am-secondary: #8c8c92;
-    --am-control-bg: rgba(16, 16, 16, 0.65);
-    --am-control-border: rgba(255, 255, 255, 0.16);
+    --am-bg: var(--dark-bg-glass);
+    --am-menu-bg: var(--dark-bg-glass-strong);
+    --am-border: var(--dark-border-glass);
+    --am-divider: var(--dark-border-subtle);
+    --am-text: var(--dark-text-strong);
+    --am-secondary: var(--dark-text-secondary);
+    --am-control-bg: var(--dark-bg-input-glass);
+    --am-control-border: var(--dark-border-control);
     --am-hover: rgba(255, 255, 255, 0.06);
-    --am-check-bg: #f0f0f0;
-    --am-check-fg: #0d0d0d;
+    --am-check-bg: var(--dark-cta-bg);
+    --am-check-fg: var(--dark-cta-fg);
     --am-check-border: rgba(255, 255, 255, 0.42);
-    --am-btn-bg: #f0f0f0;
-    --am-btn-fg: #0d0d0d;
-    --am-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    --am-btn-bg: var(--dark-cta-bg);
+    --am-btn-fg: var(--dark-cta-fg);
+    --am-shadow: var(--dark-shadow-modal);
 
     position: fixed;
     z-index: 110;

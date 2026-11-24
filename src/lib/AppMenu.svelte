@@ -350,15 +350,15 @@
 
   /* Popover */
   .app-menu {
-    --am-bg: #1f1f1f;
-    --am-border: #353535;
-    --am-divider: #353535;
-    --am-text: #f0f0f0;
-    --am-secondary: #8c8f98;
-    --am-hover: #2e2e2e;
-    --am-btn-bg: #2e2e2e;
-    --am-btn-hover: #3b3b3b;
-    --am-ring: #f2f2f2;
+    --am-bg: var(--dark-bg-elevated);
+    --am-border: var(--dark-border-strong);
+    --am-divider: var(--dark-border-strong);
+    --am-text: var(--dark-text-strong);
+    --am-secondary: var(--dark-text-secondary);
+    --am-hover: var(--dark-bg-elevated-hover);
+    --am-btn-bg: var(--dark-bg-elevated-hover);
+    --am-btn-hover: var(--dark-border-strong);
+    --am-ring: var(--dark-text-strong);
     --am-card-border: #404040;
     --am-shadow: 0 14px 40px rgba(0, 0, 0, 0.65);
 

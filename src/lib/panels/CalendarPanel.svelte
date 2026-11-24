@@ -659,26 +659,26 @@
 
 <style>
   .calendar {
-    --cal-bg: #000000;
-    --cal-border: #2a2e39;
-    --cal-card-border: #2a2e39;
-    --cal-row-divider: #2a2e39;
-    --cal-text: #d1d4dc;
-    --cal-secondary: #787b86;
-    --cal-selected-card: #1e222d;
-    --cal-underline: #d1d4dc;
-    --cal-pill-bg: #1e222d;
-    --cal-pill-text: #d1d4dc;
-    --cal-pill-active-bg: #d1d4dc;
-    --cal-pill-active-text: #000000;
-    --cal-heading-bg: #0d1017;
-    --cal-heading-accent: #d1d4dc;
-    --cal-row-hover: rgba(255, 255, 255, 0.04);
-    --cal-control-hover: rgba(255, 255, 255, 0.06);
-    --cal-scroll-bg: #1e222d;
-    --cal-scroll-border: #2a2e39;
+    --cal-bg: var(--dark-bg-panel);
+    --cal-border: var(--dark-border);
+    --cal-card-border: var(--dark-border);
+    --cal-row-divider: var(--dark-border);
+    --cal-text: var(--dark-text-primary);
+    --cal-secondary: var(--dark-text-secondary);
+    --cal-selected-card: var(--dark-bg-surface-alt);
+    --cal-underline: var(--dark-text-primary);
+    --cal-pill-bg: var(--dark-bg-surface-alt);
+    --cal-pill-text: var(--dark-text-primary);
+    --cal-pill-active-bg: var(--dark-cta-bg);
+    --cal-pill-active-text: var(--dark-cta-fg);
+    --cal-heading-bg: var(--dark-bg-subtle);
+    --cal-heading-accent: var(--dark-text-primary);
+    --cal-row-hover: var(--dark-hover);
+    --cal-control-hover: var(--dark-hover-strong);
+    --cal-scroll-bg: var(--dark-bg-elevated);
+    --cal-scroll-border: var(--dark-border);
     --cal-scroll-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
-    --cal-bar-empty: #363a45;
+    --cal-bar-empty: var(--dark-border-strong);
     --cal-flag-ring: rgba(255, 255, 255, 0.14);
 
     flex: 1;

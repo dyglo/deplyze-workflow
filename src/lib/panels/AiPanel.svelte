@@ -956,32 +956,32 @@
 
 <style>
   .ai-panel {
-    --ai-bg: #000000;
-    --ai-surface: #0b0d12;
-    --ai-elevated: #141821;
-    --ai-chip-bg: #161a24;
-    --ai-chip-hover: #1f2432;
-    --ai-border: #262a36;
-    --ai-border-soft: rgba(255, 255, 255, 0.08);
-    --ai-text: #e6e9f0;
-    --ai-secondary: #868993;
-    --ai-user-bg: #222633;
-    --ai-user-text: #f3f5fa;
-    --ai-popover-bg: rgba(20, 23, 31, 0.96);
-    --ai-popover-border: rgba(255, 255, 255, 0.12);
-    --ai-popover-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
-    --ai-option-selected-bg: #262c3b;
+    --ai-bg: var(--dark-bg-panel);
+    --ai-surface: var(--dark-bg-surface);
+    --ai-elevated: var(--dark-bg-surface-alt);
+    --ai-chip-bg: var(--dark-bg-surface-alt);
+    --ai-chip-hover: var(--dark-bg-elevated-hover);
+    --ai-border: var(--dark-border);
+    --ai-border-soft: var(--dark-border-subtle);
+    --ai-text: var(--dark-text-primary);
+    --ai-secondary: var(--dark-text-secondary);
+    --ai-user-bg: var(--dark-bg-active);
+    --ai-user-text: var(--dark-text-strong);
+    --ai-popover-bg: var(--dark-bg-glass-strong);
+    --ai-popover-border: var(--dark-border-glass);
+    --ai-popover-shadow: var(--dark-shadow-popover);
+    --ai-option-selected-bg: var(--dark-bg-active);
     --ai-option-selected-text: #ffffff;
-    --ai-option-selected-desc: #b4bac8;
-    --ai-option-hover: rgba(255, 255, 255, 0.05);
+    --ai-option-selected-desc: var(--dark-text-soft);
+    --ai-option-hover: var(--dark-hover);
     --ai-badge-bg: rgba(255, 167, 38, 0.16);
     --ai-badge-text: #ffb74d;
-    --ai-table-head: #121620;
-    --ai-code-bg: #171b26;
-    --ai-send-bg: #1e222d;
-    --ai-send-color: #6a6d78;
-    --ai-send-ready-bg: #e6e9f0;
-    --ai-send-ready-color: #0b0d12;
+    --ai-table-head: var(--dark-bg-surface);
+    --ai-code-bg: var(--dark-bg-surface-alt);
+    --ai-send-bg: var(--dark-bg-elevated);
+    --ai-send-color: var(--dark-text-muted);
+    --ai-send-ready-bg: var(--dark-cta-bg);
+    --ai-send-ready-color: var(--dark-cta-fg);
 
     flex: 1;
     min-height: 0;

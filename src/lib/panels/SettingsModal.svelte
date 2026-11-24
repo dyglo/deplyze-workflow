@@ -375,7 +375,7 @@
             <div class="row-controls">
               <span
                 class="swatch-box"
-                style:--swatch={theme === 'light' ? '#131722' : '#d1d4dc'}
+                style:--swatch={theme === 'light' ? '#131722' : '#ebebeb'}
                 aria-hidden="true"
               ></span>
               <div class="select-box compact">
@@ -725,25 +725,25 @@
 
 <style>
   .settings-modal {
-    --sm-bg: rgba(18, 18, 18, 0.84);
-    --sm-border: rgba(255, 255, 255, 0.1);
-    --sm-divider: rgba(255, 255, 255, 0.09);
-    --sm-text: #f0f0f0;
-    --sm-secondary: #8c8c92;
+    --sm-bg: var(--dark-bg-glass);
+    --sm-border: var(--dark-border-glass);
+    --sm-divider: var(--dark-border-subtle);
+    --sm-text: var(--dark-text-strong);
+    --sm-secondary: var(--dark-text-secondary);
     --sm-nav-active: rgba(255, 255, 255, 0.1);
-    --sm-nav-hover: rgba(255, 255, 255, 0.05);
-    --sm-control-bg: rgba(16, 16, 16, 0.62);
-    --sm-control-muted: rgba(255, 255, 255, 0.08);
-    --sm-control-border: rgba(255, 255, 255, 0.16);
-    --sm-check-bg: #f0f0f0;
-    --sm-check-fg: #0d0d0d;
+    --sm-nav-hover: var(--dark-hover);
+    --sm-control-bg: var(--dark-bg-input-glass);
+    --sm-control-muted: var(--dark-hover-strong);
+    --sm-control-border: var(--dark-border-control);
+    --sm-check-bg: var(--dark-cta-bg);
+    --sm-check-fg: var(--dark-cta-fg);
     --sm-check-border: rgba(255, 255, 255, 0.42);
-    --sm-ok-bg: #f0f0f0;
-    --sm-ok-fg: #0d0d0d;
+    --sm-ok-bg: var(--dark-cta-bg);
+    --sm-ok-fg: var(--dark-cta-fg);
     --sm-cancel-border: rgba(255, 255, 255, 0.48);
-    --sm-checker-a: #343436;
-    --sm-checker-b: #1c1c1e;
-    --sm-shadow: 0 20px 56px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    --sm-checker-a: var(--dark-checker-a);
+    --sm-checker-b: var(--dark-checker-b);
+    --sm-shadow: var(--dark-shadow-modal);
 
     position: fixed;
     z-index: 100;

@@ -187,15 +187,15 @@
 
 <style>
   .color-popover {
-    --cp-bg: rgba(22, 22, 22, 0.88);
-    --cp-border: rgba(255, 255, 255, 0.12);
-    --cp-divider: rgba(255, 255, 255, 0.09);
-    --cp-text: #f0f0f0;
-    --cp-secondary: #8c8c92;
-    --cp-ring: #f0f0f0;
-    --cp-checker-a: #343436;
-    --cp-checker-b: #1c1c1e;
-    --cp-shadow: 0 14px 36px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    --cp-bg: var(--dark-bg-glass);
+    --cp-border: var(--dark-border-glass);
+    --cp-divider: var(--dark-border-subtle);
+    --cp-text: var(--dark-text-strong);
+    --cp-secondary: var(--dark-text-secondary);
+    --cp-ring: var(--dark-text-strong);
+    --cp-checker-a: var(--dark-checker-a);
+    --cp-checker-b: var(--dark-checker-b);
+    --cp-shadow: 0 14px 36px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--dark-border-glass);
 
     position: fixed;
     z-index: 200;

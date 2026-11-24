@@ -353,19 +353,19 @@
 
 <style>
   .routines-panel {
-    --rt-bg: #000000;
-    --rt-surface: #0e1118;
-    --rt-surface-alt: #141822;
-    --rt-border: #232834;
-    --rt-border-soft: rgba(255, 255, 255, 0.07);
-    --rt-text: #e6e9f0;
-    --rt-secondary: #868993;
-    --rt-hover: rgba(255, 255, 255, 0.045);
-    --rt-check-bg: #e6e9f0;
-    --rt-check-fg: #0b0d12;
-    --rt-check-border: rgba(255, 255, 255, 0.32);
-    --rt-track: rgba(255, 255, 255, 0.07);
-    --rt-now: #f0f0f0;
+    --rt-bg: var(--dark-bg-panel);
+    --rt-surface: var(--dark-bg-surface);
+    --rt-surface-alt: var(--dark-bg-surface-alt);
+    --rt-border: var(--dark-border);
+    --rt-border-soft: var(--dark-border-subtle);
+    --rt-text: var(--dark-text-primary);
+    --rt-secondary: var(--dark-text-secondary);
+    --rt-hover: var(--dark-hover);
+    --rt-check-bg: var(--dark-cta-bg);
+    --rt-check-fg: var(--dark-cta-fg);
+    --rt-check-border: var(--dark-border-check);
+    --rt-track: var(--dark-track);
+    --rt-now: var(--dark-text-strong);
 
     flex: 1;
     min-height: 0;

@@ -97,8 +97,8 @@
     flex: 0 0 34px;
     display: flex;
     align-items: center;
-    color: #f5f5f5;
-    background: #2f2f2f;
+    color: var(--dark-text-strong);
+    background: var(--dark-bg-chrome);
     user-select: none;
     transition: color 150ms ease, background-color 150ms ease;
   }
