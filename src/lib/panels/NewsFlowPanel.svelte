@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, untrack } from 'svelte';
   import PanelShell from './PanelShell.svelte';
   import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
@@ -283,16 +284,23 @@
   let activeFetchController: AbortController | undefined;
   let lastLoadedQueryKey = '';
 
-  async function loadFeed(force = false) {
+  async function loadFeed(
+    force = false,
+    reqOverride?: NewsFlowQuery,
+    keyOverride?: string
+  ) {
     if (activeFetchController) activeFetchController.abort();
     const controller = new AbortController();
     activeFetchController = controller;
     const seq = ++fetchSeq;
-    const reqKey = queryKey;
+    const req = reqOverride ?? untrack(() => currentQuery);
+    const reqKey = keyOverride ?? untrack(() => queryKey);
     const queryChanged = reqKey !== lastLoadedQueryKey;
+    const currentCount = untrack(() => items.length);
 
-    if (items.length === 0 || queryChanged) {
-      if (queryChanged) items = [];
+    lastLoadedQueryKey = reqKey;
+    if (currentCount === 0 || queryChanged) {
+      if (queryChanged && currentCount > 0) items = [];
       loading = true;
     } else {
       refreshing = true;
@@ -301,12 +309,11 @@
 
     try {
       const res: NewsFlowResponse = await fetchNewsFlow(
-        { ...currentQuery, force },
+        { ...req, force },
         controller.signal
       );
       if (seq !== fetchSeq) return;
       items = res.items;
-      lastLoadedQueryKey = reqKey;
       feedCached = res.cached;
       feedNotice = res.notice ?? null;
       lastUpdatedAt = res.updatedAt;
@@ -322,7 +329,7 @@
   }
 
   // Load workspace & watchlists once on mount
-  $effect(() => {
+  onMount(() => {
     let cancelled = false;
     void Promise.all([loadNewsFlowWorkspace(), loadWatchlistState()])
       .then(([ws, wl]) => {
@@ -351,69 +358,72 @@
 
   // Automatically re-fetch whenever active chart symbol or filters change
   $effect(() => {
-    void queryKey;
     if (!workspaceLoaded) return;
-    // If user switches chart tab while in list mode (or reading mode when following chart), refresh feed cleanly
-    void loadFeed(false);
+    const key = queryKey;
+    untrack(() => {
+      void loadFeed(false, currentQuery, key);
+    });
   });
 
   // Load full article text (only for permitted public-domain / CC BY 4.0 sources) + live symbol chip quotes
   $effect(() => {
     const item = readingItem;
-    if (!item) {
-      articlePayload = null;
-      articleLoading = false;
-      return;
-    }
+    return untrack(() => {
+      if (!item) {
+        articlePayload = null;
+        articleLoading = false;
+        return;
+      }
 
-    let cancelled = false;
-    const controller = new AbortController();
-    copiedLink = false;
-    savedToNotes = false;
+      let cancelled = false;
+      const controller = new AbortController();
+      copiedLink = false;
+      savedToNotes = false;
 
-    // Fetch live quotes for every related symbol chip on this article
-    const syms = item.symbols.map((s) => s.symbol);
-    if (syms.length > 0) {
-      void fetchMarketQuotes(syms, controller.signal)
-        .then((quotes) => {
-          if (!cancelled) {
-            chipQuotes = { ...chipQuotes, ...quotes };
-          }
-        })
-        .catch(() => {
-          // ignore
-        });
-    }
+      // Fetch live quotes for every related symbol chip on this article
+      const syms = item.symbols.map((s) => s.symbol);
+      if (syms.length > 0) {
+        void fetchMarketQuotes(syms, controller.signal)
+          .then((quotes) => {
+            if (!cancelled) {
+              chipQuotes = { ...chipQuotes, ...quotes };
+            }
+          })
+          .catch(() => {
+            // ignore
+          });
+      }
 
-    if (item.displayMode === 'full') {
-      articleLoading = true;
-      articlePayload = null;
-      void fetchNewsArticle(item.url, controller.signal)
-        .then((payload) => {
-          if (!cancelled) {
-            articlePayload = payload;
-            articleLoading = false;
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            articlePayload = null;
-            articleLoading = false;
-          }
-        });
-    } else {
-      articlePayload = null;
-      articleLoading = false;
-    }
+      if (item.displayMode === 'full') {
+        articleLoading = true;
+        articlePayload = null;
+        void fetchNewsArticle(item.url, controller.signal)
+          .then((payload) => {
+            if (!cancelled) {
+              articlePayload = payload;
+              articleLoading = false;
+            }
+          })
+          .catch(() => {
+            if (!cancelled) {
+              articlePayload = null;
+              articleLoading = false;
+            }
+          });
+      } else {
+        articlePayload = null;
+        articleLoading = false;
+      }
 
-    queueMicrotask(() => {
-      if (readerScrollEl) readerScrollEl.scrollTop = 0;
+      queueMicrotask(() => {
+        if (readerScrollEl) readerScrollEl.scrollTop = 0;
+      });
+
+      return () => {
+        cancelled = true;
+        controller.abort();
+      };
     });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
   });
 
   function openArticle(item: NewsFlowItem) {
