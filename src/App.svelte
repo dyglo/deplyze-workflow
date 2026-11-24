@@ -3,6 +3,8 @@
   import type { ThemeMode } from './lib/AppMenu.svelte';
   import type { ChartQuote } from './lib/Chart.svelte';
   import ChartGrid from './lib/ChartGrid.svelte';
+  import SymbolInsightsPage from './lib/insights/SymbolInsightsPage.svelte';
+  import type { InsightsViewId } from './lib/insights/symbolInsightsApi';
   import Rail from './lib/Rail.svelte';
   import TitleBar from './lib/TitleBar.svelte';
   import {
@@ -61,6 +63,12 @@
   let settingsOpen = false;
   let closedTabs: WorkspaceTab[] = [];
   let alertToasts: InAppAlertToast[] = [];
+  let symbolInsights: {
+    symbol: string;
+    shortName: string;
+    description: string;
+    view: InsightsViewId;
+  } | null = null;
   // Transient live quote cache per (tabId, paneIndex) — never persisted to disk
   const paneQuotesByTab: Record<string, Record<number, ChartQuote>> = {};
 
@@ -238,6 +246,7 @@
   }
 
   function selectTab(tabId: string) {
+    symbolInsights = null;
     if (activeGroup.activeTabId === tabId) return;
     commitTabs({
       ...tabsState,
@@ -248,6 +257,7 @@
   }
 
   function addTab() {
+    symbolInsights = null;
     const newTab = createTab();
     commitTabs({
       ...tabsState,
@@ -356,7 +366,26 @@
     });
   }
 
+  function openSymbolInsights(
+    symbol: string,
+    shortName: string,
+    description: string,
+    view: InsightsViewId
+  ) {
+    symbolInsights = { symbol, shortName, description, view };
+  }
+
+  function syncInsightsSymbol(symbol: string, shortName: string, description: string) {
+    if (!symbolInsights) return;
+    symbolInsights = { ...symbolInsights, symbol, shortName, description };
+  }
+
+  function closeSymbolInsights() {
+    symbolInsights = null;
+  }
+
   function focusOrOpenSymbolTab(symbol: string, shortName: string) {
+    symbolInsights = null;
     const targetFull = symbol.trim().toUpperCase();
     const targetShort = (shortName || extractShortSymbol(symbol)).trim().toUpperCase();
     const existing = activeGroup.tabs.find((t) => {
@@ -551,6 +580,26 @@
           />
         </div>
       {/each}
+
+      {#if symbolInsights}
+        <SymbolInsightsPage
+          {theme}
+          symbol={symbolInsights.symbol}
+          shortName={symbolInsights.shortName}
+          description={symbolInsights.description}
+          view={symbolInsights.view}
+          livePrice={symbolInsights.shortName.toUpperCase() === activeTab.title.toUpperCase()
+            ? activeTab.quote?.price
+            : undefined}
+          liveChangePercent={symbolInsights.shortName.toUpperCase() === activeTab.title.toUpperCase()
+            ? activeTab.quote?.changePercent
+            : undefined}
+          onChangeView={(nextView) => {
+            if (symbolInsights) symbolInsights = { ...symbolInsights, view: nextView };
+          }}
+          onClose={closeSymbolInsights}
+        />
+      {/if}
     </div>
 
     <Rail
@@ -569,6 +618,9 @@
       onSelectSymbol={loadSymbolInActiveTab}
       onOpenSymbolInNewTab={openSymbolInNewTab}
       onOpenOnChart={focusOrOpenSymbolTab}
+      insightsOpen={Boolean(symbolInsights)}
+      onOpenSymbolInsights={openSymbolInsights}
+      onSelectInsightsSymbol={syncInsightsSymbol}
     />
   </div>
 

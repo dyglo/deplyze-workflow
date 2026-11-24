@@ -15,6 +15,7 @@
     type MacroRegimeResponse,
     type SymbolBriefResponse
   } from '../insights/api';
+  import type { InsightsViewId } from '../insights/symbolInsightsApi';
   import { makeWorkspaceId } from '../workspace/storage';
   import {
     SYMBOL_CATALOG,
@@ -42,6 +43,14 @@
     onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
     onOpenNotesForSymbol: () => void;
     onCreateAlertForSymbol: (symbol: string, shortName: string, price?: number) => void;
+    insightsOpen?: boolean;
+    onOpenSymbolInsights: (
+      symbol: string,
+      shortName: string,
+      description: string,
+      view: InsightsViewId
+    ) => void;
+    onSelectInsightsSymbol?: (symbol: string, shortName: string, description: string) => void;
     onClose: () => void;
   }
 
@@ -55,6 +64,9 @@
     onOpenSymbolInNewTab,
     onOpenNotesForSymbol,
     onCreateAlertForSymbol,
+    insightsOpen = false,
+    onOpenSymbolInsights,
+    onSelectInsightsSymbol = undefined,
     onClose
   }: Props = $props();
 
@@ -71,6 +83,33 @@
   let lastHandledRefreshTick = 0;
   let lastBriefShort = '';
   let briefAbort: AbortController | null = null;
+  let analysisMenuPos = $state<{ top: number; left: number } | null>(null);
+
+  function toggleAnalysisMenu(e: MouseEvent) {
+    e.stopPropagation();
+    if (analysisMenuPos) {
+      analysisMenuPos = null;
+      return;
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const menuW = 196;
+    const menuH = 198;
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 760;
+    const left = Math.round(Math.max(12, Math.min(vw - menuW - 12, rect.right - menuW)));
+    const top =
+      rect.bottom + menuH + 12 <= vh
+        ? Math.round(rect.bottom + 6)
+        : Math.round(Math.max(12, rect.top - menuH - 6));
+    analysisMenuPos = { top, left };
+  }
+
+  function launchInsightsView(view: InsightsViewId) {
+    if (!selectedItem) return;
+    const q = resolveQuote(selectedItem);
+    analysisMenuPos = null;
+    onOpenSymbolInsights(selectedItem.symbol, selectedItem.shortName, q.description, view);
+  }
 
   const SHEET_HEIGHT_KEY = 'deplyzeworkflow-wl-sheet-h';
   const DEFAULT_SHEET_HEIGHT = 320;
@@ -322,6 +361,7 @@
       if (!el) return;
       if (groupMenuOpen && !el.closest('[data-wl-group-menu]')) groupMenuOpen = false;
       if (moreMenuOpen && !el.closest('[data-wl-more-menu]')) moreMenuOpen = false;
+      if (analysisMenuPos && !el.closest('[data-wl-analysis-menu]')) analysisMenuPos = null;
     };
     window.addEventListener('pointerdown', onDocDown);
 
@@ -432,6 +472,12 @@
 
   function handleRowClick(item: WatchlistItem) {
     selectedItemId = item.id;
+    analysisMenuPos = null;
+    if (insightsOpen && onSelectInsightsSymbol) {
+      const q = resolveQuote(item);
+      onSelectInsightsSymbol(item.symbol, item.shortName, q.description);
+      return;
+    }
     onSelectSymbol(item.symbol, item.shortName);
   }
 
@@ -954,6 +1000,24 @@
           <div class="detail-actions">
             <button
               class="detail-icon-btn"
+              class:active-grid={Boolean(analysisMenuPos) || insightsOpen}
+              type="button"
+              data-wl-analysis-menu="true"
+              aria-label="Symbol analysis and insights"
+              aria-haspopup="menu"
+              aria-expanded={Boolean(analysisMenuPos)}
+              title="Analysis & Insights (Technicals, Seasonals, News, Volatility)"
+              onclick={toggleAnalysisMenu}
+            >
+              <svg viewBox="0 0 18 18" aria-hidden="true">
+                <rect x="2.75" y="2.75" width="5" height="5" rx="1.25" />
+                <rect x="10.25" y="2.75" width="5" height="5" rx="1.25" />
+                <rect x="2.75" y="10.25" width="5" height="5" rx="1.25" />
+                <rect x="10.25" y="10.25" width="5" height="5" rx="1.25" />
+              </svg>
+            </button>
+            <button
+              class="detail-icon-btn"
               type="button"
               title="Open in new tab"
               onclick={() => onOpenSymbolInNewTab(selectedItem.symbol, selectedItem.shortName)}
@@ -1197,6 +1261,73 @@
     {/if}
   </div>
 </PanelShell>
+
+{#if analysisMenuPos && selectedItem}
+  <div
+    class="analysis-popover"
+    class:light={theme === 'light'}
+    data-wl-analysis-menu="true"
+    role="menu"
+    aria-label="Symbol Analysis"
+    style:top="{analysisMenuPos.top}px"
+    style:left="{analysisMenuPos.left}px"
+  >
+    <div class="analysis-heading">ANALYSIS</div>
+    <button
+      class="analysis-item"
+      type="button"
+      role="menuitem"
+      onclick={() => launchInsightsView('technicals')}
+    >
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M3.25 14a6.75 6.75 0 1 1 13.5 0" />
+        <path d="M10 14l3-4.5" />
+        <circle cx="10" cy="14" r="1.15" />
+      </svg>
+      <span>Technicals</span>
+    </button>
+
+    <button
+      class="analysis-item"
+      type="button"
+      role="menuitem"
+      onclick={() => launchInsightsView('seasonals')}
+    >
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M9.5 6.5a3.25 3.25 0 0 0-3.25 3.25c0 1.25.7 2.35 1.75 2.9" />
+        <path d="M9.5 3.25v1.35M4.8 5.05l.95.95M3.25 9.75h1.35" />
+        <path d="M12.5 16.5v-3.25m0 0-3.1-.85 1.15-2.05-1.45-1.1 2.25-.45 1.15-2.1 1.15 2.1 2.25.45-1.45 1.1 1.15 2.05-3.1.85Z" />
+      </svg>
+      <span>Seasonals</span>
+    </button>
+
+    <button
+      class="analysis-item"
+      type="button"
+      role="menuitem"
+      onclick={() => launchInsightsView('news')}
+    >
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="3.25" y="3.75" width="13.5" height="12.5" rx="2" />
+        <rect x="5.75" y="6.25" width="3.75" height="3.5" rx="0.5" />
+        <path d="M11.5 7h2.75M11.5 9.5h2.75M5.75 12.5h8.5" />
+      </svg>
+      <span>News</span>
+    </button>
+
+    <button
+      class="analysis-item"
+      type="button"
+      role="menuitem"
+      onclick={() => launchInsightsView('volatility')}
+    >
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M2.75 11.25h3l2-5.5 3.25 8.5 2-4.5h4.25" />
+      </svg>
+      <span>Volatility &amp; Levels</span>
+    </button>
+  </div>
+{/if}
 
 <style>
   .watchlist {
@@ -1812,9 +1943,84 @@
     cursor: pointer;
   }
 
-  .detail-icon-btn:hover {
+  .detail-icon-btn:hover,
+  .detail-icon-btn.active-grid {
     color: var(--wl-text);
     background: var(--wl-hover);
+  }
+
+  .analysis-popover {
+    position: fixed;
+    z-index: 95;
+    width: 196px;
+    padding: 6px;
+    border-radius: 10px;
+    background: var(--dark-bg-elevated);
+    color: var(--dark-text-strong);
+    border: 1px solid var(--dark-border-strong);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    user-select: none;
+  }
+
+  .analysis-popover.light {
+    background: #ffffff;
+    color: #131722;
+    border-color: #e0e3eb;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.14);
+  }
+
+  .analysis-heading {
+    padding: 5px 10px 4px;
+    font-size: 10.5px;
+    font-weight: 650;
+    letter-spacing: 0.05em;
+    color: var(--dark-text-muted);
+  }
+
+  .analysis-popover.light .analysis-heading {
+    color: #868993;
+  }
+
+  .analysis-item {
+    width: 100%;
+    height: 36px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 120ms ease;
+  }
+
+  .analysis-item:hover {
+    background: var(--dark-bg-hover);
+  }
+
+  .analysis-popover.light .analysis-item:hover {
+    background: #f0f3fa;
+  }
+
+  .analysis-item svg {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.85;
   }
 
   .detail-icon-btn svg {

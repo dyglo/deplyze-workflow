@@ -23,6 +23,8 @@ import {
   getSymbolBriefPayload,
   runEdgeAuditPayload
 } from './insights/service.js';
+import { getSymbolTechnicalsPayload } from './insights/technicals.js';
+import { getSymbolSeasonalsPayload } from './insights/seasonals.js';
 import type { EdgeAuditEntryInput, TechBiasInput } from './insights/types.js';
 
 /** Load local .env files (repo root + server dir) without overriding real environment variables. */
@@ -134,7 +136,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.12',
+        version: '0.1.14',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -148,7 +150,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.12',
+      version: '0.1.14',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
@@ -161,6 +163,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         'POST /api/alerts/webhook',
         'GET /api/insights/regime',
         'GET /api/insights/symbol?symbol=OANDA:XAUUSD&bias=bull',
+        'GET /api/insights/technicals?symbol=OANDA:XAUUSD&interval=1D',
+        'GET /api/insights/seasonals?symbol=OANDA:XAUUSD',
         'GET /api/insights/event?title=Consumer%20Price%20Index%20YoY&country=US',
         'POST /api/insights/edge-audit',
         'GET /api/ai/models',
@@ -283,6 +287,29 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const force = url.searchParams.get('force') === '1';
     const payload = await getMacroRegimePayload(force);
     sendJson(res, 200, payload, 'public, max-age=120');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/insights/technicals') {
+    const rawSym = (url.searchParams.get('symbol') ?? '').trim();
+    if (!rawSym) {
+      sendJson(res, 400, { error: 'Missing symbol query parameter' }, 'no-store');
+      return;
+    }
+    const interval = url.searchParams.get('interval');
+    const payload = await getSymbolTechnicalsPayload(rawSym, interval);
+    sendJson(res, 200, payload, 'public, max-age=15');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/insights/seasonals') {
+    const rawSym = (url.searchParams.get('symbol') ?? '').trim();
+    if (!rawSym) {
+      sendJson(res, 400, { error: 'Missing symbol query parameter' }, 'no-store');
+      return;
+    }
+    const payload = await getSymbolSeasonalsPayload(rawSym);
+    sendJson(res, 200, payload, 'public, max-age=300');
     return;
   }
 

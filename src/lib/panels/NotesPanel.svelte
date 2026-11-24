@@ -3,6 +3,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ImageLightbox from './ImageLightbox.svelte';
   import PanelShell from './PanelShell.svelte';
+  import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
     NOTE_UNDO_WINDOW_MS,
     deleteImageFile,
@@ -341,6 +342,16 @@
       e.stopPropagation();
       undoDelete(activeUndoTarget.noteId);
     }
+  }
+
+  function cleanNoteExcerpt(raw: string): string {
+    return raw
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   function startSymbolEdit() {
@@ -736,7 +747,8 @@
               title="Click to edit symbol"
               onclick={startSymbolEdit}
             >
-              {activeNote.symbol}
+              <SymbolIcon symbol={activeNote.symbol} size={14} />
+              <span>{activeNote.symbol}</span>
             </button>
           {/if}
         </div>
@@ -922,9 +934,13 @@
                 }}
               >
                 <div class="note-row-top">
-                  <span class="note-row-title" class:untitled={!note.title.trim()}>
-                    {note.title.trim() || 'Untitled'}
-                  </span>
+                  <div class="note-row-meta">
+                    <span class="symbol-pill">
+                      <SymbolIcon symbol={note.symbol} size={14} />
+                      <span>{note.symbol}</span>
+                    </span>
+                    <span class="row-time">{formatTime(note.createdAt)}</span>
+                  </div>
 
                   <div class="row-actions">
                     <button
@@ -978,32 +994,27 @@
                   </div>
                 </div>
 
+                <div class="note-row-title" class:untitled={!note.title.trim()}>
+                  {note.title.trim() || 'Untitled'}
+                </div>
+
                 {#if note.body.trim()}
-                  <div class="note-row-excerpt">{note.body.trim()}</div>
+                  <div class="note-row-excerpt">{cleanNoteExcerpt(note.body)}</div>
                 {/if}
 
-                <div class="note-row-footer">
-                  <div class="note-row-meta">
-                    <span class="symbol-pill">{note.symbol}</span>
-                    <span class="row-time">{formatTime(note.createdAt)}</span>
+                {#if note.attachments.length > 0}
+                  <div class="row-cover-wrap">
+                    <img
+                      class="row-cover-img"
+                      src={getImageUrl(note.attachments[0].filename, imagesDir)}
+                      alt=""
+                      loading="lazy"
+                    />
+                    {#if note.attachments.length > 1}
+                      <span class="row-cover-count">+{note.attachments.length - 1}</span>
+                    {/if}
                   </div>
-
-                  {#if note.attachments.length > 0}
-                    <div class="row-thumbs">
-                      {#each note.attachments.slice(0, 3) as att (att.id)}
-                        <img
-                          class="row-thumb"
-                          src={getImageUrl(att.filename, imagesDir)}
-                          alt=""
-                          aria-hidden="true"
-                        />
-                      {/each}
-                      {#if note.attachments.length > 3}
-                        <span class="thumb-more">+{note.attachments.length - 3}</span>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
+                {/if}
               </div>
             {/each}
           {/each}
@@ -1308,11 +1319,11 @@
   }
 
   .note-row {
-    padding: 12px 16px;
+    padding: 13px 16px 14px;
     border-bottom: 1px solid var(--np-row-divider);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 7px;
     cursor: pointer;
     transition: background-color 150ms ease, border-color 150ms ease;
   }
@@ -1329,15 +1340,16 @@
   }
 
   .note-row-title {
-    flex: 1;
-    min-width: 0;
-    font-size: 13.5px;
-    font-weight: 600;
-    line-height: 1.3;
+    font-size: 14px;
+    font-weight: 650;
+    line-height: 1.32;
+    letter-spacing: -0.01em;
     color: var(--np-text);
-    white-space: nowrap;
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .note-row-title.untitled {
@@ -1403,33 +1415,28 @@
 
   .note-row-excerpt {
     font-size: 12.5px;
-    line-height: 1.45;
+    line-height: 1.48;
     color: var(--np-secondary);
     display: -webkit-box;
-    line-clamp: 2;
-    -webkit-line-clamp: 2;
+    line-clamp: 3;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
-    white-space: pre-wrap;
-  }
-
-  .note-row-footer {
-    margin-top: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
   }
 
   .note-row-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 7px;
+    min-width: 0;
   }
 
   .symbol-pill {
-    padding: 2px 7px;
-    border-radius: 5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px 2px 4px;
+    border-radius: 999px;
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.01em;
@@ -1443,26 +1450,42 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .row-thumbs {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .row-thumb {
-    width: 28px;
-    height: 22px;
-    border-radius: 4px;
-    object-fit: cover;
+  .row-cover-wrap {
+    position: relative;
+    margin-top: 2px;
+    width: 100%;
+    border-radius: 10px;
+    overflow: hidden;
     border: 1px solid var(--np-border);
-    display: block;
+    background: var(--np-heading-bg);
   }
 
-  .thumb-more {
+  .row-cover-img {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    max-height: 184px;
+    object-fit: cover;
+    object-position: center;
+    display: block;
+    transition: transform 200ms ease;
+  }
+
+  .note-row:hover .row-cover-img {
+    transform: scale(1.012);
+  }
+
+  .row-cover-count {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    padding: 2px 7px;
+    border-radius: 999px;
     font-size: 11px;
-    color: var(--np-secondary);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-    padding-left: 2px;
+    color: #ffffff;
+    background: rgba(0, 0, 0, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.16);
   }
 
   /* Empty state */
@@ -1638,10 +1661,13 @@
   }
 
   .symbol-chip {
-    height: 22px;
-    padding: 0 8px;
+    height: 24px;
+    padding: 0 9px 0 5px;
     border: 0;
-    border-radius: 6px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font: inherit;
     font-size: 11.5px;
     font-weight: 600;
@@ -1728,7 +1754,7 @@
 
   .attachment-card {
     position: relative;
-    border-radius: 8px;
+    border-radius: 10px;
     overflow: hidden;
     border: 1px solid var(--np-border);
     background: var(--np-heading-bg);
@@ -1748,6 +1774,11 @@
     aspect-ratio: 16 / 10;
     object-fit: cover;
     display: block;
+    transition: transform 200ms ease;
+  }
+
+  .attachment-card:hover .attachment-preview img {
+    transform: scale(1.012);
   }
 
   .attachments-grid.single .attachment-preview img {

@@ -15,6 +15,7 @@
   import WatchlistPanel from './panels/WatchlistPanel.svelte';
   import { upsertAlert, type TradingAlert } from './alerts/store';
   import { getLayoutById, type LayoutId } from './chart/layouts';
+  import type { InsightsViewId } from './insights/symbolInsightsApi';
   import type { ChartSettings } from './settings/chartSettings';
   import { loadWorkspaceJson, saveWorkspaceJson } from './workspace/storage';
 
@@ -34,6 +35,14 @@
     onSelectSymbol: (symbol: string, shortName: string) => void;
     onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
     onOpenOnChart: (symbol: string, shortName: string) => void;
+    insightsOpen?: boolean;
+    onOpenSymbolInsights: (
+      symbol: string,
+      shortName: string,
+      description: string,
+      view: InsightsViewId
+    ) => void;
+    onSelectInsightsSymbol: (symbol: string, shortName: string, description: string) => void;
   }
 
   let {
@@ -51,7 +60,10 @@
     onSelectLayout,
     onSelectSymbol,
     onOpenSymbolInNewTab,
-    onOpenOnChart
+    onOpenOnChart,
+    insightsOpen = false,
+    onOpenSymbolInsights,
+    onSelectInsightsSymbol
   }: Props = $props();
 
   type RailId =
@@ -198,6 +210,9 @@
       persistRail('note');
     }}
     onCreateAlertForSymbol={(sym, short, price) => openCreateAlertModal(sym, short, price, null)}
+    {insightsOpen}
+    {onOpenSymbolInsights}
+    {onSelectInsightsSymbol}
     onClose={closePanel}
   />
 {:else if active === 'calendar'}
