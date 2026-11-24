@@ -137,121 +137,121 @@ const SYMBOL_CATALOG: SymbolMeta[] = [
   {
     shortName: 'XAUUSD',
     fullSymbol: 'OANDA:XAUUSD',
-    queryTerms: 'gold price XAUUSD spot gold bullion precious metals',
+    queryTerms: 'gold price XAUUSD news',
     keywords: /\b(gold|xau|xauusd|bullion|comex gold|precious metals)\b/i
   },
   {
     shortName: 'XAGUSD',
     fullSymbol: 'OANDA:XAGUSD',
-    queryTerms: 'silver price XAGUSD spot silver precious metals',
+    queryTerms: 'silver price XAGUSD news',
     keywords: /\b(silver|xag|xagusd)\b/i
   },
   {
     shortName: 'USOIL',
     fullSymbol: 'TVC:USOIL',
-    queryTerms: 'WTI crude oil prices USOIL OPEC EIA energy market',
+    queryTerms: 'crude oil WTI OPEC price news',
     keywords: /\b(wti|crude oil|oil price|oil prices|usoil|opec|barrels?|petroleum|refinery)\b/i
   },
   {
     shortName: 'UKOIL',
     fullSymbol: 'TVC:UKOIL',
-    queryTerms: 'Brent crude oil prices UKOIL OPEC energy market',
+    queryTerms: 'Brent crude oil price news',
     keywords: /\b(brent|ukoil|north sea crude)\b/i
   },
   {
     shortName: 'DXY',
     fullSymbol: 'TVC:DXY',
-    queryTerms: 'US Dollar Index DXY Federal Reserve Treasury yields greenback',
+    queryTerms: 'US Dollar Index DXY Federal Reserve news',
     keywords: /\b(dollar index|dxy|greenback|u\.s\. dollar|us dollar|federal reserve|fomc|powell|treasury yields?)\b/i
   },
   {
     shortName: 'EURUSD',
     fullSymbol: 'OANDA:EURUSD',
-    queryTerms: 'EUR/USD euro dollar ECB eurozone forex',
+    queryTerms: 'EUR/USD euro ECB forex news',
     keywords: /\b(eur\/usd|eurusd|eurozone|\beuro\b|\becb\b|lagarde)\b/i
   },
   {
     shortName: 'GBPUSD',
     fullSymbol: 'OANDA:GBPUSD',
-    queryTerms: 'GBP/USD British pound sterling Bank of England UK forex',
+    queryTerms: 'GBP/USD pound sterling Bank of England news',
     keywords: /\b(gbp\/usd|gbpusd|sterling|british pound|bank of england|\bboe\b)\b/i
   },
   {
     shortName: 'USDJPY',
     fullSymbol: 'OANDA:USDJPY',
-    queryTerms: 'USD/JPY Japanese yen Bank of Japan forex',
+    queryTerms: 'USD/JPY Japanese yen Bank of Japan news',
     keywords: /\b(usd\/jpy|usdjpy|japanese yen|\byen\b|bank of japan|\bboj\b)\b/i
   },
   {
     shortName: 'AUDUSD',
     fullSymbol: 'OANDA:AUDUSD',
-    queryTerms: 'AUD/USD Australian dollar RBA forex',
+    queryTerms: 'AUD/USD Australian dollar RBA forex news',
     keywords: /\b(aud\/usd|audusd|aussie dollar|australian dollar|\brba\b)\b/i
   },
   {
     shortName: 'USDCAD',
     fullSymbol: 'OANDA:USDCAD',
-    queryTerms: 'USD/CAD Canadian dollar loonie Bank of Canada forex',
+    queryTerms: 'USD/CAD Canadian dollar Bank of Canada news',
     keywords: /\b(usd\/cad|usdcad|loonie|canadian dollar|bank of canada)\b/i
   },
   {
     shortName: 'USDCHF',
     fullSymbol: 'OANDA:USDCHF',
-    queryTerms: 'USD/CHF Swiss franc SNB forex',
+    queryTerms: 'USD/CHF Swiss franc SNB forex news',
     keywords: /\b(usd\/chf|usdchf|swiss franc|\bsnb\b)\b/i
   },
   {
     shortName: 'NZDUSD',
     fullSymbol: 'OANDA:NZDUSD',
-    queryTerms: 'NZD/USD New Zealand dollar RBNZ forex',
+    queryTerms: 'NZD/USD New Zealand dollar RBNZ news',
     keywords: /\b(nzd\/usd|nzdusd|kiwi dollar|new zealand dollar|\brbnz\b)\b/i
   },
   {
     shortName: 'NAS100',
     fullSymbol: 'NASDAQ:NDX',
-    queryTerms: 'Nasdaq 100 NDX tech stocks Wall Street equities',
+    queryTerms: 'Nasdaq 100 tech stocks market news',
     keywords: /\b(nasdaq|ndx|nas100|tech stocks|big tech)\b/i
   },
   {
     shortName: 'SPX',
     fullSymbol: 'TVC:SPX',
-    queryTerms: 'S&P 500 SPX Wall Street US stocks equities',
+    queryTerms: 'S&P 500 Wall Street stocks news',
     keywords: /\b(s&p 500|s&p500|\bspx\b|wall street|u\.s\. stocks)\b/i
   },
   {
     shortName: 'US30',
     fullSymbol: 'TVC:DJI',
-    queryTerms: 'Dow Jones Industrial Average US30 DJI Wall Street',
+    queryTerms: 'Dow Jones Wall Street market news',
     keywords: /\b(dow jones|\bdjia?\b|us30)\b/i
   },
   {
     shortName: 'BTCUSD',
     fullSymbol: 'BITSTAMP:BTCUSD',
-    queryTerms: 'Bitcoin BTC price crypto ETF market news',
+    queryTerms: 'Bitcoin BTC crypto market news',
     keywords: /\b(bitcoin|\bbtc\b|btcusd)\b/i
   },
   {
     shortName: 'ETHUSD',
     fullSymbol: 'BITSTAMP:ETHUSD',
-    queryTerms: 'Ethereum ETH price crypto market news',
+    queryTerms: 'Ethereum ETH crypto price news',
     keywords: /\b(ethereum|\beth\b|ethusd|ether)\b/i
   },
   {
     shortName: 'NVDA',
     fullSymbol: 'NASDAQ:NVDA',
-    queryTerms: 'NVIDIA NVDA stock AI chips earnings news',
+    queryTerms: 'NVIDIA NVDA stock news',
     keywords: /\b(nvidia|nvda)\b/i
   },
   {
     shortName: 'AAPL',
     fullSymbol: 'NASDAQ:AAPL',
-    queryTerms: 'Apple AAPL stock earnings news',
+    queryTerms: 'Apple AAPL stock news',
     keywords: /\b(apple inc|aapl|\bapple\b.*stock)\b/i
   },
   {
     shortName: 'TSLA',
     fullSymbol: 'NASDAQ:TSLA',
-    queryTerms: 'Tesla TSLA stock EV deliveries earnings news',
+    queryTerms: 'Tesla TSLA stock news',
     keywords: /\b(tesla|tsla)\b/i
   }
 ];
@@ -321,6 +321,44 @@ function parsePublishedIso(raw: string | undefined, fallbackOffsetMinutes: numbe
     }
   }
   return new Date(Date.now() - fallbackOffsetMinutes * 60_000).toISOString();
+}
+
+function cleanHeadline(raw: string): string {
+  return (raw || '')
+    .replace(/\s+/g, ' ')
+    .replace(
+      /\s*(?:\||—|–|-)\s*(?:Reuters|FXStreet|KITCO NEWS|Kitco News|OilPrice\.com|MarketWatch|CNBC|Bloomberg|Investing\.com|ForexLive|Yahoo Finance|Seeking Alpha|CoinDesk|Cointelegraph|GlobeNewswire|Benzinga|Financial Times|WSJ)\s*$/i,
+      ''
+    )
+    .replace(/\s+By\s+Investing\.com\s*$/i, '')
+    .trim();
+}
+
+function isLandingOrQuotePage(url: string, title: string): boolean {
+  const t = title.toLowerCase();
+  if (
+    /continuous contract overview|latest news,\s*video news|live gold price|quote\s*&\s*news|stock price today|real-time quote|market overview|homepage/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/\/+$/, '');
+    if (!path || path === '/news' || path === '/markets' || path === '/commodities' || path === '/currencies') {
+      return true;
+    }
+    if (/^\/investing\/(future|index|currency|commodity|stock)\/[^/]+$/i.test(path)) {
+      return true;
+    }
+    if (/^\/quote\/[^/]+$/i.test(path)) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function cleanSnippet(raw: string, title: string): string {
@@ -445,7 +483,7 @@ function buildSearchSpec(req: NewsFlowRequest): {
     });
     parts.push(`(${terms.join(' OR ')}) market news`);
   } else {
-    parts.push('global financial markets gold crude oil forex Federal Reserve stocks crypto breaking news');
+    parts.push('financial markets news stocks commodities forex');
   }
 
   const marketKey = (req.market ?? '').trim().toLowerCase();
@@ -478,37 +516,6 @@ function buildSearchSpec(req: NewsFlowRequest): {
     if (providerPolicy.displayMode === 'full') {
       days = 30; // Official central bank / EIA / BLS releases publish weekly/monthly
     }
-  } else if (primarySymbol === 'USOIL' || primarySymbol === 'UKOIL') {
-    includeDomains = [
-      'reuters.com',
-      'oilprice.com',
-      'eia.gov',
-      'fxstreet.com',
-      'cnbc.com',
-      'marketwatch.com',
-      'investing.com',
-      'finance.yahoo.com'
-    ];
-  } else if (primarySymbol === 'XAUUSD' || primarySymbol === 'XAGUSD') {
-    includeDomains = [
-      'reuters.com',
-      'fxstreet.com',
-      'kitco.com',
-      'cnbc.com',
-      'marketwatch.com',
-      'investing.com',
-      'federalreserve.gov',
-      'globenewswire.com'
-    ];
-  } else if (primarySymbol === 'BTCUSD' || primarySymbol === 'ETHUSD') {
-    includeDomains = [
-      'coindesk.com',
-      'cointelegraph.com',
-      'reuters.com',
-      'fxstreet.com',
-      'cnbc.com',
-      'investing.com'
-    ];
   }
 
   const normSymbols =
@@ -640,10 +647,10 @@ export async function getNewsFlowPayload(req: NewsFlowRequest): Promise<NewsFlow
         },
         body: JSON.stringify({
           query: spec.query,
-          topic: spec.days > 14 ? 'general' : 'news',
+          topic: 'general',
           search_depth: 'basic', // Strictly 1 credit per request
-          days: spec.days,
-          max_results: 16,
+          time_range: spec.days > 14 ? 'month' : 'week',
+          max_results: 20,
           include_answer: false,
           include_raw_content: false,
           include_domains: spec.includeDomains
@@ -687,9 +694,12 @@ export async function getNewsFlowPayload(req: NewsFlowRequest): Promise<NewsFlow
 
       for (let i = 0; i < rawResults.length; i++) {
         const raw = rawResults[i];
-        const title = (raw.title ?? '').replace(/\s+/g, ' ').trim();
+        const rawTitle = (raw.title ?? '').replace(/\s+/g, ' ').trim();
         const url = (raw.url ?? '').trim();
-        if (!title || !url || seenUrls.has(url)) continue;
+        if (!rawTitle || !url || seenUrls.has(url)) continue;
+        if (isLandingOrQuotePage(url, rawTitle)) continue;
+        const title = cleanHeadline(rawTitle);
+        if (!title) continue;
         seenUrls.add(url);
 
         const policy = matchSourcePolicyByUrl(url);
