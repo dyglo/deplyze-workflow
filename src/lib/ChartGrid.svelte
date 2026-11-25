@@ -41,6 +41,7 @@
   let gridEl: HTMLDivElement | undefined = $state();
   let paneDockOffsets = $state<Record<number, number>>({});
   let paneLegendSlots = $state<Record<number, { top: number; left: number }>>({});
+  const readyPanes = new Set<number>();
 
   function postDockOffsetToPane(idx: number, offsetPx: number) {
     if (!gridEl) return;
@@ -58,44 +59,48 @@
   function handlePaneDockOffset(idx: number, offsetPx: number) {
     paneDockOffsets = { ...paneDockOffsets, [idx]: offsetPx };
     postDockOffsetToPane(idx, offsetPx);
-    setTimeout(() => postDockOffsetToPane(idx, paneDockOffsets[idx] ?? 0), 300);
-    setTimeout(() => postDockOffsetToPane(idx, paneDockOffsets[idx] ?? 0), 950);
+    if (!readyPanes.has(idx)) {
+      setTimeout(() => postDockOffsetToPane(idx, paneDockOffsets[idx] ?? 0), 500);
+    }
   }
 
   onMount(() => {
     const onMessage = (e: MessageEvent) => {
       const d = e.data;
-      if (!d || typeof d !== 'object' || d.type !== 'deplyze:legend-slot') return;
+      if (
+        !d ||
+        typeof d !== 'object' ||
+        (d.type !== 'deplyze:legend-slot' && d.type !== 'deplyze:tv-ready')
+      ) {
+        return;
+      }
       if (!gridEl) return;
       const top = typeof d.top === 'number' && Number.isFinite(d.top) ? d.top : null;
       const left = typeof d.left === 'number' && Number.isFinite(d.left) ? d.left : null;
-      if (top === null || left === null) return;
 
       const panesList = gridEl.querySelectorAll<HTMLElement>('[data-pane-index]');
       panesList.forEach((paneEl) => {
         const iframe = paneEl.querySelector<HTMLIFrameElement>('iframe');
         if (iframe && iframe.contentWindow === e.source) {
           const idx = Number(paneEl.dataset.paneIndex);
-          if (Number.isFinite(idx)) {
+          if (!Number.isFinite(idx)) return;
+          if (top !== null && left !== null) {
             const cur = paneLegendSlots[idx];
             if (!cur || cur.top !== top || cur.left !== left) {
               paneLegendSlots = { ...paneLegendSlots, [idx]: { top, left } };
             }
+          }
+          if (d.type === 'deplyze:tv-ready') {
+            readyPanes.add(idx);
+            postDockOffsetToPane(idx, paneDockOffsets[idx] ?? 0);
           }
         }
       });
     };
 
     window.addEventListener('message', onMessage);
-    const syncTimer = setInterval(() => {
-      for (const [k, val] of Object.entries(paneDockOffsets)) {
-        const idx = Number(k);
-        if (Number.isFinite(idx)) postDockOffsetToPane(idx, val);
-      }
-    }, 1800);
     return () => {
       window.removeEventListener('message', onMessage);
-      clearInterval(syncTimer);
     };
   });
 

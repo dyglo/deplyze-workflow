@@ -12,9 +12,9 @@ const MIN_WINDOW_WIDTH: f64 = 900.0;
 const MIN_WINDOW_HEIGHT: f64 = 600.0;
 const MAX_WORK_AREA_RATIO: f64 = 0.86;
 
-/// Injected into subframes so embedded TradingView chart widgets reserve exact vertical space
-/// beneath the main symbol title row for Paper Ledger's Buy/Sell pills and report the exact
-/// legend slot coordinates (top & left) back to the parent window.
+/// Injected into TradingView subframes using a static stylesheet + CSS custom property on
+/// `document.documentElement` (never mutating React-owned DOM nodes or running a subtree
+/// MutationObserver) so indicator legends stay 100% stable on every tick and crosshair move.
 const TV_LEGEND_OFFSET_SCRIPT: &str = r#"
 (function () {
   try {
@@ -22,67 +22,69 @@ const TV_LEGEND_OFFSET_SCRIPT: &str = r#"
     if (host.indexOf('tradingview.com') === -1 && host.indexOf('tradingview-widget.com') === -1) {
       return;
     }
-    var offsetPx = 0;
-    var rafId = 0;
+
+    var currentOffsetPx = 0;
     var lastTop = -1;
     var lastLeft = -1;
+    var observedSeries = null;
+    var seriesRo = null;
 
-    function syncLegend() {
-      rafId = 0;
+    function ensureStyleSheet() {
+      if (document.getElementById('deplyze-paper-gap-style')) return;
+      var style = document.createElement('style');
+      style.id = 'deplyze-paper-gap-style';
+      style.textContent =
+        '[data-qa-id="legend-sources-wrapper"] { margin-top: var(--deplyze-paper-gap, 0px) !important; }';
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    function setGapPx(px) {
+      var next = typeof px === 'number' && isFinite(px) ? Math.max(0, Math.round(px)) : 0;
+      if (next === currentOffsetPx) return;
+      currentOffsetPx = next;
+      ensureStyleSheet();
+      document.documentElement.style.setProperty('--deplyze-paper-gap', next + 'px');
+    }
+
+    function reportSeriesSlot(forceReady) {
+      if (!window.parent || window.parent === window) return;
       var seriesEl =
         document.querySelector('[data-qa-id="legend-series-item"]') ||
         document.querySelector('[data-name="legend-series-item"]');
-      var sourcesWrap = document.querySelector('[data-qa-id="legend-sources-wrapper"]');
-
-      var prev = document.querySelectorAll('[data-deplyze-paper-gap]');
-      var target = sourcesWrap || seriesEl;
-
-      for (var i = 0; i < prev.length; i++) {
-        if (prev[i] !== target) {
-          prev[i].style.marginTop = '';
-          prev[i].style.marginBottom = '';
-          prev[i].removeAttribute('data-deplyze-paper-gap');
+      if (!seriesEl) {
+        if (forceReady) {
+          window.parent.postMessage({ type: 'deplyze:tv-ready' }, '*');
         }
+        return;
       }
 
-      if (target) {
-        if (offsetPx > 0) {
-          var desired = offsetPx + 'px';
-          if (target === sourcesWrap) {
-            if (target.style.marginTop !== desired) target.style.marginTop = desired;
-            target.style.marginBottom = '';
-          } else {
-            if (target.style.marginBottom !== desired) target.style.marginBottom = desired;
-            target.style.marginTop = '';
-          }
-          target.setAttribute('data-deplyze-paper-gap', '1');
-        } else {
-          target.style.marginTop = '';
-          target.style.marginBottom = '';
-          target.removeAttribute('data-deplyze-paper-gap');
-        }
+      if (observedSeries !== seriesEl && typeof ResizeObserver !== 'undefined') {
+        if (seriesRo) seriesRo.disconnect();
+        observedSeries = seriesEl;
+        seriesRo = new ResizeObserver(function () {
+          reportSeriesSlot(false);
+        });
+        seriesRo.observe(seriesEl);
       }
 
-      if (seriesEl && window.parent && window.parent !== window) {
-        var r = seriesEl.getBoundingClientRect();
-        if (r.width > 20 && r.height > 10) {
-          var nextTop = Math.round(r.bottom + 3);
-          var nextLeft = Math.round(r.left);
-          if (nextTop !== lastTop || nextLeft !== lastLeft) {
-            lastTop = nextTop;
-            lastLeft = nextLeft;
-            window.parent.postMessage(
-              { type: 'deplyze:legend-slot', top: nextTop, left: nextLeft },
-              '*'
-            );
-          }
+      var r = seriesEl.getBoundingClientRect();
+      if (r.width > 20 && r.height > 10) {
+        var nextTop = Math.round(r.bottom + 3);
+        var nextLeft = Math.round(r.left);
+        if (forceReady || nextTop !== lastTop || nextLeft !== lastLeft) {
+          lastTop = nextTop;
+          lastLeft = nextLeft;
+          window.parent.postMessage(
+            {
+              type: forceReady ? 'deplyze:tv-ready' : 'deplyze:legend-slot',
+              top: nextTop,
+              left: nextLeft
+            },
+            '*'
+          );
         }
-      }
-    }
-
-    function scheduleSync() {
-      if (!rafId) {
-        rafId = window.requestAnimationFrame(syncLegend);
+      } else if (forceReady) {
+        window.parent.postMessage({ type: 'deplyze:tv-ready' }, '*');
       }
     }
 
@@ -96,36 +98,38 @@ const TV_LEGEND_OFFSET_SCRIPT: &str = r#"
         }
       }
       if (!d || d.type !== 'deplyze:paper-dock') return;
-      var next =
-        typeof d.offsetPx === 'number' && isFinite(d.offsetPx)
-          ? Math.max(0, Math.round(d.offsetPx))
-          : 0;
-      if (next !== offsetPx) {
-        offsetPx = next;
-      }
-      // Force re-report of slot coordinates whenever dock state syncs
-      lastTop = -1;
-      scheduleSync();
+      setGapPx(d.offsetPx);
     });
 
-    window.addEventListener('resize', scheduleSync);
+    window.addEventListener('resize', function () {
+      reportSeriesSlot(false);
+    });
 
-    function startObserver() {
-      if (!document.documentElement) return;
-      var mo = new MutationObserver(scheduleSync);
-      mo.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['class', 'style']
-      });
-      scheduleSync();
+    function init() {
+      ensureStyleSheet();
+      var attempts = 0;
+      function waitForLegend() {
+        var el =
+          document.querySelector('[data-qa-id="legend-series-item"]') ||
+          document.querySelector('[data-name="legend-series-item"]');
+        if (el) {
+          reportSeriesSlot(true);
+          return;
+        }
+        attempts += 1;
+        if (attempts < 24) {
+          window.setTimeout(waitForLegend, 250);
+        } else {
+          reportSeriesSlot(true);
+        }
+      }
+      waitForLegend();
     }
 
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+      document.addEventListener('DOMContentLoaded', init, { once: true });
     } else {
-      startObserver();
+      init();
     }
   } catch (_) {}
 })();
