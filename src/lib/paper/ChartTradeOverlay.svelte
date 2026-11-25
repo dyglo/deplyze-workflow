@@ -32,6 +32,8 @@
     shortName: string;
     interval?: string;
     leftToolbarCollapsed?: boolean;
+    legendSlot?: { top: number; left: number } | null;
+    onDockOffsetChange?: (offsetPx: number) => void;
     onRequestClosePosition: (position: PaperPosition) => void;
     onRequestModifyPosition: (position: PaperPosition, focusField?: 'tp' | 'sl' | null) => void;
   }
@@ -42,6 +44,8 @@
     shortName,
     interval = '1H',
     leftToolbarCollapsed = false,
+    legendSlot = null,
+    onDockOffsetChange,
     onRequestClosePosition,
     onRequestModifyPosition
   }: Props = $props();
@@ -109,6 +113,25 @@
 
   const bidParts = $derived(formatSplitPrice(liveQuote?.bid, symbol));
   const askParts = $derived(formatSplitPrice(liveQuote?.ask, symbol));
+
+  // Compute exact vertical space to reserve beneath TradingView's symbol title row so
+  // indicator rows (e.g. EMA 50) and the collapse chevron flow cleanly below Sell/Buy!
+  const dockReservePx = $derived.by(() => {
+    if (!visible || !liveQuote || pillsCollapsed) return 0;
+    const baseRow = 44;
+    const ordersExtra = paneOrders.length > 0 ? paneOrders.length * 27 + 4 : 0;
+    return baseRow + ordersExtra;
+  });
+
+  const dockTopPx = $derived(legendSlot ? legendSlot.top : 70);
+  const dockLeftPx = $derived(legendSlot ? legendSlot.left : leftToolbarCollapsed ? 14 : 61);
+
+  $effect(() => {
+    onDockOffsetChange?.(dockReservePx);
+    return () => {
+      onDockOffsetChange?.(0);
+    };
+  });
 
   // Clear staged edits if position changes or closes
   let lastTrackedPosId = '';
@@ -578,9 +601,14 @@
     class:compact-left={leftToolbarCollapsed}
   >
     <!-- Top-Left Buy/Sell Pills + Working Entry Orders -->
-    <div class="top-left-dock">
-      {#if !pillsCollapsed}
-        <div class="bs-row">
+    <div
+      class="top-left-dock"
+      class:collapsed={pillsCollapsed}
+      style:top="{dockTopPx}px"
+      style:left="{dockLeftPx}px"
+    >
+      <div class="bs-row">
+        {#if !pillsCollapsed}
           <button
             class="bs-pill sell"
             type="button"
@@ -610,64 +638,64 @@
             </span>
             <span class="bs-lbl">BUY</span>
           </button>
-        </div>
-
-        {#if paneOrders.length > 0}
-          <div class="working-orders-stack">
-            {#each paneOrders as ord (ord.id)}
-              <div class="ord-badge" class:buy={ord.side === 'buy'} class:sell={ord.side === 'sell'}>
-                <span class="seg side-pill">{ord.side === 'buy' ? 'Buy' : 'Sell'}</span>
-                <span class="seg ord-info">
-                  {formatQty(ord.quantity)} {ord.type === 'limit' ? 'Limit' : 'Stop'} @ {formatPaperPrice(ord.orderPrice, symbol)}
-                </span>
-                {#if ord.takeProfit !== null}
-                  <span class="seg mini-tag tp">TP</span>
-                {/if}
-                {#if ord.stopLoss !== null}
-                  <span class="seg mini-tag sl">SL</span>
-                {/if}
-                <button
-                  class="seg-btn close"
-                  type="button"
-                  title="Cancel working order"
-                  aria-label="Cancel order"
-                  onclick={() => cancelWorkingOrder(ord.id)}
-                >
-                  ×
-                </button>
-              </div>
-            {/each}
-          </div>
         {/if}
-      {/if}
 
-      <div class="dock-controls">
-        <button
-          class="mini-ctrl"
-          type="button"
-          title={pillsCollapsed ? 'Show Buy/Sell pills' : 'Hide Buy/Sell pills'}
-          aria-label={pillsCollapsed ? 'Show Buy/Sell pills' : 'Hide Buy/Sell pills'}
-          onclick={() => (pillsCollapsed = !pillsCollapsed)}
-        >
-          <svg class:flipped={pillsCollapsed} viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M3 4.5 6 7.5 9 4.5" />
-          </svg>
-        </button>
-
-        {#if panePosition}
+        <div class="dock-controls" class:always-visible={pillsCollapsed || !showVisualOverlay}>
           <button
-            class="mini-ctrl text-ctrl"
-            class:off={!showVisualOverlay}
+            class="mini-ctrl"
             type="button"
-            title={showVisualOverlay
-              ? 'Hide on-chart position & TP/SL overlay'
-              : 'Show on-chart position & TP/SL overlay'}
-            onclick={() => (showVisualOverlay = !showVisualOverlay)}
+            title={pillsCollapsed ? 'Show Buy/Sell buttons' : 'Hide Buy/Sell buttons'}
+            aria-label={pillsCollapsed ? 'Show Buy/Sell buttons' : 'Hide Buy/Sell buttons'}
+            onclick={() => (pillsCollapsed = !pillsCollapsed)}
           >
-            {showVisualOverlay ? 'Hide Overlay' : 'Show Position'}
+            <svg class:flipped={pillsCollapsed} viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3 7.5 6 4.5 9 7.5" />
+            </svg>
           </button>
-        {/if}
+
+          {#if panePosition}
+            <button
+              class="mini-ctrl text-ctrl"
+              class:off={!showVisualOverlay}
+              type="button"
+              title={showVisualOverlay
+                ? 'Hide on-chart position & TP/SL overlay'
+                : 'Show on-chart position & TP/SL overlay'}
+              onclick={() => (showVisualOverlay = !showVisualOverlay)}
+            >
+              {showVisualOverlay ? 'Hide Overlay' : 'Show Position'}
+            </button>
+          {/if}
+        </div>
       </div>
+
+      {#if !pillsCollapsed && paneOrders.length > 0}
+        <div class="working-orders-stack">
+          {#each paneOrders as ord (ord.id)}
+            <div class="ord-badge" class:buy={ord.side === 'buy'} class:sell={ord.side === 'sell'}>
+              <span class="seg side-pill">{ord.side === 'buy' ? 'Buy' : 'Sell'}</span>
+              <span class="seg ord-info">
+                {formatQty(ord.quantity)} {ord.type === 'limit' ? 'Limit' : 'Stop'} @ {formatPaperPrice(ord.orderPrice, symbol)}
+              </span>
+              {#if ord.takeProfit !== null}
+                <span class="seg mini-tag tp">TP</span>
+              {/if}
+              {#if ord.stopLoss !== null}
+                <span class="seg mini-tag sl">SL</span>
+              {/if}
+              <button
+                class="seg-btn close"
+                type="button"
+                title="Cancel working order"
+                aria-label="Cancel order"
+                onclick={() => cancelWorkingOrder(ord.id)}
+              >
+                ×
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <!-- Y-Axis Aligned TradingView Position + Staged Draggable TP/SL Overlay -->
@@ -946,18 +974,14 @@
   /* ── Top-Left Buy / Sell Pills ─────────────────────────────────────────── */
   .top-left-dock {
     position: absolute;
-    top: 72px;
-    left: 64px;
+    top: 70px;
+    left: 61px;
     z-index: 8;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 5px;
     pointer-events: none;
-  }
-
-  .pane-overlay-root.compact-left .top-left-dock {
-    left: 16px;
   }
 
   .bs-row,
@@ -969,13 +993,13 @@
   .bs-row {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
   }
 
   .bs-pill {
     min-width: 78px;
     height: 36px;
-    padding: 3px 9px;
+    padding: 3px 10px;
     border-radius: 6px;
     display: flex;
     flex-direction: column;
@@ -984,15 +1008,13 @@
     gap: 1px;
     font-family: inherit;
     cursor: pointer;
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+    transition: background-color 110ms ease, color 110ms ease, border-color 110ms ease;
   }
 
   .bs-pill.sell {
-    background: rgba(242, 54, 69, 0.14);
-    border: 1px solid rgba(242, 54, 69, 0.65);
-    color: #ff6b76;
+    background: #000000;
+    border: 1px solid #f23645;
+    color: #f23645;
   }
 
   .bs-pill.sell:hover {
@@ -1002,9 +1024,9 @@
   }
 
   .bs-pill.buy {
-    background: rgba(41, 98, 255, 0.15);
-    border: 1px solid rgba(41, 98, 255, 0.65);
-    color: #6b96ff;
+    background: #000000;
+    border: 1px solid #2962ff;
+    color: #2962ff;
   }
 
   .bs-pill.buy:hover {
@@ -1014,9 +1036,9 @@
   }
 
   .pane-overlay-root.light .bs-pill.sell {
-    background: rgba(255, 255, 255, 0.92);
-    border-color: rgba(242, 54, 69, 0.65);
-    color: #e02938;
+    background: #ffffff;
+    border-color: #f23645;
+    color: #f23645;
   }
 
   .pane-overlay-root.light .bs-pill.sell:hover {
@@ -1025,8 +1047,8 @@
   }
 
   .pane-overlay-root.light .bs-pill.buy {
-    background: rgba(255, 255, 255, 0.92);
-    border-color: rgba(41, 98, 255, 0.65);
+    background: #ffffff;
+    border-color: #2962ff;
     color: #2962ff;
   }
 
@@ -1036,7 +1058,7 @@
   }
 
   .bs-price {
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 700;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
@@ -1051,25 +1073,19 @@
   .bs-lbl {
     font-size: 9px;
     font-weight: 700;
-    letter-spacing: 0.06em;
-    opacity: 0.9;
+    letter-spacing: 0.05em;
   }
 
   .bs-spread {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 500;
     font-variant-numeric: tabular-nums;
-    padding: 2px 5px;
-    border-radius: 4px;
-    background: rgba(18, 18, 18, 0.8);
+    padding: 0 2px;
     color: var(--dark-text-soft);
-    border: 1px solid var(--dark-border-subtle);
   }
 
   .pane-overlay-root.light .bs-spread {
-    background: rgba(255, 255, 255, 0.92);
-    color: #4a5160;
-    border-color: #e0e3eb;
+    color: #131722;
   }
 
   .working-orders-stack {
@@ -1168,7 +1184,14 @@
   .dock-controls {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+
+  .bs-row:hover .dock-controls,
+  .dock-controls.always-visible {
+    opacity: 1;
   }
 
   .mini-ctrl {
@@ -1216,7 +1239,7 @@
   }
 
   .mini-ctrl svg.flipped {
-    transform: rotate(-90deg);
+    transform: rotate(180deg);
   }
 
   /* ── Y-Axis Aligned Position & TP/SL Canvas Layer ──────────────────────── */
