@@ -1211,6 +1211,8 @@
     gap: 6px;
     overflow-x: auto;
     scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-behavior: smooth;
     flex: 0 0 auto;
   }
 
@@ -1527,6 +1529,13 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-behavior: smooth;
+  }
+
+  .table-scroll::-webkit-scrollbar {
+    display: none;
   }
 
   .scr-status {
