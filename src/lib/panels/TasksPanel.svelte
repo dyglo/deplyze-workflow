@@ -23,6 +23,16 @@
     subscribePlaybook,
     type PlaybookState
   } from '../playbook/store';
+  import { getPaperInstrumentSpec } from '../paper/instruments';
+  import {
+    computeAccountMetrics,
+    getActivePaperAccount,
+    getPaperLiveQuote,
+    pushOrderDraft,
+    subscribePaper,
+    subscribePaperQuotes
+  } from '../paper/store';
+  import type { OrderSide, OrderType, PaperLedgerState, PaperLiveQuote } from '../paper/types';
   import {
     formatQuotePrice,
     loadWatchlistState,
@@ -61,6 +71,15 @@
   let tagSymbolOnTodo = $state(true);
   let showContractOverride = $state(false);
   let loggedFeedback = $state(false);
+  let paperSentFeedback = $state(false);
+  let paperState = $state<PaperLedgerState | null>(null);
+  let paperQuotes = $state<Record<string, PaperLiveQuote>>({});
+
+  const paperEquity = $derived.by(() => {
+    if (!paperState?.connected) return null;
+    const acc = getActivePaperAccount(paperState);
+    return computeAccountMetrics(acc, paperQuotes).equity;
+  });
 
   // Live Pre-Trade Guardrail inputs (Calendar + Macro Regime + Watchlist Bias + Playbook Edge)
   let playbookState = $state<PlaybookState>({ entries: [], customSetupTypes: [] });
@@ -167,9 +186,18 @@
         calendarLoaded = true;
       });
 
+    const unsubPaper = subscribePaper((s) => {
+      paperState = s;
+    });
+    const unsubPaperQuotes = subscribePaperQuotes((q) => {
+      paperQuotes = q;
+    });
+
     return () => {
       unsubTasks();
       unsubPlaybook();
+      unsubPaper();
+      unsubPaperQuotes();
     };
   });
 
@@ -220,6 +248,50 @@
     if (typeof activePrice !== 'number' || !Number.isFinite(activePrice)) return;
     const raw = formatQuotePrice(activePrice, activeSymbol).replace(/,/g, '');
     updateRisk('entry', raw);
+  }
+
+  function fillPaperEquity() {
+    if (paperEquity === null || !Number.isFinite(paperEquity)) return;
+    updateRisk('accountBalance', Number(paperEquity.toFixed(2)));
+  }
+
+  function handleSendToPaperTicket() {
+    if (!calc.valid || !calc.direction) return;
+    const sym = activeFullSymbol || activeSymbol || 'OANDA:XAUUSD';
+    const short = activeSymbol || 'XAUUSD';
+    const spec = getPaperInstrumentSpec(sym);
+    const side: OrderSide = calc.direction === 'LONG' ? 'buy' : 'sell';
+    const entry = Number(tasksState.risk.entry);
+    const sl = Number(tasksState.risk.stopLoss);
+    const tp = Number(tasksState.risk.takeProfit);
+    const units = Number((calc.lotSize * spec.lotUnits).toFixed(4));
+    const liveQ = getPaperLiveQuote(sym);
+
+    let type: OrderType = 'limit';
+    if (liveQ && Number.isFinite(entry) && Math.abs(entry - liveQ.last) <= spec.pipSize * 5) {
+      type = 'market';
+    } else if (liveQ && Number.isFinite(entry)) {
+      const isStop =
+        (side === 'buy' && entry > liveQ.ask) || (side === 'sell' && entry < liveQ.bid);
+      type = isStop ? 'stop' : 'limit';
+    }
+
+    pushOrderDraft({
+      symbol: sym,
+      shortName: short,
+      side,
+      type,
+      price: type === 'market' ? null : entry,
+      quantity: units >= 10 ? Math.round(units) : units,
+      stopLoss: Number.isFinite(sl) && sl > 0 ? sl : null,
+      takeProfit: Number.isFinite(tp) && tp > 0 ? tp : null,
+      source: 'sizer'
+    });
+
+    paperSentFeedback = true;
+    setTimeout(() => {
+      paperSentFeedback = false;
+    }, 2000);
   }
 
   async function handleLogToNotes() {
@@ -483,7 +555,12 @@
 
           <div class="calc-grid">
             <div class="field">
-              <label for="tk-bal">Account ($)</label>
+              <div class="label-row">
+                <label for="tk-bal">Account ($)</label>
+                {#if paperEquity !== null}
+                  <button class="live-fill" type="button" onclick={fillPaperEquity}>Paper</button>
+                {/if}
+              </div>
               <input
                 id="tk-bal"
                 type="number"
@@ -592,9 +669,19 @@
             </div>
           </div>
 
-          <button class="log-btn" type="button" onclick={() => void handleLogToNotes()}>
-            {loggedFeedback ? 'Saved Trade Plan to Notes' : 'Log Trade Plan to Notes'}
-          </button>
+          <div class="plan-actions">
+            <button
+              class="log-btn primary-paper"
+              type="button"
+              disabled={!calc.valid || !calc.direction}
+              onclick={handleSendToPaperTicket}
+            >
+              {paperSentFeedback ? 'Sent to Ticket' : 'Send to Paper Ticket'}
+            </button>
+            <button class="log-btn" type="button" onclick={() => void handleLogToNotes()}>
+              {loggedFeedback ? 'Saved to Notes' : 'Log to Notes'}
+            </button>
+          </div>
         </div>
       {:else}
         <!-- Trading To-Do tab -->
@@ -1131,6 +1218,12 @@
     color: #f23645;
   }
 
+  .plan-actions {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    gap: 6px;
+  }
+
   .log-btn {
     height: 32px;
     border: 1px solid var(--tk-border);
@@ -1138,14 +1231,30 @@
     background: transparent;
     color: var(--tk-text);
     font: inherit;
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
     cursor: pointer;
-    transition: background-color 130ms ease;
+    transition: background-color 130ms ease, opacity 130ms ease;
   }
 
-  .log-btn:hover {
+  .log-btn.primary-paper {
+    background: var(--tk-btn-bg);
+    color: var(--tk-btn-fg);
+    border-color: transparent;
+  }
+
+  .log-btn:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+  }
+
+  .log-btn:hover:not(:disabled) {
     background: var(--tk-hover);
+  }
+
+  .log-btn.primary-paper:hover:not(:disabled) {
+    background: var(--tk-btn-bg);
+    opacity: 0.9;
   }
 
   /* To-Do */

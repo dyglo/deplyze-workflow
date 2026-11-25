@@ -11,7 +11,12 @@ import {
   type AiChatRequest
 } from './routes/ai.js';
 import { getCalendarEventsPayload, getCalendarWeekPayload } from './routes/calendar.js';
-import { dispatchAlertWebhook, getQuotesPayload, getSparklinePayload } from './quotes/service.js';
+import {
+  dispatchAlertWebhook,
+  getHistoricalBarsPayload,
+  getQuotesPayload,
+  getSparklinePayload
+} from './quotes/service.js';
 import {
   getNewsArticlePayload,
   getNewsFlowPayload,
@@ -136,7 +141,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.14',
+        version: '0.1.15',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -150,13 +155,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.14',
+      version: '0.1.15',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
         'GET /api/calendar/events?date=YYYY-MM-DD&category=economic&tz=Africa/Nairobi',
         'GET /api/quotes?symbols=OANDA:XAUUSD,TVC:DXY',
         'GET /api/quotes/sparkline?symbol=OANDA:XAUUSD',
+        'GET /api/quotes/bars?symbol=OANDA:XAUUSD&from=1730000000',
         'GET /api/news?mode=symbol&symbol=OANDA:XAUUSD',
         'GET /api/news/article?url=...',
         'GET /api/news/providers',
@@ -182,6 +188,24 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
     const payload = await getSparklinePayload(rawSym);
     sendJson(res, 200, payload, 'public, max-age=60');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/quotes/bars') {
+    const rawSym = (url.searchParams.get('symbol') ?? '').trim();
+    if (!rawSym) {
+      sendJson(res, 400, { error: 'Missing symbol query parameter' }, 'no-store');
+      return;
+    }
+    const rawFrom = url.searchParams.get('from');
+    const parsedFrom = rawFrom ? Number(rawFrom) : null;
+    const chartInterval = url.searchParams.get('interval');
+    const payload = await getHistoricalBarsPayload(
+      rawSym,
+      parsedFrom != null && Number.isFinite(parsedFrom) ? parsedFrom : null,
+      chartInterval
+    );
+    sendJson(res, 200, payload, 'public, max-age=30');
     return;
   }
 

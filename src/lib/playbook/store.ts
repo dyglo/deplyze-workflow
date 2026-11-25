@@ -26,7 +26,9 @@ export interface PlaybookEntry {
   notes: string;
   attachments: NoteAttachment[];
   sourceNoteId?: string;
-  sourceKind?: 'manual' | 'note' | 'ai';
+  sourcePaperTradeId?: string;
+  sourceKind?: 'manual' | 'note' | 'ai' | 'paper';
+  simulated?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -83,10 +85,16 @@ function normalizeEntry(raw: Partial<PlaybookEntry>): PlaybookEntry {
     notes: typeof raw.notes === 'string' ? raw.notes : '',
     attachments: Array.isArray(raw.attachments) ? raw.attachments : [],
     sourceNoteId: typeof raw.sourceNoteId === 'string' ? raw.sourceNoteId : undefined,
+    sourcePaperTradeId:
+      typeof raw.sourcePaperTradeId === 'string' ? raw.sourcePaperTradeId : undefined,
     sourceKind:
-      raw.sourceKind === 'note' || raw.sourceKind === 'ai' || raw.sourceKind === 'manual'
+      raw.sourceKind === 'note' ||
+      raw.sourceKind === 'ai' ||
+      raw.sourceKind === 'manual' ||
+      raw.sourceKind === 'paper'
         ? raw.sourceKind
         : 'manual',
+    simulated: raw.simulated === true || raw.sourceKind === 'paper',
     createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : nowIso,
     updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : nowIso
   };
@@ -317,7 +325,69 @@ export async function saveAiAnalysisToPlaybook(params: {
   return entry;
 }
 
-export function computePlaybookEdge(entries: PlaybookEntry[]): PlaybookEdgeSummary {
+export async function savePaperTradeToPlaybook(params: {
+  tradeId: string;
+  symbol: string;
+  fullSymbol: string;
+  side: 'long' | 'short';
+  quantity: number;
+  entryPrice: number;
+  exitPrice: number;
+  realizedPnl: number;
+  realizedR: number | null;
+  closeReason: string;
+  closedAt: string;
+  setupType?: string;
+  grade?: PlaybookGrade;
+  notes?: string;
+}): Promise<PlaybookEntry> {
+  await initPlaybookStore();
+  const existing = storeState.entries.find((e) => e.sourcePaperTradeId === params.tradeId);
+  if (existing) return existing;
+
+  const nowIso = new Date().toISOString();
+  const outcome: PlaybookOutcome =
+    params.realizedPnl > 0.005 ? 'Win' : params.realizedPnl < -0.005 ? 'Loss' : 'BE';
+  const grade: PlaybookGrade = params.grade ?? (outcome === 'Win' ? 'A+' : outcome === 'Loss' ? 'B' : 'B');
+  const dirLabel = params.side === 'long' ? 'Long' : 'Short';
+  const pnlSign = params.realizedPnl >= 0 ? '+' : '';
+  const summaryLines = [
+    `[SIMULATED — Paper Ledger]`,
+    `${dirLabel} ${params.quantity} ${params.symbol} | Entry ${params.entryPrice} -> Exit ${params.exitPrice}`,
+    `Realized PnL: ${pnlSign}${params.realizedPnl.toFixed(2)} USD${params.realizedR !== null ? ` (${formatRMultiple(params.realizedR)})` : ''}`,
+    `Exit reason: ${params.closeReason}`
+  ];
+  if (params.notes?.trim()) {
+    summaryLines.push('', params.notes.trim());
+  }
+
+  const entry: PlaybookEntry = {
+    id: makeWorkspaceId('pb'),
+    title: `${params.symbol} ${dirLabel} (Paper)`,
+    symbol: params.symbol,
+    fullSymbol: params.fullSymbol || params.symbol,
+    date: params.closedAt.slice(0, 10) || todayNairobiIso(),
+    setupType: params.setupType?.trim() || DEFAULT_SETUP_TYPES[0],
+    grade,
+    outcome,
+    rMultiple: params.realizedR,
+    notes: summaryLines.join('\n'),
+    attachments: [],
+    sourcePaperTradeId: params.tradeId,
+    sourceKind: 'paper',
+    simulated: true,
+    createdAt: nowIso,
+    updatedAt: nowIso
+  };
+  upsertPlaybookEntry(entry);
+  return entry;
+}
+
+export function computePlaybookEdge(
+  entries: PlaybookEntry[],
+  opts?: { includeSimulated?: boolean }
+): PlaybookEdgeSummary {
+  const filtered = opts?.includeSimulated ? entries : entries.filter((e) => !e.simulated);
   let wins = 0;
   let losses = 0;
   let resolvedCount = 0;
@@ -326,7 +396,7 @@ export function computePlaybookEdge(entries: PlaybookEntry[]): PlaybookEdgeSumma
 
   const setupStats = new Map<string, { totalR: number; wins: number; count: number }>();
 
-  for (const e of entries) {
+  for (const e of filtered) {
     if (e.outcome === 'Win') {
       wins += 1;
       resolvedCount += 1;
@@ -370,12 +440,12 @@ export function computePlaybookEdge(entries: PlaybookEntry[]): PlaybookEdgeSumma
   }
 
   return {
-    totalLogged: entries.length,
+    totalLogged: filtered.length,
     resolvedCount,
     winRatePct,
     totalR: rCount > 0 ? Number(totalR.toFixed(1)) : null,
     rCount,
-    bestSetup: entries.length > 0 ? bestSetup : null
+    bestSetup: filtered.length > 0 ? bestSetup : null
   };
 }
 

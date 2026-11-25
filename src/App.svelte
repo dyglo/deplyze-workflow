@@ -5,6 +5,18 @@
   import ChartGrid from './lib/ChartGrid.svelte';
   import SymbolInsightsPage from './lib/insights/SymbolInsightsPage.svelte';
   import type { InsightsViewId } from './lib/insights/symbolInsightsApi';
+  import ClosePositionModal from './lib/paper/ClosePositionModal.svelte';
+  import ModifyPositionModal from './lib/paper/ModifyPositionModal.svelte';
+  import OrderTicketPanel from './lib/paper/OrderTicketPanel.svelte';
+  import PaperBottomPanel from './lib/paper/PaperBottomPanel.svelte';
+  import PaperToastStack from './lib/paper/PaperToastStack.svelte';
+  import TradeConnectModal from './lib/paper/TradeConnectModal.svelte';
+  import {
+    feedPaperQuote,
+    startPaperMonitor,
+    subscribePaper
+  } from './lib/paper/store';
+  import type { PaperLedgerState, PaperPosition } from './lib/paper/types';
   import Rail from './lib/Rail.svelte';
   import TitleBar from './lib/TitleBar.svelte';
   import {
@@ -63,6 +75,10 @@
   let settingsOpen = false;
   let closedTabs: WorkspaceTab[] = [];
   let alertToasts: InAppAlertToast[] = [];
+  let paperState: PaperLedgerState | null = null;
+  let paperModalMode: 'connect' | 'settings' | null = null;
+  let closingPosition: PaperPosition | null = null;
+  let modifyingPosition: { position: PaperPosition; focusField: 'tp' | 'sl' | null } | null = null;
   let symbolInsights: {
     symbol: string;
     shortName: string;
@@ -80,7 +96,16 @@
 
   onMount(() => {
     const stopAlerts = startAlertMonitor();
+    const stopPaper = startPaperMonitor();
     const stopCloudSync = startCloudAutoSync();
+
+    const unsubPaper = subscribePaper((s) => {
+      paperState = s;
+      if (!s.connected) {
+        closingPosition = null;
+        modifyingPosition = null;
+      }
+    });
 
     void hydrateTabsStateFromWorkspace(tabsState).then((restored) => {
       if (restored) {
@@ -148,7 +173,9 @@
 
     return () => {
       stopAlerts();
+      stopPaper();
       stopCloudSync();
+      unsubPaper();
       unsubToasts();
       window.clearInterval(notePurgeTimer);
       window.removeEventListener('keydown', handleGlobalUndoKey);
@@ -460,6 +487,7 @@
   function handlePaneQuote(tabId: string, paneIdx: number, quote: ChartQuote) {
     if (Number.isFinite(quote.price)) {
       evaluateAlertsWithPrice(quote.symbol, quote.shortName, quote.price, 'live');
+      feedPaperQuote(quote.symbol, quote.shortName, quote.price, 'live');
     }
 
     if (!paneQuotesByTab[tabId]) paneQuotesByTab[tabId] = {};
@@ -546,6 +574,7 @@
     canReopenTab={closedTabs.length > 0}
     onSelectThemeMode={selectThemeMode}
     onOpenSettings={() => (settingsOpen = true)}
+    onOpenPaperModal={(mode) => (paperModalMode = mode)}
     groups={tabsState.groups}
     {activeGroup}
     onSelectGroup={selectGroup}
@@ -560,47 +589,79 @@
 
   <div class="workspace">
     <div class="chart-slot">
-      {#each activeGroup.tabs as tab (tab.id)}
-        <div
-          class="tab-viewport"
-          class:active={tab.id === activeTab.id}
-          aria-hidden={tab.id !== activeTab.id}
-        >
-          <ChartGrid
-            {theme}
-            settings={chartSettings}
-            layoutId={tab.layoutId}
-            tabId={tab.id}
-            symbol={tab.symbol}
-            panes={tab.panes}
-            activePane={tab.activePane ?? 0}
-            onActivePaneChange={(idx) => handleActivePaneChange(tab.id, idx)}
-            onPaneQuote={(idx, q) => handlePaneQuote(tab.id, idx, q)}
-            onPaneInterval={(idx, ivl) => handlePaneInterval(tab.id, idx, ivl)}
-          />
-        </div>
-      {/each}
+      <div class="chart-stage">
+        {#each activeGroup.tabs as tab (tab.id)}
+          <div
+            class="tab-viewport"
+            class:active={tab.id === activeTab.id}
+            aria-hidden={tab.id !== activeTab.id}
+          >
+            <ChartGrid
+              {theme}
+              settings={chartSettings}
+              layoutId={tab.layoutId}
+              tabId={tab.id}
+              symbol={tab.symbol}
+              panes={tab.panes}
+              activePane={tab.activePane ?? 0}
+              onActivePaneChange={(idx) => handleActivePaneChange(tab.id, idx)}
+              onPaneQuote={(idx, q) => handlePaneQuote(tab.id, idx, q)}
+              onPaneInterval={(idx, ivl) => handlePaneInterval(tab.id, idx, ivl)}
+              onRequestClosePosition={(pos) => {
+                if (paperState?.connected) closingPosition = pos;
+              }}
+              onRequestModifyPosition={(pos, focusField = null) => {
+                if (paperState?.connected) modifyingPosition = { position: pos, focusField };
+              }}
+            />
+          </div>
+        {/each}
 
-      {#if symbolInsights}
-        <SymbolInsightsPage
+        {#if symbolInsights}
+          <SymbolInsightsPage
+            {theme}
+            symbol={symbolInsights.symbol}
+            shortName={symbolInsights.shortName}
+            description={symbolInsights.description}
+            view={symbolInsights.view}
+            livePrice={symbolInsights.shortName.toUpperCase() === activeTab.title.toUpperCase()
+              ? activeTab.quote?.price
+              : undefined}
+            liveChangePercent={symbolInsights.shortName.toUpperCase() === activeTab.title.toUpperCase()
+              ? activeTab.quote?.changePercent
+              : undefined}
+            onChangeView={(nextView) => {
+              if (symbolInsights) symbolInsights = { ...symbolInsights, view: nextView };
+            }}
+            onClose={closeSymbolInsights}
+          />
+        {/if}
+      </div>
+
+      {#if paperState?.connected}
+        <PaperBottomPanel
           {theme}
-          symbol={symbolInsights.symbol}
-          shortName={symbolInsights.shortName}
-          description={symbolInsights.description}
-          view={symbolInsights.view}
-          livePrice={symbolInsights.shortName.toUpperCase() === activeTab.title.toUpperCase()
-            ? activeTab.quote?.price
-            : undefined}
-          liveChangePercent={symbolInsights.shortName.toUpperCase() === activeTab.title.toUpperCase()
-            ? activeTab.quote?.changePercent
-            : undefined}
-          onChangeView={(nextView) => {
-            if (symbolInsights) symbolInsights = { ...symbolInsights, view: nextView };
+          activeSymbol={activeTab.title}
+          onSelectSymbol={loadSymbolInActiveTab}
+          onOpenSettings={() => (paperModalMode = 'settings')}
+          onRequestClosePosition={(pos) => {
+            if (paperState?.connected) closingPosition = pos;
           }}
-          onClose={closeSymbolInsights}
+          onRequestModifyPosition={(pos, focusField = null) => {
+            if (paperState?.connected) modifyingPosition = { position: pos, focusField };
+          }}
         />
       {/if}
     </div>
+
+    {#if paperState?.connected && paperState.ticketOpen}
+      <OrderTicketPanel
+        {theme}
+        activeSymbol={activeTab.title}
+        activeFullSymbol={activeTab.symbol}
+        onOpenSettings={() => (paperModalMode = 'settings')}
+      />
+    {/if}
 
     <Rail
       {theme}
@@ -623,6 +684,40 @@
       onSelectInsightsSymbol={syncInsightsSymbol}
     />
   </div>
+
+  {#if paperModalMode}
+    <TradeConnectModal
+      {theme}
+      mode={paperModalMode}
+      onClose={() => (paperModalMode = null)}
+    />
+  {/if}
+
+  {#if paperState?.connected && closingPosition}
+    <ClosePositionModal
+      {theme}
+      position={closingPosition}
+      onClose={() => (closingPosition = null)}
+    />
+  {/if}
+
+  {#if paperState?.connected && modifyingPosition}
+    <ModifyPositionModal
+      {theme}
+      position={modifyingPosition.position}
+      focusField={modifyingPosition.focusField}
+      onClose={() => (modifyingPosition = null)}
+    />
+  {/if}
+
+  <PaperToastStack
+    {theme}
+    bottomOffsetPx={paperState?.connected
+      ? paperState.bottomMode === 'expanded'
+        ? paperState.bottomHeight + 12
+        : 48
+      : 16}
+  />
 
   {#if alertToasts.length > 0}
     <div class="alert-toast-stack" aria-live="polite">
@@ -682,8 +777,18 @@
     min-width: 480px;
     height: 100%;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
     background: var(--dark-bg-base);
     transition: background-color 150ms ease;
+  }
+
+  .chart-stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
   }
 
   main.light .chart-slot {

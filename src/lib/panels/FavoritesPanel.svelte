@@ -43,6 +43,7 @@
   let { theme, activeSymbol, activeFullSymbol, onSelectSymbol, onClose }: Props = $props();
 
   type FilterTab = 'all' | 'aplus' | 'mistakes' | 'symbol';
+  type SourceScope = 'live' | 'paper' | 'all';
 
   const GRADES: PlaybookGrade[] = ['A+', 'B', 'Mistake'];
   const OUTCOMES: PlaybookOutcome[] = ['Win', 'Loss', 'BE', 'Missed'];
@@ -50,6 +51,7 @@
   let playbookState = $state<PlaybookState>({ entries: [], customSetupTypes: [] });
   let imagesDir = $state('');
   let activeFilter = $state<FilterTab>('all');
+  let sourceScope = $state<SourceScope>('live');
   let setupFilter = $state<string>('all');
   let setupMenuOpen = $state(false);
   let activeEntryId = $state<string | null>(null);
@@ -76,20 +78,28 @@
   let dragDepth = 0;
 
   const allSetupTypes = $derived(getAllSetupTypes(playbookState));
-  const edge = $derived(computePlaybookEdge(playbookState.entries));
+  const liveEntries = $derived(playbookState.entries.filter((e) => !e.simulated));
+  const simulatedCount = $derived(playbookState.entries.filter((e) => e.simulated).length);
+  const edge = $derived(computePlaybookEdge(liveEntries));
 
   const activeEntry = $derived(
     activeEntryId ? (playbookState.entries.find((e) => e.id === activeEntryId) ?? null) : null
   );
 
+  const scopedEntries = $derived.by(() => {
+    if (sourceScope === 'live') return playbookState.entries.filter((e) => !e.simulated);
+    if (sourceScope === 'paper') return playbookState.entries.filter((e) => Boolean(e.simulated));
+    return playbookState.entries;
+  });
+
   const symbolMatchCount = $derived(
-    playbookState.entries.filter(
+    scopedEntries.filter(
       (e) => e.symbol.toUpperCase() === (activeSymbol || '').toUpperCase()
     ).length
   );
 
   const filteredEntries = $derived.by(() => {
-    return playbookState.entries
+    return scopedEntries
       .filter((e) => {
         if (activeFilter === 'aplus' && e.grade !== 'A+') return false;
         if (activeFilter === 'mistakes' && e.grade !== 'Mistake') return false;
@@ -363,13 +373,13 @@
   }
 
   async function runEdgeAudit() {
-    if (auditLoading || playbookState.entries.length === 0) return;
+    if (auditLoading || liveEntries.length === 0) return;
     auditOpen = true;
     auditLoading = true;
     auditError = null;
     ruleAddedState = 'idle';
     try {
-      const result = await fetchEdgeAudit(playbookState.entries);
+      const result = await fetchEdgeAudit(liveEntries);
       edgeAudit = result;
     } catch (err) {
       auditError = err instanceof Error ? err.message : 'Unable to audit playbook right now';
@@ -872,6 +882,35 @@
             Clear
           </button>
         {/if}
+
+        {#if simulatedCount > 0}
+          <div class="scope-switch" role="tablist" aria-label="Playbook trade source">
+            <button
+              class="sc-btn"
+              class:active={sourceScope === 'live'}
+              type="button"
+              onclick={() => (sourceScope = 'live')}
+            >
+              Live
+            </button>
+            <button
+              class="sc-btn"
+              class:active={sourceScope === 'paper'}
+              type="button"
+              onclick={() => (sourceScope = 'paper')}
+            >
+              Paper ({simulatedCount})
+            </button>
+            <button
+              class="sc-btn"
+              class:active={sourceScope === 'all'}
+              type="button"
+              onclick={() => (sourceScope = 'all')}
+            >
+              All
+            </button>
+          </div>
+        {/if}
       </div>
 
       <!-- Cards List -->
@@ -949,6 +988,11 @@
                       >
                         {entry.grade}
                       </span>
+                      {#if entry.simulated}
+                        <span class="sim-pill" title="Simulated trade from Paper Ledger — excluded from live Edge stats">
+                          SIM
+                        </span>
+                      {/if}
                     </div>
 
                     <div class="card-right">
@@ -2186,5 +2230,46 @@
     border-color: rgba(8, 153, 129, 0.45);
     background: rgba(8, 153, 129, 0.14);
     color: #089981;
+  }
+
+  .sim-pill {
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--pb-secondary);
+    background: var(--pb-surface-alt);
+    border: 1px solid var(--pb-border);
+  }
+
+  .scope-switch {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    border-radius: 7px;
+    background: var(--pb-surface);
+    border: 1px solid var(--pb-border-soft);
+    gap: 2px;
+  }
+
+  .sc-btn {
+    height: 20px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--pb-secondary);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .sc-btn.active {
+    background: var(--pb-surface-alt);
+    color: var(--pb-text);
+    font-weight: 600;
   }
 </style>

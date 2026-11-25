@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import AppMenu, { type ThemeMode } from './AppMenu.svelte';
+  import TradePill from './paper/TradePill.svelte';
   import TabBar from './tabs/TabBar.svelte';
   import type { TabGroup } from './tabs/tabs';
 
@@ -9,6 +10,7 @@
   export let canReopenTab: boolean;
   export let onSelectThemeMode: (mode: ThemeMode) => void;
   export let onOpenSettings: () => void;
+  export let onOpenPaperModal: (mode: 'connect' | 'settings') => void;
   export let groups: TabGroup[];
   export let activeGroup: TabGroup;
   export let onSelectGroup: (groupId: string) => void;
@@ -59,6 +61,8 @@
   ></div>
 
   <div class="window-controls">
+    <TradePill {theme} onOpenConnectModal={onOpenPaperModal} />
+
     <AppMenu
       {theme}
       {themeMode}

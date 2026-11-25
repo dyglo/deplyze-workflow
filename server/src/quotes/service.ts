@@ -539,6 +539,185 @@ export async function getSparklinePayload(rawSymbol: string): Promise<SymbolSpar
   return data;
 }
 
+export interface HistoricalBar {
+  ts: number; // Unix seconds UTC
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface HistoricalBarsPayload {
+  symbol: string;
+  shortName: string;
+  interval: string;
+  bars: HistoricalBar[];
+  source: 'yahoo';
+  updatedAt: string;
+}
+
+const BARS_TTL_MS = 60_000;
+const barsCache = new Map<string, { data: HistoricalBarsPayload; fetchedAt: number }>();
+
+export async function getHistoricalBarsPayload(
+  rawSymbol: string,
+  fromSecRaw?: number | null,
+  chartIntervalRaw?: string | null
+): Promise<HistoricalBarsPayload> {
+  const requested = rawSymbol.trim() || 'OANDA:XAUUSD';
+  const short = shortTicker(requested);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const maxLookbackSec = 30 * 86_400;
+
+  // When chartIntervalRaw is provided (for chart Y-axis visible range alignment),
+  // map the active TradingView timeframe to the matching Yahoo interval & window.
+  let plan: { range: string; interval: string; padSec: number; maxBars?: number };
+  let fromSec: number;
+
+  if (chartIntervalRaw && chartIntervalRaw.trim()) {
+    const iv = chartIntervalRaw.trim().toUpperCase();
+    if (iv === '1' || iv === '1M') {
+      plan = { range: '1d', interval: '1m', padSec: 60, maxBars: 115 };
+    } else if (iv === '3' || iv === '3M' || iv === '5' || iv === '5M') {
+      plan = { range: '5d', interval: '5m', padSec: 300, maxBars: 115 };
+    } else if (iv === '15' || iv === '15M') {
+      plan = { range: '5d', interval: '15m', padSec: 900, maxBars: 115 };
+    } else if (iv === '30' || iv === '30M') {
+      plan = { range: '5d', interval: '30m', padSec: 1800, maxBars: 115 };
+    } else if (iv === '60' || iv === '1H' || iv === '120' || iv === '2H') {
+      plan = { range: '1mo', interval: '1h', padSec: 3600, maxBars: 115 };
+    } else if (iv === '240' || iv === '4H') {
+      plan = { range: '3mo', interval: '1h', padSec: 3600, maxBars: 440 };
+    } else if (iv === 'W' || iv === '1W' || iv === 'M') {
+      plan = { range: '2y', interval: '1wk', padSec: 86_400 * 7, maxBars: 115 };
+    } else {
+      plan = { range: '6mo', interval: '1d', padSec: 86_400, maxBars: 115 };
+    }
+    fromSec = 0;
+  } else {
+    fromSec =
+      typeof fromSecRaw === 'number' && Number.isFinite(fromSecRaw) && fromSecRaw > 0
+        ? Math.max(nowSec - maxLookbackSec, Math.min(nowSec, Math.floor(fromSecRaw)))
+        : nowSec - 86_400;
+
+    const spanSec = Math.max(60, nowSec - fromSec);
+    plan =
+      spanSec <= 20 * 3600
+        ? { range: '1d', interval: '5m', padSec: 300 }
+        : spanSec <= 5 * 86_400
+          ? { range: '5d', interval: '15m', padSec: 900 }
+          : { range: '1mo', interval: '1h', padSec: 3600 };
+  }
+
+  const cacheKey = `${short}:${plan.range}:${plan.interval}:${plan.maxBars ?? Math.floor(fromSec / 300)}`;
+  const cached = barsCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < BARS_TTL_MS) {
+    return { ...cached.data, symbol: requested };
+  }
+
+  const mapped = YAHOO_SYMBOL_MAP[short];
+  const yahooSym = mapped?.yahoo ?? short;
+
+  const fetchBars = async (range: string, interval: string): Promise<HistoricalBar[]> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?range=${range}&interval=${interval}&includePrePost=true`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 DeplyzeWorkflow/0.1.14' },
+        signal: controller.signal
+      });
+      if (!res.ok) return [];
+      const json = (await res.json()) as {
+        chart?: {
+          result?: {
+            timestamp?: number[];
+            indicators?: {
+              quote?: {
+                open?: (number | null)[];
+                high?: (number | null)[];
+                low?: (number | null)[];
+                close?: (number | null)[];
+              }[];
+            };
+          }[];
+        };
+      };
+      const r = json.chart?.result?.[0];
+      const tsArr = r?.timestamp ?? [];
+      const q = r?.indicators?.quote?.[0];
+      const opens = q?.open ?? [];
+      const highs = q?.high ?? [];
+      const lows = q?.low ?? [];
+      const closes = q?.close ?? [];
+
+      const out: HistoricalBar[] = [];
+      for (let i = 0; i < tsArr.length; i++) {
+        const ts = tsArr[i];
+        const o = opens[i];
+        const h = highs[i];
+        const l = lows[i];
+        const c = closes[i];
+        if (
+          typeof ts !== 'number' ||
+          typeof o !== 'number' ||
+          typeof h !== 'number' ||
+          typeof l !== 'number' ||
+          typeof c !== 'number' ||
+          !Number.isFinite(o) ||
+          !Number.isFinite(h) ||
+          !Number.isFinite(l) ||
+          !Number.isFinite(c)
+        ) {
+          continue;
+        }
+        if (ts >= fromSec - plan.padSec) {
+          out.push({
+            ts,
+            open: o,
+            high: Math.max(h, o, c),
+            low: Math.min(l, o, c),
+            close: c
+          });
+        }
+      }
+      out.sort((a, b) => a.ts - b.ts);
+      if (plan.maxBars && out.length > plan.maxBars) {
+        return out.slice(out.length - plan.maxBars);
+      }
+      return out;
+    } catch (err) {
+      console.warn(`[quotes:bars] ${yahooSym} failed:`, (err as Error).message);
+      return [];
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let bars = await fetchBars(plan.range, plan.interval);
+  let usedInterval = plan.interval;
+  if (bars.length === 0 && plan.range === '1d') {
+    bars = await fetchBars('5d', '15m');
+    usedInterval = '15m';
+  }
+
+  const data: HistoricalBarsPayload = {
+    symbol: requested,
+    shortName: short,
+    interval: usedInterval,
+    bars,
+    source: 'yahoo',
+    updatedAt: new Date().toISOString()
+  };
+
+  barsCache.set(cacheKey, { data, fetchedAt: Date.now() });
+  if (barsCache.size > 60) {
+    const oldest = barsCache.keys().next().value;
+    if (oldest) barsCache.delete(oldest);
+  }
+  return data;
+}
+
 export async function dispatchAlertWebhook(
   urlStr: string,
   payload: Record<string, unknown>

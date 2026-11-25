@@ -1,8 +1,10 @@
 <script lang="ts">
   import Chart, { type ChartQuote } from './Chart.svelte';
   import { getLayoutById, type LayoutId } from './chart/layouts';
+  import ChartTradeOverlay from './paper/ChartTradeOverlay.svelte';
+  import type { PaperPosition } from './paper/types';
   import type { ChartSettings } from './settings/chartSettings';
-  import type { ChartPaneState } from './tabs/tabs';
+  import { extractShortSymbol, type ChartPaneState } from './tabs/tabs';
 
   interface Props {
     theme: 'dark' | 'light';
@@ -15,6 +17,8 @@
     onActivePaneChange?: (paneIndex: number) => void;
     onPaneQuote?: (paneIndex: number, quote: ChartQuote) => void;
     onPaneInterval?: (paneIndex: number, interval: string) => void;
+    onRequestClosePosition?: (position: PaperPosition) => void;
+    onRequestModifyPosition?: (position: PaperPosition, focusField?: 'tp' | 'sl' | null) => void;
   }
 
   let {
@@ -27,7 +31,9 @@
     activePane = 0,
     onActivePaneChange,
     onPaneQuote,
-    onPaneInterval
+    onPaneInterval,
+    onRequestClosePosition,
+    onRequestModifyPosition
   }: Props = $props();
 
   const layout = $derived(getLayoutById(layoutId));
@@ -103,6 +109,16 @@
         collapseSideToolbarByDefault={idx > 0}
         onQuote={(q) => handlePaneQuote(idx, q)}
         onInterval={(ivl) => handlePaneInterval(idx, ivl)}
+      />
+
+      <ChartTradeOverlay
+        {theme}
+        symbol={paneSymbol}
+        shortName={paneState?.shortName || extractShortSymbol(paneSymbol)}
+        interval={paneInterval}
+        leftToolbarCollapsed={idx > 0}
+        onRequestClosePosition={(pos) => onRequestClosePosition?.(pos)}
+        onRequestModifyPosition={(pos, field) => onRequestModifyPosition?.(pos, field)}
       />
     </div>
   {/each}
