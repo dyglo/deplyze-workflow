@@ -39,8 +39,11 @@
 
   const layout = $derived(getLayoutById(layoutId));
   let gridEl: HTMLDivElement | undefined = $state();
-  let paneDockOffsets = $state<Record<number, number>>({});
   let paneLegendSlots = $state<Record<number, { top: number; left: number }>>({});
+  // Plain Maps (NOT $state): updated from child $effect callbacks and never rendered in the
+  // template, so mutating them must never feed back into ChartTradeOverlay's reactive graph.
+  const paneDockOffsets = new Map<number, number>();
+  const pendingDockTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const readyPanes = new Set<number>();
 
   function postDockOffsetToPane(idx: number, offsetPx: number) {
@@ -56,11 +59,27 @@
     }
   }
 
+  function clearPendingDockTimer(idx: number) {
+    const existing = pendingDockTimers.get(idx);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      pendingDockTimers.delete(idx);
+    }
+  }
+
   function handlePaneDockOffset(idx: number, offsetPx: number) {
-    paneDockOffsets = { ...paneDockOffsets, [idx]: offsetPx };
+    if (paneDockOffsets.get(idx) === offsetPx && readyPanes.has(idx)) {
+      return;
+    }
+    paneDockOffsets.set(idx, offsetPx);
     postDockOffsetToPane(idx, offsetPx);
+    clearPendingDockTimer(idx);
     if (!readyPanes.has(idx)) {
-      setTimeout(() => postDockOffsetToPane(idx, paneDockOffsets[idx] ?? 0), 500);
+      const timer = setTimeout(() => {
+        pendingDockTimers.delete(idx);
+        postDockOffsetToPane(idx, paneDockOffsets.get(idx) ?? 0);
+      }, 500);
+      pendingDockTimers.set(idx, timer);
     }
   }
 
@@ -92,7 +111,8 @@
           }
           if (d.type === 'deplyze:tv-ready') {
             readyPanes.add(idx);
-            postDockOffsetToPane(idx, paneDockOffsets[idx] ?? 0);
+            clearPendingDockTimer(idx);
+            postDockOffsetToPane(idx, paneDockOffsets.get(idx) ?? 0);
           }
         }
       });
@@ -101,6 +121,10 @@
     window.addEventListener('message', onMessage);
     return () => {
       window.removeEventListener('message', onMessage);
+      for (const timer of pendingDockTimers.values()) {
+        clearTimeout(timer);
+      }
+      pendingDockTimers.clear();
     };
   });
 

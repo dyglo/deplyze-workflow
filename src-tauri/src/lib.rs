@@ -31,11 +31,13 @@ const TV_LEGEND_OFFSET_SCRIPT: &str = r#"
 
     function ensureStyleSheet() {
       if (document.getElementById('deplyze-paper-gap-style')) return;
+      var root = document.head || document.documentElement;
+      if (!root) return;
       var style = document.createElement('style');
       style.id = 'deplyze-paper-gap-style';
       style.textContent =
         '[data-qa-id="legend-sources-wrapper"] { margin-top: var(--deplyze-paper-gap, 0px) !important; }';
-      (document.head || document.documentElement).appendChild(style);
+      root.appendChild(style);
     }
 
     function setGapPx(px) {
@@ -43,7 +45,9 @@ const TV_LEGEND_OFFSET_SCRIPT: &str = r#"
       if (next === currentOffsetPx) return;
       currentOffsetPx = next;
       ensureStyleSheet();
-      document.documentElement.style.setProperty('--deplyze-paper-gap', next + 'px');
+      if (document.documentElement) {
+        document.documentElement.style.setProperty('--deplyze-paper-gap', next + 'px');
+      }
     }
 
     function reportSeriesSlot(forceReady) {
@@ -107,6 +111,9 @@ const TV_LEGEND_OFFSET_SCRIPT: &str = r#"
 
     function init() {
       ensureStyleSheet();
+      if (document.documentElement && currentOffsetPx > 0) {
+        document.documentElement.style.setProperty('--deplyze-paper-gap', currentOffsetPx + 'px');
+      }
       var attempts = 0;
       function waitForLegend() {
         var el =

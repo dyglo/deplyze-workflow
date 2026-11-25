@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke, isTauri } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { getApiBaseUrl } from '../workspace/storage';
   import {
     computePnlUsd,
@@ -126,11 +126,21 @@
   const dockTopPx = $derived(legendSlot ? legendSlot.top : 70);
   const dockLeftPx = $derived(legendSlot ? legendSlot.left : leftToolbarCollapsed ? 14 : 61);
 
+  let lastReportedDockPx = -1;
   $effect(() => {
-    onDockOffsetChange?.(dockReservePx);
-    return () => {
+    const next = dockReservePx;
+    if (next === lastReportedDockPx) return;
+    lastReportedDockPx = next;
+    untrack(() => {
+      onDockOffsetChange?.(next);
+    });
+  });
+
+  onDestroy(() => {
+    if (lastReportedDockPx !== 0) {
+      lastReportedDockPx = 0;
       onDockOffsetChange?.(0);
-    };
+    }
   });
 
   // Clear staged edits if position changes or closes
