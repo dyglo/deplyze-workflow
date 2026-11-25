@@ -31,6 +31,7 @@
   interface Props {
     theme: 'dark' | 'light';
     fullscreen?: boolean;
+    initialWatchlistGroupId?: string | null;
     onToggleFullscreen: () => void;
     onSelectSymbol: (symbol: string, shortName: string) => void;
     onOpenSymbolInsights: (
@@ -45,6 +46,7 @@
   let {
     theme,
     fullscreen = false,
+    initialWatchlistGroupId = null,
     onToggleFullscreen,
     onSelectSymbol,
     onOpenSymbolInsights,
@@ -60,8 +62,10 @@
   let dragStartW = 540;
 
   let viewMode = $state<'table' | 'heatmap'>('table');
-  let scope = $state<ScreenerScopeId>('all');
-  let selectedWlGroupId = $state<string | null>(null);
+  // svelte-ignore state_referenced_locally
+  let scope = $state<ScreenerScopeId>(initialWatchlistGroupId ? 'watchlists' : 'all');
+  // svelte-ignore state_referenced_locally
+  let selectedWlGroupId = $state<string | null>(initialWatchlistGroupId ?? null);
   let columnPreset = $state<ScreenerColumnPreset>('overview');
   let quickFilter = $state<ScreenerQuickFilter>('all');
 

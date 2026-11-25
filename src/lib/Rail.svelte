@@ -121,8 +121,10 @@
     symbol: string;
     shortName: string;
     price?: number;
+    watchlistGroupId?: string | null;
     editing: TradingAlert | null;
   } | null>(null);
+  let screenerInitialWlGroupId = $state<string | null>(null);
 
   const activeLayoutDef = $derived(getLayoutById(layoutId));
 
@@ -164,10 +166,17 @@
     symbol = activeFullSymbol || 'OANDA:XAUUSD',
     shortName = activeSymbol || 'XAUUSD',
     price = activePrice,
-    editing: TradingAlert | null = null
+    editing: TradingAlert | null = null,
+    watchlistGroupId: string | null = null
   ) {
     alertModalSeq += 1;
-    alertModalState = { key: alertModalSeq, symbol, shortName, price, editing };
+    alertModalState = { key: alertModalSeq, symbol, shortName, price, watchlistGroupId, editing };
+  }
+
+  function openWatchlistInScreener(groupId: string) {
+    screenerInitialWlGroupId = groupId;
+    active = 'screener';
+    persistRail('screener');
   }
 
   function handleSaveAlert(saved: TradingAlert) {
@@ -220,6 +229,9 @@
       persistRail('note');
     }}
     onCreateAlertForSymbol={(sym, short, price) => openCreateAlertModal(sym, short, price, null)}
+    onCreateWatchlistAlert={(groupId) =>
+      openCreateAlertModal(activeFullSymbol, activeSymbol, activePrice, null, groupId)
+    }
     {insightsOpen}
     {onOpenSymbolInsights}
     {onSelectInsightsSymbol}
@@ -258,12 +270,14 @@
       )
     }
     {onSelectSymbol}
+    onOpenWatchlistInScreener={openWatchlistInScreener}
     onClose={closePanel}
   />
 {:else if active === 'screener' && !screenerFullscreen}
   <ScreenerPanel
     {theme}
     fullscreen={false}
+    initialWatchlistGroupId={screenerInitialWlGroupId}
     onToggleFullscreen={() => onToggleScreenerFullscreen?.()}
     {onSelectSymbol}
     {onOpenSymbolInsights}
@@ -298,6 +312,7 @@
       initialSymbol={alertModalState.symbol}
       initialShortName={alertModalState.shortName}
       initialPrice={alertModalState.price}
+      initialWatchlistGroupId={alertModalState.watchlistGroupId ?? null}
       editingAlert={alertModalState.editing}
       onSave={handleSaveAlert}
       onClose={closeAlertModal}

@@ -744,13 +744,33 @@
   {#if alertToasts.length > 0}
     <div class="alert-toast-stack" aria-live="polite">
       {#each alertToasts as toast (toast.id)}
-        <div class="alert-toast" class:light={theme === 'light'}>
+        <div
+          class="alert-toast"
+          class:light={theme === 'light'}
+          class:clickable={Boolean(toast.fullSymbol)}
+          class:closed-hit={Boolean(toast.missedWhileClosed)}
+          role="button"
+          tabindex="0"
+          on:click={() => {
+            if (toast.fullSymbol) {
+              loadSymbolInActiveTab(toast.fullSymbol, toast.symbol);
+              alertToasts = alertToasts.filter((t) => t.id !== toast.id);
+            }
+          }}
+          on:keydown={(e) => {
+            if (e.key === 'Enter' && toast.fullSymbol) {
+              loadSymbolInActiveTab(toast.fullSymbol, toast.symbol);
+              alertToasts = alertToasts.filter((t) => t.id !== toast.id);
+            }
+          }}
+        >
           <div class="toast-head">
             <strong>{toast.title}</strong>
             <button
               type="button"
               aria-label="Dismiss alert"
-              on:click={() => (alertToasts = alertToasts.filter((t) => t.id !== toast.id))}
+              on:click|stopPropagation={() =>
+                (alertToasts = alertToasts.filter((t) => t.id !== toast.id))}
             >
               ×
             </button>
@@ -864,6 +884,14 @@
     color: #131722;
     background: #ffffff;
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16), 0 0 0 1px #e0e3eb;
+  }
+
+  .alert-toast.clickable {
+    cursor: pointer;
+  }
+
+  .alert-toast.closed-hit {
+    border-left: 3px solid #f59e0b;
   }
 
   .toast-head {

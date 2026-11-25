@@ -3,31 +3,44 @@
   import PanelShell from './PanelShell.svelte';
   import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
-    OPERATOR_LABELS,
     clearAlertLog,
     deleteAlertById,
+    formatAlertAutoMessage,
+    getAlertConditions,
+    isMultiConditionAlert,
+    isWatchlistAlert,
     pauseAllAlerts,
+    resetWatchlistAlertMatches,
     resumeAllAlerts,
+    subscribeAlertProgress,
     subscribeAlerts,
     togglePauseAlert,
+    type AlertLiveProgress,
     type AlertsState,
     type TradingAlert
   } from '../alerts/store';
-  import { formatQuotePrice } from '../watchlist/store';
 
   interface Props {
     theme: 'dark' | 'light';
     onOpenCreateAlert: (editing?: TradingAlert | null) => void;
     onSelectSymbol: (symbol: string, shortName: string) => void;
+    onOpenWatchlistInScreener?: (watchlistGroupId: string) => void;
     onClose: () => void;
   }
 
-  let { theme, onOpenCreateAlert, onSelectSymbol, onClose }: Props = $props();
+  let {
+    theme,
+    onOpenCreateAlert,
+    onSelectSymbol,
+    onOpenWatchlistInScreener,
+    onClose
+  }: Props = $props();
 
   type TabId = 'alerts' | 'log';
 
   let activeTab = $state<TabId>('alerts');
   let alertsState = $state<AlertsState>({ alerts: [], log: [] });
+  let progressMap = $state<Record<string, AlertLiveProgress>>({});
   let searchOpen = $state(false);
   let searchQuery = $state('');
   let sortMode = $state<'status' | 'newest'>('status');
@@ -41,6 +54,7 @@
       list = list.filter(
         (a) =>
           a.shortName.toLowerCase().includes(q) ||
+          (a.watchlistGroupName ?? '').toLowerCase().includes(q) ||
           a.message.toLowerCase().includes(q) ||
           (a.eventTitle ?? '').toLowerCase().includes(q)
       );
@@ -61,13 +75,17 @@
       (l) =>
         l.shortName.toLowerCase().includes(q) ||
         l.title.toLowerCase().includes(q) ||
-        l.message.toLowerCase().includes(q)
+        l.message.toLowerCase().includes(q) ||
+        (l.detail ?? '').toLowerCase().includes(q)
     );
   });
 
   onMount(() => {
     const unsub = subscribeAlerts((s) => {
       alertsState = s;
+    });
+    const unsubProg = subscribeAlertProgress((p) => {
+      progressMap = p;
     });
     const onDocDown = (e: PointerEvent) => {
       const el = e.target as Element | null;
@@ -88,6 +106,7 @@
     window.addEventListener('keydown', onKeyDown);
     return () => {
       unsub();
+      unsubProg();
       window.removeEventListener('pointerdown', onDocDown);
       window.removeEventListener('keydown', onKeyDown);
     };
@@ -98,8 +117,13 @@
       return a.eventTitle || a.message;
     }
     if (a.message) return a.message;
-    const op = OPERATOR_LABELS[a.operator ?? 'crossing'];
-    return `${a.shortName} ${op} ${formatQuotePrice(a.targetPrice, a.shortName)}`;
+    return formatAlertAutoMessage({
+      scope: isWatchlistAlert(a) ? 'watchlist' : 'symbol',
+      shortName: a.shortName,
+      watchlistGroupName: a.watchlistGroupName,
+      logic: a.logic === 'or' ? 'or' : 'and',
+      conditions: getAlertConditions(a)
+    });
   }
 
   function statusLabel(status: TradingAlert['status']): string {
@@ -122,6 +146,17 @@
     }
   }
 
+  function handleAlertRowClick(alert: TradingAlert) {
+    if (alert.kind === 'news') return;
+    if (isWatchlistAlert(alert)) {
+      if (alert.watchlistGroupId && onOpenWatchlistInScreener) {
+        onOpenWatchlistInScreener(alert.watchlistGroupId);
+      }
+      return;
+    }
+    onSelectSymbol(alert.symbol, alert.shortName);
+  }
+
   function confirmDelete() {
     if (!pendingDelete) return;
     deleteAlertById(pendingDelete.id);
@@ -139,7 +174,6 @@
   {/snippet}
 
   <div class="alerts-panel" class:light={theme === 'light'}>
-    <!-- Segmented tabs matching TradingView -->
     <div class="tab-bar" role="tablist">
       <button
         class="seg-tab"
@@ -163,7 +197,6 @@
       </button>
     </div>
 
-    <!-- Toolbar matching TradingView (+ left; search, sort, more right) -->
     <div class="al-toolbar">
       <button
         class="tool-btn"
@@ -265,13 +298,12 @@
       <div class="search-bar">
         <input
           type="text"
-          placeholder="Filter by symbol or message..."
+          placeholder="Filter by symbol, watchlist, or message..."
           bind:value={searchQuery}
         />
       </div>
     {/if}
 
-    <!-- Body -->
     <div class="al-body">
       {#if activeTab === 'alerts'}
         {#if visibleAlerts.length === 0}
@@ -283,7 +315,7 @@
               <path d="M35 30v10M30 35h10" />
             </svg>
             <p class="empty-copy">
-              Alerts notify you instantly when your conditions are met. Create one to get started.
+              Alerts notify you on price levels, multi-condition setups, or across an entire watchlist.
             </p>
             <button class="empty-cta" type="button" onclick={() => onOpenCreateAlert(null)}>
               Create alert
@@ -292,22 +324,23 @@
         {:else}
           <div class="alert-list">
             {#each visibleAlerts as alert (alert.id)}
+              {@const wlRule = isWatchlistAlert(alert)}
+              {@const multiRule = isMultiConditionAlert(alert)}
+              {@const conds = getAlertConditions(alert)}
+              {@const prog = progressMap[alert.id]}
+              {@const matchedCount = Object.keys(alert.triggeredSymbols ?? {}).length}
               <div
                 class="alert-row"
                 role="button"
                 tabindex="0"
-                title={alert.kind === 'price'
-                  ? `${alert.symbol} · Created ${formatStamp(alert.createdAt)}`
-                  : `Calendar alert · ${alert.leadMinutes ?? 15}m before release`}
-                onclick={() => {
-                  if (alert.kind === 'price') {
-                    onSelectSymbol(alert.symbol, alert.shortName);
-                  }
-                }}
+                title={wlRule
+                  ? `Watchlist rule on ${alert.watchlistGroupName ?? alert.shortName} · Click to view in Screener`
+                  : alert.kind === 'price'
+                    ? `${alert.symbol} · Created ${formatStamp(alert.createdAt)}`
+                    : `Calendar alert · ${alert.leadMinutes ?? 15}m before release`}
+                onclick={() => handleAlertRowClick(alert)}
                 onkeydown={(e) => {
-                  if (e.key === 'Enter' && alert.kind === 'price') {
-                    onSelectSymbol(alert.symbol, alert.shortName);
-                  }
+                  if (e.key === 'Enter') handleAlertRowClick(alert);
                 }}
               >
                 <div class="alert-main">
@@ -315,12 +348,39 @@
                   <div class="alert-meta">
                     {#if alert.kind === 'news'}
                       <span class="al-badge news">N</span>
+                    {:else if wlRule}
+                      <span class="al-badge wl" aria-hidden="true">
+                        <svg viewBox="0 0 16 16">
+                          <path d="M3 4.5h10M3 8h10M3 11.5h6.5" />
+                        </svg>
+                      </span>
                     {:else}
                       <SymbolIcon symbol={alert.shortName} size={16} />
                     {/if}
+
                     <span class="al-sym">
-                      {alert.kind === 'news' ? `${alert.eventCountry ?? 'News'} · ${alert.leadMinutes ?? 15}m before` : alert.shortName}
+                      {#if alert.kind === 'news'}
+                        {alert.eventCountry ?? 'News'} · {alert.leadMinutes ?? 15}m before
+                      {:else if wlRule}
+                        {alert.watchlistGroupName ?? alert.shortName}{prog?.memberCount ? ` (${prog.memberCount})` : ''}
+                      {:else}
+                        {alert.shortName}
+                      {/if}
                     </span>
+
+                    {#if wlRule && matchedCount > 0}
+                      <span class="dot">·</span>
+                      <span class="meta-pill armed">{matchedCount} matched</span>
+                    {:else if multiRule && alert.status === 'active' && prog && alert.logic !== 'or'}
+                      <span class="dot">·</span>
+                      <span class="meta-pill" class:armed={prog.met > 0}>
+                        {prog.met}/{prog.total} met
+                      </span>
+                    {:else if multiRule}
+                      <span class="dot">·</span>
+                      <span class="meta-pill">{conds.length} {alert.logic === 'or' ? 'OR' : 'AND'}</span>
+                    {/if}
+
                     <span class="dot">·</span>
                     <span
                       class="al-status"
@@ -332,8 +392,24 @@
                   </div>
                 </div>
 
-                <!-- Hover quick actions matching Screenshot 7 -->
                 <div class="alert-actions">
+                  {#if wlRule && matchedCount > 0}
+                    <button
+                      class="row-icon"
+                      type="button"
+                      title="Reset matched symbols"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        resetWatchlistAlertMatches(alert.id);
+                      }}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="M13 8a5 5 0 1 1-1.35-3.4" />
+                        <path d="M13 3.2v2.6h-2.6" />
+                      </svg>
+                    </button>
+                  {/if}
+
                   {#if alert.status === 'active' || alert.status === 'paused' || (alert.kind === 'price' && alert.status === 'triggered')}
                     <button
                       class="row-icon"
@@ -398,18 +474,38 @@
           </div>
         {/if}
       {:else}
-        <!-- Log tab -->
         {#if visibleLog.length === 0}
           <div class="empty-log">No triggered alerts yet</div>
         {:else}
           <div class="alert-list">
             {#each visibleLog as entry (entry.id)}
-              <div class="log-row">
+              <div
+                class="log-row"
+                class:clickable={entry.kind === 'price'}
+                role="button"
+                tabindex="0"
+                title={entry.kind === 'price' ? `Click to load ${entry.shortName} on chart` : ''}
+                onclick={() => {
+                  if (entry.kind === 'price') {
+                    onSelectSymbol(entry.symbol, entry.shortName);
+                  }
+                }}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' && entry.kind === 'price') {
+                    onSelectSymbol(entry.symbol, entry.shortName);
+                  }
+                }}
+              >
                 <div class="log-top">
-                  <span class="log-title">{entry.title}</span>
+                  <span class="log-title">
+                    {entry.title}
+                    {#if entry.missedWhileClosed}
+                      <span class="closed-tag">While closed</span>
+                    {/if}
+                  </span>
                   <span class="log-time">{formatStamp(entry.triggeredAt)}</span>
                 </div>
-                <div class="log-msg">{entry.message}</div>
+                <div class="log-msg">{entry.detail || entry.message}</div>
               </div>
             {/each}
           </div>
@@ -419,7 +515,6 @@
   </div>
 </PanelShell>
 
-<!-- Delete confirmation modal matching Screenshot 8 & SettingsModal dark glass -->
 {#if pendingDelete}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
@@ -725,9 +820,11 @@
   .alert-meta {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     font-size: 11.5px;
     color: var(--al-secondary);
+    flex-wrap: nowrap;
+    min-width: 0;
   }
 
   .al-badge {
@@ -743,9 +840,42 @@
     flex: 0 0 16px;
   }
 
+  .al-badge.wl {
+    border-radius: 4px;
+    background: rgba(41, 98, 255, 0.16);
+    color: #2962ff;
+  }
+
+  .al-badge.wl svg {
+    width: 10px;
+    height: 10px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+
   .al-sym {
     font-weight: 600;
     color: var(--al-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .meta-pill {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--al-secondary);
+    white-space: nowrap;
+  }
+
+  .meta-pill.armed {
+    color: #089981;
+  }
+
+  .al-status {
+    white-space: nowrap;
   }
 
   .al-status.active {
@@ -764,6 +894,7 @@
     gap: 2px;
     opacity: 0;
     transition: opacity 120ms ease;
+    flex: 0 0 auto;
   }
 
   .alert-row:hover .alert-actions,
@@ -810,6 +941,15 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    transition: background-color 110ms ease;
+  }
+
+  .log-row.clickable {
+    cursor: pointer;
+  }
+
+  .log-row.clickable:hover {
+    background: var(--al-hover);
   }
 
   .log-top {
@@ -823,6 +963,19 @@
     font-size: 12.5px;
     font-weight: 600;
     color: var(--al-text);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .closed-tag {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(245, 158, 11, 0.16);
+    color: #f59e0b;
+    font-size: 10px;
+    font-weight: 600;
   }
 
   .log-time {
@@ -834,6 +987,7 @@
   .log-msg {
     font-size: 12px;
     color: var(--al-secondary);
+    line-height: 1.35;
   }
 
   /* Delete confirmation modal */

@@ -43,6 +43,7 @@
     onOpenSymbolInNewTab: (symbol: string, shortName: string) => void;
     onOpenNotesForSymbol: () => void;
     onCreateAlertForSymbol: (symbol: string, shortName: string, price?: number) => void;
+    onCreateWatchlistAlert?: (groupId: string) => void;
     insightsOpen?: boolean;
     onOpenSymbolInsights: (
       symbol: string,
@@ -64,6 +65,7 @@
     onOpenSymbolInNewTab,
     onOpenNotesForSymbol,
     onCreateAlertForSymbol,
+    onCreateWatchlistAlert = undefined,
     insightsOpen = false,
     onOpenSymbolInsights,
     onSelectInsightsSymbol = undefined,
@@ -734,6 +736,19 @@
 
           {#if moreMenuOpen}
             <div class="wl-popover right">
+              {#if onCreateWatchlistAlert}
+                <button
+                  class="pop-item"
+                  type="button"
+                  onclick={() => {
+                    onCreateWatchlistAlert(activeGroup.id);
+                    moreMenuOpen = false;
+                  }}
+                >
+                  <span>Create watchlist alert</span>
+                </button>
+                <div class="pop-div"></div>
+              {/if}
               <button
                 class="pop-item"
                 type="button"

@@ -1,19 +1,34 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
+    CONDITION_OPERATOR_LABELS,
     DEFAULT_NOTIFICATIONS,
-    OPERATOR_LABELS,
-    formatAlertDefaultMessage,
+    METRIC_LABELS,
+    RATING_TARGET_LABELS,
+    WATCHLIST_TRIGGER_LABELS,
+    formatAlertAutoMessage,
+    getAlertConditions,
+    isWatchlistAlert,
+    type AlertCondition,
+    type AlertConditionMetric,
+    type AlertConditionOperator,
+    type AlertLogic,
     type AlertNotificationPrefs,
     type AlertOperator,
+    type AlertScope,
     type AlertTrigger,
     type NotificationSchedule,
-    type TradingAlert
+    type TechRatingTarget,
+    type TradingAlert,
+    type WatchlistTriggerMode
   } from '../alerts/store';
   import {
     SYMBOL_CATALOG,
     formatQuotePrice,
-    normalizeSymbolInput
+    loadWatchlistState,
+    normalizeSymbolInput,
+    type WatchlistGroup
   } from '../watchlist/store';
   import { makeWorkspaceId, playAlertChime } from '../workspace/storage';
 
@@ -22,6 +37,7 @@
     initialSymbol: string;
     initialShortName: string;
     initialPrice?: number;
+    initialWatchlistGroupId?: string | null;
     editingAlert?: TradingAlert | null;
     onSave: (alert: TradingAlert) => void;
     onClose: () => void;
@@ -32,18 +48,43 @@
     initialSymbol,
     initialShortName,
     initialPrice,
+    initialWatchlistGroupId = null,
     editingAlert = null,
     onSave,
     onClose
   }: Props = $props();
 
-  const MODAL_WIDTH = 440;
+  const MODAL_WIDTH = 460;
   const TITLE_BAR_HEIGHT = 34;
 
   type ExpiryPreset = 'open' | '1d' | '7d' | '30d' | '90d';
-  type OpenMenu = 'symbol' | 'operator' | 'trigger' | 'expiry' | 'schedule' | null;
 
-  const OPERATOR_OPTIONS: { id: AlertOperator; label: string }[] = [
+  interface DraftCondition {
+    id: string;
+    symbol: string;
+    shortName: string;
+    metric: AlertConditionMetric;
+    operator: AlertConditionOperator;
+    valueStr: string;
+    ratingTarget: TechRatingTarget;
+  }
+
+  const SYMBOL_METRICS: AlertConditionMetric[] = [
+    'price',
+    'tech_rating',
+    'change_pct',
+    'rsi14',
+    'range_pos'
+  ];
+
+  const WATCHLIST_METRICS: AlertConditionMetric[] = [
+    'change_pct',
+    'tech_rating',
+    'rsi14',
+    'range_pos'
+  ];
+
+  const PRICE_OPERATORS: { id: AlertOperator; label: string }[] = [
     { id: 'crossing', label: 'Crossing' },
     { id: 'crossing_up', label: 'Crossing Up' },
     { id: 'crossing_down', label: 'Crossing Down' },
@@ -51,9 +92,39 @@
     { id: 'less_than', label: 'Less Than' }
   ];
 
+  const CHANGE_OPERATORS: { id: AlertConditionOperator; label: string }[] = [
+    { id: 'abs_gte', label: 'Abs Move ≥' },
+    { id: 'greater_than', label: 'Greater Than' },
+    { id: 'less_than', label: 'Less Than' }
+  ];
+
+  const COMPARE_OPERATORS: { id: AlertConditionOperator; label: string }[] = [
+    { id: 'greater_than', label: 'Greater Than' },
+    { id: 'less_than', label: 'Less Than' }
+  ];
+
+  const RANGE_OPERATORS: { id: AlertConditionOperator; label: string }[] = [
+    { id: 'greater_than', label: 'Near High (≥ %)' },
+    { id: 'less_than', label: 'Near Low (≤ %)' }
+  ];
+
+  const RATING_OPTIONS: { id: TechRatingTarget; label: string }[] = [
+    { id: 'strong_buy', label: 'Strong buy' },
+    { id: 'buy_or_strong', label: 'Buy or stronger' },
+    { id: 'neutral', label: 'Neutral' },
+    { id: 'sell_or_strong', label: 'Sell or weaker' },
+    { id: 'strong_sell', label: 'Strong sell' }
+  ];
+
   const TRIGGER_OPTIONS: { id: AlertTrigger; label: string }[] = [
     { id: 'once', label: 'Once only' },
     { id: 'every', label: 'Every time' }
+  ];
+
+  const WATCHLIST_TRIGGER_OPTIONS: { id: WatchlistTriggerMode; label: string }[] = [
+    { id: 'once_per_symbol', label: 'Once per symbol' },
+    { id: 'every_per_symbol', label: 'Every time (per symbol)' },
+    { id: 'once_first', label: 'Once only (first match)' }
   ];
 
   const EXPIRY_OPTIONS: { id: ExpiryPreset; label: string; days: number | null }[] = [
@@ -70,7 +141,7 @@
     { id: 'sessions', label: 'Sessions (07:00–22:00)' }
   ];
 
-  function parseTargetPrice(raw: unknown): number | null {
+  function parseNumeric(raw: unknown): number | null {
     const text = String(raw ?? '').replace(/,/g, '').trim();
     if (!text) return null;
     const num = Number(text);
@@ -90,35 +161,159 @@
     }).format(new Date(ms));
   }
 
-  function isEditingCustomMessage(alert: TradingAlert | null): boolean {
-    if (!alert || !alert.message.trim()) return false;
-    if (typeof alert.targetPrice === 'number' && Number.isFinite(alert.targetPrice)) {
-      const auto = formatAlertDefaultMessage(
-        alert.shortName,
-        alert.operator ?? 'crossing',
-        alert.targetPrice
-      );
-      return alert.message.trim() !== auto.trim();
+  function defaultConditionFor(
+    metric: AlertConditionMetric,
+    sym: string,
+    short: string,
+    seedPrice?: number
+  ): DraftCondition {
+    if (metric === 'price') {
+      return {
+        id: makeWorkspaceId('c'),
+        symbol: sym,
+        shortName: short,
+        metric: 'price',
+        operator: 'crossing',
+        valueStr:
+          typeof seedPrice === 'number' && Number.isFinite(seedPrice)
+            ? formatQuotePrice(seedPrice, short).replace(/,/g, '')
+            : '',
+        ratingTarget: 'strong_buy'
+      };
     }
-    return true;
+    if (metric === 'tech_rating') {
+      return {
+        id: makeWorkspaceId('c'),
+        symbol: sym,
+        shortName: short,
+        metric: 'tech_rating',
+        operator: 'is_rating',
+        valueStr: '',
+        ratingTarget: 'strong_buy'
+      };
+    }
+    if (metric === 'change_pct') {
+      return {
+        id: makeWorkspaceId('c'),
+        symbol: sym,
+        shortName: short,
+        metric: 'change_pct',
+        operator: 'abs_gte',
+        valueStr: '1.5',
+        ratingTarget: 'strong_buy'
+      };
+    }
+    if (metric === 'rsi14') {
+      return {
+        id: makeWorkspaceId('c'),
+        symbol: sym,
+        shortName: short,
+        metric: 'rsi14',
+        operator: 'greater_than',
+        valueStr: '70',
+        ratingTarget: 'strong_buy'
+      };
+    }
+    return {
+      id: makeWorkspaceId('c'),
+      symbol: sym,
+      shortName: short,
+      metric: 'range_pos',
+      operator: 'greater_than',
+      valueStr: '90',
+      ratingTarget: 'strong_buy'
+    };
+  }
+
+  function buildInitialDrafts(): DraftCondition[] {
+    if (editingAlert) {
+      const existing = getAlertConditions(editingAlert);
+      if (existing.length > 0) {
+        return existing.slice(0, 3).map((c) => ({
+          id: c.id || makeWorkspaceId('c'),
+          symbol: c.symbol || editingAlert.symbol,
+          shortName: c.shortName || editingAlert.shortName,
+          metric: c.metric,
+          operator: c.operator,
+          valueStr:
+            typeof c.value === 'number' && Number.isFinite(c.value) ? String(c.value) : '',
+          ratingTarget: c.ratingTarget ?? 'strong_buy'
+        }));
+      }
+    }
+    if (initialWatchlistGroupId) {
+      return [defaultConditionFor('change_pct', '', '')];
+    }
+    const baseSym = initialSymbol || 'OANDA:XAUUSD';
+    const baseShort = initialShortName || 'XAUUSD';
+    return [defaultConditionFor('price', baseSym, baseShort, initialPrice)];
+  }
+
+  function buildConditionsFromDrafts(
+    drafts: DraftCondition[],
+    curScope: AlertScope,
+    primarySym: string,
+    primaryShort: string
+  ): AlertCondition[] {
+    return drafts.map((d, idx) => {
+      const num = parseNumeric(d.valueStr);
+      const isPrimary =
+        curScope === 'watchlist' ||
+        idx === 0 ||
+        (d.symbol || primarySym).toUpperCase() === primarySym.toUpperCase();
+      return {
+        id: d.id || `c${idx + 1}`,
+        ...(curScope === 'symbol'
+          ? {
+              symbol: isPrimary ? primarySym : d.symbol,
+              shortName: isPrimary ? primaryShort : d.shortName
+            }
+          : {}),
+        metric: d.metric,
+        operator: d.metric === 'tech_rating' ? 'is_rating' : d.operator,
+        ...(d.metric === 'tech_rating'
+          ? { ratingTarget: d.ratingTarget }
+          : num !== null
+            ? { value: num }
+            : {})
+      };
+    });
   }
 
   // svelte-ignore state_referenced_locally
-  let symbol = $state(editingAlert?.symbol ?? initialSymbol ?? 'OANDA:XAUUSD');
-  // svelte-ignore state_referenced_locally
-  let shortName = $state(editingAlert?.shortName ?? initialShortName ?? 'XAUUSD');
-  // svelte-ignore state_referenced_locally
-  let operator = $state<AlertOperator>(editingAlert?.operator ?? 'crossing');
-  // svelte-ignore state_referenced_locally
-  let valueStr = $state<string>(
-    editingAlert?.targetPrice !== undefined
-      ? String(editingAlert.targetPrice)
-      : typeof initialPrice === 'number' && Number.isFinite(initialPrice)
-        ? formatQuotePrice(initialPrice, initialShortName).replace(/,/g, '')
-        : ''
+  let scope = $state<AlertScope>(
+    editingAlert
+      ? isWatchlistAlert(editingAlert)
+        ? 'watchlist'
+        : 'symbol'
+      : initialWatchlistGroupId
+        ? 'watchlist'
+        : 'symbol'
   );
   // svelte-ignore state_referenced_locally
+  let symbol = $state(editingAlert && !isWatchlistAlert(editingAlert) ? editingAlert.symbol : initialSymbol || 'OANDA:XAUUSD');
+  // svelte-ignore state_referenced_locally
+  let shortName = $state(editingAlert && !isWatchlistAlert(editingAlert) ? editingAlert.shortName : initialShortName || 'XAUUSD');
+  // svelte-ignore state_referenced_locally
+  let watchlistGroupId = $state<string>(
+    editingAlert?.watchlistGroupId ?? initialWatchlistGroupId ?? ''
+  );
+  // svelte-ignore state_referenced_locally
+  let watchlistGroupName = $state<string>(editingAlert?.watchlistGroupName ?? 'Watchlist');
+
+  let watchlistGroups = $state<WatchlistGroup[]>([]);
+
+  // svelte-ignore state_referenced_locally
+  let logic = $state<AlertLogic>(editingAlert?.logic === 'or' ? 'or' : 'and');
+  // svelte-ignore state_referenced_locally
+  let drafts = $state<DraftCondition[]>(buildInitialDrafts());
+
+  // svelte-ignore state_referenced_locally
   let trigger = $state<AlertTrigger>(editingAlert?.trigger ?? 'once');
+  // svelte-ignore state_referenced_locally
+  let watchlistTriggerMode = $state<WatchlistTriggerMode>(
+    editingAlert?.watchlistTriggerMode ?? 'once_per_symbol'
+  );
   // svelte-ignore state_referenced_locally
   let expiryPreset = $state<ExpiryPreset>(
     editingAlert ? (editingAlert.expiresAt === null ? 'open' : '30d') : '30d'
@@ -129,7 +324,7 @@
   // svelte-ignore state_referenced_locally
   let customMessage = $state(editingAlert?.message ?? '');
   // svelte-ignore state_referenced_locally
-  let messageEdited = $state(isEditingCustomMessage(editingAlert));
+  let messageEdited = $state(Boolean(editingAlert && editingAlert.message.trim()));
 
   // Committed notification prefs
   // svelte-ignore state_referenced_locally
@@ -157,7 +352,6 @@
     editingAlert?.notifications?.schedule ?? DEFAULT_NOTIFICATIONS.schedule
   );
 
-  // Draft values for Notifications sub-view (plain primitive $state)
   let draftDesktop = $state(true);
   let draftToast = $state(true);
   let draftSound = $state(true);
@@ -166,19 +360,19 @@
   let draftSchedule = $state<NotificationSchedule>('24/7');
 
   let view = $state<'main' | 'notifications'>('main');
-  let openMenu = $state<OpenMenu>(null);
+  let openMenu = $state<string | null>(null);
   let symbolQuery = $state('');
+  let condSymQuery = $state('');
   let formError = $state<string | null>(null);
   let notifError = $state<string | null>(null);
 
-  // Floating modal drag state (clamped cleanly inside window)
   let posX = $state(
     typeof window !== 'undefined'
       ? Math.max(16, Math.round((window.innerWidth - MODAL_WIDTH) / 2))
       : 260
   );
   let posY = $state(
-    typeof window !== 'undefined' ? Math.max(TITLE_BAR_HEIGHT + 24, 96) : 96
+    typeof window !== 'undefined' ? Math.max(TITLE_BAR_HEIGHT + 20, 72) : 72
   );
   let dragging = $state(false);
   let dragOffsetX = 0;
@@ -187,12 +381,80 @@
   let modalEl: HTMLDivElement | undefined = $state();
   let headerEl: HTMLElement | undefined = $state();
 
-  const autoMessage = $derived.by(() => {
-    const num = parseTargetPrice(valueStr);
-    if (num !== null) {
-      return formatAlertDefaultMessage(shortName, operator, num);
+  onMount(() => {
+    void loadWatchlistState().then((wl) => {
+      watchlistGroups = wl.groups;
+      if (scope === 'watchlist') {
+        const match =
+          wl.groups.find((g) => g.id === watchlistGroupId) ??
+          wl.groups.find((g) => g.id === wl.activeGroupId) ??
+          wl.groups[0];
+        if (match) {
+          watchlistGroupId = match.id;
+          watchlistGroupName = match.name;
+        }
+      }
+    });
+  });
+
+  const allKnownSymbols = $derived.by(() => {
+    const map = new Map<string, { symbol: string; shortName: string; description: string }>();
+    for (const c of SYMBOL_CATALOG) {
+      map.set(c.shortName.toUpperCase(), {
+        symbol: c.symbol,
+        shortName: c.shortName,
+        description: c.description
+      });
     }
-    return `${shortName} ${OPERATOR_LABELS[operator]}`;
+    for (const g of watchlistGroups) {
+      for (const sec of g.sections) {
+        for (const it of sec.items) {
+          if (!map.has(it.shortName.toUpperCase())) {
+            map.set(it.shortName.toUpperCase(), {
+              symbol: it.symbol,
+              shortName: it.shortName,
+              description: it.description || it.shortName
+            });
+          }
+        }
+      }
+    }
+    return Array.from(map.values());
+  });
+
+  function filterCatalog(query: string) {
+    const q = String(query ?? '').trim().toUpperCase();
+    if (!q) return allKnownSymbols.slice(0, 12);
+    return allKnownSymbols
+      .filter(
+        (s) =>
+          s.shortName.toUpperCase().includes(q) ||
+          s.symbol.toUpperCase().includes(q) ||
+          s.description.toUpperCase().includes(q)
+      )
+      .slice(0, 12);
+  }
+
+  const filteredHeaderSymbols = $derived(filterCatalog(symbolQuery));
+  const filteredCondSymbols = $derived(filterCatalog(condSymQuery));
+
+  function groupMemberCount(g: WatchlistGroup): number {
+    return g.sections.reduce((acc, s) => acc + s.items.length, 0);
+  }
+
+  const activeWatchlistGroup = $derived(
+    watchlistGroups.find((g) => g.id === watchlistGroupId) ?? null
+  );
+
+  const autoMessage = $derived.by(() => {
+    const built = buildConditionsFromDrafts(drafts, scope, symbol, shortName);
+    return formatAlertAutoMessage({
+      scope,
+      shortName,
+      watchlistGroupName: activeWatchlistGroup?.name ?? watchlistGroupName,
+      logic,
+      conditions: built
+    });
   });
 
   const displayedMessage = $derived(messageEdited ? customMessage : autoMessage);
@@ -215,21 +477,38 @@
     return parts.length > 0 ? parts.join(', ') : 'Muted';
   });
 
-  const filteredSymbols = $derived.by(() => {
-    const q = String(symbolQuery ?? '').trim().toUpperCase();
-    if (!q) return SYMBOL_CATALOG.slice(0, 10);
-    return SYMBOL_CATALOG.filter(
-      (s) =>
-        s.shortName.toUpperCase().includes(q) ||
-        s.symbol.toUpperCase().includes(q) ||
-        s.description.toUpperCase().includes(q)
-    ).slice(0, 10);
-  });
+  function operatorsForMetric(metric: AlertConditionMetric) {
+    if (metric === 'price') return PRICE_OPERATORS;
+    if (metric === 'change_pct') return CHANGE_OPERATORS;
+    if (metric === 'range_pos') return RANGE_OPERATORS;
+    return COMPARE_OPERATORS;
+  }
+
+  function operatorLabelFor(metric: AlertConditionMetric, op: AlertConditionOperator): string {
+    if (metric === 'range_pos') {
+      return op === 'less_than' ? 'Near Low (≤ %)' : 'Near High (≥ %)';
+    }
+    return CONDITION_OPERATOR_LABELS[op] ?? 'Crossing';
+  }
+
+  function valuePlaceholderFor(metric: AlertConditionMetric): string {
+    if (metric === 'price') return 'Target price';
+    if (metric === 'change_pct') return 'e.g. 1.5 (%)';
+    if (metric === 'rsi14') return '0–100 (e.g. 70)';
+    return '0–100 (e.g. 90%)';
+  }
+
+  function valueUnitFor(metric: AlertConditionMetric): string {
+    if (metric === 'price') return 'Value';
+    if (metric === 'change_pct') return 'Chg %';
+    if (metric === 'rsi14') return 'RSI';
+    return 'Pos %';
+  }
 
   function clampPosition(x: number, y: number, ensureFullHeight = false): { x: number; y: number } {
     if (typeof window === 'undefined') return { x, y };
     const w = modalEl?.offsetWidth ?? MODAL_WIDTH;
-    const h = modalEl?.offsetHeight ?? 420;
+    const h = modalEl?.offsetHeight ?? 440;
     const minVisible = 120;
     const minX = ensureFullHeight ? 12 : -w + minVisible;
     const maxX = ensureFullHeight
@@ -265,7 +544,7 @@
           headerEl.releasePointerCapture(dragPointerId);
         }
       } catch {
-        // ignore if already released
+        // ignore
       }
     }
     dragPointerId = null;
@@ -284,7 +563,7 @@
     try {
       headerEl?.setPointerCapture(e.pointerId);
     } catch {
-      // fallback to window listeners + drag-shield
+      // fallback to window listeners
     }
     e.preventDefault();
   }
@@ -333,16 +612,100 @@
     }
   }
 
-  function toggleMenu(name: Exclude<OpenMenu, null>) {
+  function toggleMenu(name: string) {
     openMenu = openMenu === name ? null : name;
   }
 
-  function pickSymbol(raw: string) {
+  function pickTargetSymbol(raw: string) {
     const norm = normalizeSymbolInput(raw);
+    const prevPrimary = symbol.toUpperCase();
+    scope = 'symbol';
     symbol = norm.symbol;
     shortName = norm.shortName;
+    // Update Condition 1 (and any condition that matched the old primary) to the new symbol
+    drafts = drafts.map((d, idx) =>
+      idx === 0 || d.symbol.toUpperCase() === prevPrimary
+        ? { ...d, symbol: norm.symbol, shortName: norm.shortName }
+        : d
+    );
     openMenu = null;
     symbolQuery = '';
+    formError = null;
+  }
+
+  function pickTargetWatchlist(g: WatchlistGroup) {
+    scope = 'watchlist';
+    watchlistGroupId = g.id;
+    watchlistGroupName = g.name;
+    // Watchlist rules cannot use absolute price levels; convert any 'price' leg to change_pct
+    drafts = drafts.map((d) =>
+      d.metric === 'price'
+        ? {
+            ...d,
+            metric: 'change_pct',
+            operator: 'abs_gte',
+            valueStr: '1.5'
+          }
+        : d
+    );
+    openMenu = null;
+    symbolQuery = '';
+    formError = null;
+  }
+
+  function setConditionMetric(idx: number, metric: AlertConditionMetric) {
+    const cur = drafts[idx];
+    const next = defaultConditionFor(
+      metric,
+      cur.symbol || symbol,
+      cur.shortName || shortName,
+      idx === 0 && cur.shortName.toUpperCase() === (initialShortName ?? '').toUpperCase()
+        ? initialPrice
+        : undefined
+    );
+    next.id = cur.id;
+    drafts = drafts.map((d, i) => (i === idx ? next : d));
+    openMenu = null;
+    formError = null;
+  }
+
+  function setConditionOperator(idx: number, op: AlertConditionOperator) {
+    drafts = drafts.map((d, i) => (i === idx ? { ...d, operator: op } : d));
+    openMenu = null;
+    formError = null;
+  }
+
+  function setConditionRating(idx: number, target: TechRatingTarget) {
+    drafts = drafts.map((d, i) => (i === idx ? { ...d, ratingTarget: target } : d));
+    openMenu = null;
+    formError = null;
+  }
+
+  function setConditionSymbol(idx: number, raw: string) {
+    const norm = normalizeSymbolInput(raw);
+    drafts = drafts.map((d, i) =>
+      i === idx ? { ...d, symbol: norm.symbol, shortName: norm.shortName } : d
+    );
+    openMenu = null;
+    condSymQuery = '';
+    formError = null;
+  }
+
+  function addCondition() {
+    if (drafts.length >= 3) return;
+    const nextMetric: AlertConditionMetric =
+      drafts.some((d) => d.metric === 'tech_rating') ? 'rsi14' : 'tech_rating';
+    const next = defaultConditionFor(nextMetric, symbol, shortName);
+    drafts = [...drafts, next];
+    formError = null;
+    keepModalInViewport();
+  }
+
+  function removeCondition(idx: number) {
+    if (drafts.length <= 1) return;
+    drafts = drafts.filter((_, i) => i !== idx);
+    openMenu = null;
+    formError = null;
   }
 
   function openNotificationsSubView() {
@@ -394,10 +757,36 @@
   }
 
   function submitAlert() {
-    const num = parseTargetPrice(valueStr);
-    if (num === null || num <= 0) {
-      formError = 'Enter a valid target price.';
+    if (scope === 'watchlist' && !watchlistGroupId) {
+      formError = 'Select a Watchlist group to monitor.';
       return;
+    }
+
+    // Validate all 1–3 conditions
+    for (let i = 0; i < drafts.length; i++) {
+      const d = drafts[i];
+      if (d.metric === 'tech_rating') continue;
+      const num = parseNumeric(d.valueStr);
+      if (num === null) {
+        formError = `Condition ${i + 1}: enter a valid numeric value.`;
+        return;
+      }
+      if (d.metric === 'price' && num <= 0) {
+        formError = `Condition ${i + 1}: enter a positive target price.`;
+        return;
+      }
+      if (d.metric === 'rsi14' && (num < 0 || num > 100)) {
+        formError = `Condition ${i + 1}: RSI must be between 0 and 100.`;
+        return;
+      }
+      if (d.metric === 'range_pos' && (num < 0 || num > 100)) {
+        formError = `Condition ${i + 1}: Day Range Position must be between 0 and 100%.`;
+        return;
+      }
+      if (d.metric === 'change_pct' && d.operator === 'abs_gte' && num <= 0) {
+        formError = `Condition ${i + 1}: enter a positive % move (e.g. 1.5).`;
+        return;
+      }
     }
 
     let expiresAt: string | null;
@@ -420,16 +809,18 @@
       schedule
     };
 
-    const sameEditingSymbol =
-      Boolean(editingAlert) &&
-      (editingAlert?.symbol ?? '').toUpperCase() === symbol.toUpperCase();
+    const builtConditions = buildConditionsFromDrafts(drafts, scope, symbol, shortName);
+    const first = builtConditions[0];
+    const resolvedWlName = activeWatchlistGroup?.name ?? watchlistGroupName;
 
-    const conditionChanged =
-      !sameEditingSymbol ||
-      editingAlert?.operator !== operator ||
-      editingAlert?.targetPrice !== num;
+    const sameEditingTarget =
+      Boolean(editingAlert) &&
+      (scope === 'watchlist'
+        ? editingAlert?.watchlistGroupId === watchlistGroupId
+        : (editingAlert?.symbol ?? '').toUpperCase() === symbol.toUpperCase());
 
     const initialSeedPrice =
+      scope === 'symbol' &&
       typeof initialPrice === 'number' &&
       Number.isFinite(initialPrice) &&
       shortName.toUpperCase() === (initialShortName ?? '').toUpperCase()
@@ -440,21 +831,40 @@
     const alert: TradingAlert = {
       id: editingAlert?.id ?? makeWorkspaceId('alert'),
       kind: 'price',
-      symbol,
-      shortName,
-      operator,
-      targetPrice: num,
-      lastSeenPrice: sameEditingSymbol ? editingAlert?.lastSeenPrice : initialSeedPrice,
-      trigger,
+      scope,
+      symbol: scope === 'watchlist' ? watchlistGroupId : symbol,
+      shortName: scope === 'watchlist' ? resolvedWlName : shortName,
+      ...(scope === 'watchlist'
+        ? {
+            watchlistGroupId,
+            watchlistGroupName: resolvedWlName,
+            watchlistTriggerMode,
+            triggeredSymbols: sameEditingTarget ? editingAlert?.triggeredSymbols ?? {} : {}
+          }
+        : {}),
+      logic,
+      conditions: builtConditions,
+      // Mirror Condition 1 into legacy fields when it's a single-symbol price condition
+      operator:
+        scope === 'symbol' && first?.metric === 'price'
+          ? (first.operator as AlertOperator)
+          : undefined,
+      targetPrice:
+        scope === 'symbol' && first?.metric === 'price' ? first.value : undefined,
+      lastSeenPrice:
+        scope === 'symbol'
+          ? sameEditingTarget
+            ? editingAlert?.lastSeenPrice
+            : initialSeedPrice
+          : undefined,
+      trigger: scope === 'watchlist' ? (watchlistTriggerMode === 'once_first' ? 'once' : 'every') : trigger,
       expiresAt,
       message: (messageEdited ? String(customMessage ?? '').trim() : autoMessage) || autoMessage,
       status: editingAlert?.status === 'paused' ? 'paused' : 'active',
       notifications: notifPrefs,
       createdAt: editingAlert?.createdAt ?? nowIso,
       lastTriggeredAt:
-        conditionChanged ||
-        editingAlert?.status === 'triggered' ||
-        editingAlert?.status === 'expired'
+        editingAlert?.status === 'triggered' || editingAlert?.status === 'expired'
           ? undefined
           : editingAlert?.lastTriggeredAt
     };
@@ -476,7 +886,6 @@
 />
 
 {#if dragging}
-  <!-- Prevents cross-origin TradingView iframe from stealing pointer events while dragging -->
   <div class="drag-shield" aria-hidden="true"></div>
 {/if}
 
@@ -490,7 +899,6 @@
   role="dialog"
   aria-label={view === 'notifications' ? 'Alert notifications' : 'Create alert'}
 >
-  <!-- Single persistent draggable header (never unmounted on view switch) -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
     bind:this={headerEl}
@@ -505,31 +913,63 @@
           <button
             class="sym-trigger"
             type="button"
-            onclick={() => toggleMenu('symbol')}
+            onclick={() => toggleMenu('target')}
           >
-            <SymbolIcon symbol={shortName} size={18} />
-            <span>{shortName}</span>
-            <svg viewBox="0 0 16 16" aria-hidden="true">
+            {#if scope === 'watchlist'}
+              <span class="wl-chip-ic" aria-hidden="true">
+                <svg viewBox="0 0 16 16">
+                  <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7.5" />
+                </svg>
+              </span>
+              <span class="target-lbl">{activeWatchlistGroup?.name ?? watchlistGroupName}</span>
+            {:else}
+              <SymbolIcon symbol={shortName} size={18} />
+              <span class="target-lbl">{shortName}</span>
+            {/if}
+            <svg class="chev-ic" viewBox="0 0 16 16" aria-hidden="true">
               <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
             </svg>
           </button>
 
-          {#if openMenu === 'symbol'}
+          {#if openMenu === 'target'}
             <div class="custom-menu sym-dropdown">
+              {#if watchlistGroups.length > 0}
+                <div class="menu-sec-lbl">Watchlist Groups</div>
+                {#each watchlistGroups as grp (grp.id)}
+                  <button
+                    class="menu-opt sym-opt"
+                    class:active={scope === 'watchlist' && watchlistGroupId === grp.id}
+                    type="button"
+                    onclick={() => pickTargetWatchlist(grp)}
+                  >
+                    <span class="wl-chip-ic sm" aria-hidden="true">
+                      <svg viewBox="0 0 16 16">
+                        <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7.5" />
+                      </svg>
+                    </span>
+                    <strong>{grp.name}</strong>
+                    <span class="wl-cnt">{groupMemberCount(grp)} symbols</span>
+                  </button>
+                {/each}
+                <div class="menu-div"></div>
+              {/if}
+
+              <div class="menu-sec-lbl">Symbols</div>
               <input
                 type="text"
-                placeholder="Type symbol..."
+                placeholder="Type symbol (e.g. XAUUSD, DXY)..."
                 bind:value={symbolQuery}
                 onkeydown={(e) => {
-                  if (e.key === 'Enter' && symbolQuery.trim()) pickSymbol(symbolQuery);
+                  if (e.key === 'Enter' && symbolQuery.trim()) pickTargetSymbol(symbolQuery);
                 }}
               />
               <div class="menu-scroll">
-                {#each filteredSymbols as entry (entry.symbol)}
+                {#each filteredHeaderSymbols as entry (entry.symbol)}
                   <button
                     class="menu-opt sym-opt"
+                    class:active={scope === 'symbol' && shortName.toUpperCase() === entry.shortName.toUpperCase()}
                     type="button"
-                    onclick={() => pickSymbol(entry.symbol)}
+                    onclick={() => pickTargetSymbol(entry.symbol)}
                   >
                     <SymbolIcon symbol={entry.shortName} size={16} />
                     <strong>{entry.shortName}</strong>
@@ -569,65 +1009,222 @@
 
   {#if view === 'main'}
     <div class="modal-body">
-      <!-- Condition -->
+      <!-- Conditions (1 to 3 stacked flat blocks) -->
       <div class="form-row top-align">
-        <span class="row-label">Condition</span>
+        <span class="row-label">{drafts.length > 1 ? 'Conditions' : 'Condition'}</span>
         <div class="row-controls stack">
-          <div class="static-select">Price</div>
-
-          <!-- Custom operator dropdown (WebView2-safe) -->
-          <div class="menu-anchor" data-am-menu>
-            <button
-              class="custom-select"
-              type="button"
-              onclick={() => toggleMenu('operator')}
-            >
-              <span>{OPERATOR_LABELS[operator]}</span>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
-              </svg>
-            </button>
-            {#if openMenu === 'operator'}
-              <div class="custom-menu full">
-                {#each OPERATOR_OPTIONS as opt (opt.id)}
-                  <button
-                    class="menu-opt"
-                    class:active={operator === opt.id}
-                    type="button"
-                    onclick={() => {
-                      operator = opt.id;
-                      openMenu = null;
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                {/each}
+          {#each drafts as cond, idx (cond.id)}
+            {#if idx > 0}
+              <div class="logic-sep">
+                <div class="logic-line"></div>
+                {#if idx === 1}
+                  <div class="logic-seg" role="group" aria-label="Combine logic">
+                    <button
+                      type="button"
+                      class:active={logic === 'and'}
+                      onclick={() => (logic = 'and')}
+                    >
+                      AND
+                    </button>
+                    <button
+                      type="button"
+                      class:active={logic === 'or'}
+                      onclick={() => (logic = 'or')}
+                    >
+                      OR
+                    </button>
+                  </div>
+                {:else}
+                  <span class="logic-echo">{logic.toUpperCase()}</span>
+                {/if}
+                <div class="logic-line"></div>
+                <button
+                  class="cond-rm"
+                  type="button"
+                  title="Remove condition"
+                  aria-label="Remove condition {idx + 1}"
+                  onclick={() => removeCondition(idx)}
+                >
+                  ×
+                </button>
               </div>
             {/if}
-          </div>
 
-          <div class="value-split">
-            <div class="value-kind">Value</div>
-            <input
-              class="tv-input num"
-              type="text"
-              inputmode="decimal"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Target price"
-              value={valueStr}
-              oninput={(e) => {
-                valueStr = (e.currentTarget as HTMLInputElement).value;
-                formError = null;
-              }}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' && !openMenu) {
-                  e.preventDefault();
-                  submitAlert();
-                }
-              }}
-            />
-          </div>
+            <div class="cond-block">
+              {#if scope === 'symbol' && idx > 0}
+                <!-- Cross-symbol selector for Conditions 2 & 3 -->
+                <div class="cond-sym-row">
+                  <span class="cond-sym-lbl">Symbol</span>
+                  <div class="menu-anchor" data-am-menu>
+                    <button
+                      class="mini-sym-btn"
+                      type="button"
+                      onclick={() => {
+                        condSymQuery = '';
+                        toggleMenu(`csym-${idx}`);
+                      }}
+                    >
+                      <SymbolIcon symbol={cond.shortName} size={14} />
+                      <span>{cond.shortName}</span>
+                      {#if cond.shortName.toUpperCase() !== shortName.toUpperCase()}
+                        <span class="cross-tag">cross</span>
+                      {/if}
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                      </svg>
+                    </button>
+
+                    {#if openMenu === `csym-${idx}`}
+                      <div class="custom-menu sym-dropdown">
+                        <input
+                          type="text"
+                          placeholder="Cross-symbol (e.g. DXY, SPX)..."
+                          bind:value={condSymQuery}
+                          onkeydown={(e) => {
+                            if (e.key === 'Enter' && condSymQuery.trim()) {
+                              setConditionSymbol(idx, condSymQuery);
+                            }
+                          }}
+                        />
+                        <div class="menu-scroll">
+                          {#each filteredCondSymbols as entry (entry.symbol)}
+                            <button
+                              class="menu-opt sym-opt"
+                              class:active={cond.shortName.toUpperCase() === entry.shortName.toUpperCase()}
+                              type="button"
+                              onclick={() => setConditionSymbol(idx, entry.symbol)}
+                            >
+                              <SymbolIcon symbol={entry.shortName} size={15} />
+                              <strong>{entry.shortName}</strong>
+                              <span>{entry.description}</span>
+                            </button>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+
+              <!-- Metric + Operator row -->
+              <div class="cond-pair" class:single={cond.metric === 'tech_rating'}>
+                <div class="menu-anchor" data-am-menu>
+                  <button
+                    class="custom-select"
+                    type="button"
+                    onclick={() => toggleMenu(`metric-${idx}`)}
+                  >
+                    <span>{METRIC_LABELS[cond.metric]}</span>
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                    </svg>
+                  </button>
+                  {#if openMenu === `metric-${idx}`}
+                    <div class="custom-menu full">
+                      {#each scope === 'watchlist' ? WATCHLIST_METRICS : SYMBOL_METRICS as m (m)}
+                        <button
+                          class="menu-opt"
+                          class:active={cond.metric === m}
+                          type="button"
+                          onclick={() => setConditionMetric(idx, m)}
+                        >
+                          {METRIC_LABELS[m]}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+
+                {#if cond.metric === 'tech_rating'}
+                  <div class="menu-anchor" data-am-menu>
+                    <button
+                      class="custom-select"
+                      type="button"
+                      onclick={() => toggleMenu(`rating-${idx}`)}
+                    >
+                      <span>{RATING_TARGET_LABELS[cond.ratingTarget]}</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                      </svg>
+                    </button>
+                    {#if openMenu === `rating-${idx}`}
+                      <div class="custom-menu full">
+                        {#each RATING_OPTIONS as opt (opt.id)}
+                          <button
+                            class="menu-opt"
+                            class:active={cond.ratingTarget === opt.id}
+                            type="button"
+                            onclick={() => setConditionRating(idx, opt.id)}
+                          >
+                            {opt.label}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <div class="menu-anchor" data-am-menu>
+                    <button
+                      class="custom-select"
+                      type="button"
+                      onclick={() => toggleMenu(`op-${idx}`)}
+                    >
+                      <span>{operatorLabelFor(cond.metric, cond.operator)}</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                      </svg>
+                    </button>
+                    {#if openMenu === `op-${idx}`}
+                      <div class="custom-menu full">
+                        {#each operatorsForMetric(cond.metric) as opt (opt.id)}
+                          <button
+                            class="menu-opt"
+                            class:active={cond.operator === opt.id}
+                            type="button"
+                            onclick={() => setConditionOperator(idx, opt.id)}
+                          >
+                            {opt.label}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+
+              {#if cond.metric !== 'tech_rating'}
+                <div class="value-split">
+                  <div class="value-kind">{valueUnitFor(cond.metric)}</div>
+                  <input
+                    class="tv-input num"
+                    type="text"
+                    inputmode="decimal"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder={valuePlaceholderFor(cond.metric)}
+                    value={cond.valueStr}
+                    oninput={(e) => {
+                      const nextVal = (e.currentTarget as HTMLInputElement).value;
+                      drafts = drafts.map((d, i) => (i === idx ? { ...d, valueStr: nextVal } : d));
+                      formError = null;
+                    }}
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter' && !openMenu) {
+                        e.preventDefault();
+                        submitAlert();
+                      }
+                    }}
+                  />
+                </div>
+              {/if}
+            </div>
+          {/each}
+
+          {#if drafts.length < 3}
+            <button class="add-cond-btn" type="button" onclick={addCondition}>
+              + Add condition ({drafts.length}/3)
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -637,35 +1234,67 @@
       <div class="form-row">
         <span class="row-label">Trigger</span>
         <div class="row-controls">
-          <div class="menu-anchor inline-anchor" data-am-menu>
-            <button
-              class="inline-select"
-              type="button"
-              onclick={() => toggleMenu('trigger')}
-            >
-              <span>{TRIGGER_OPTIONS.find((t) => t.id === trigger)?.label ?? 'Once only'}</span>
-              <svg viewBox="0 0 16 16" aria-hidden="true">
-                <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
-              </svg>
-            </button>
-            {#if openMenu === 'trigger'}
-              <div class="custom-menu">
-                {#each TRIGGER_OPTIONS as opt (opt.id)}
-                  <button
-                    class="menu-opt"
-                    class:active={trigger === opt.id}
-                    type="button"
-                    onclick={() => {
-                      trigger = opt.id;
-                      openMenu = null;
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </div>
+          {#if scope === 'watchlist'}
+            <div class="menu-anchor inline-anchor" data-am-menu>
+              <button
+                class="inline-select"
+                type="button"
+                onclick={() => toggleMenu('wl-trigger')}
+              >
+                <span>{WATCHLIST_TRIGGER_LABELS[watchlistTriggerMode]}</span>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                </svg>
+              </button>
+              {#if openMenu === 'wl-trigger'}
+                <div class="custom-menu">
+                  {#each WATCHLIST_TRIGGER_OPTIONS as opt (opt.id)}
+                    <button
+                      class="menu-opt"
+                      class:active={watchlistTriggerMode === opt.id}
+                      type="button"
+                      onclick={() => {
+                        watchlistTriggerMode = opt.id;
+                        openMenu = null;
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <div class="menu-anchor inline-anchor" data-am-menu>
+              <button
+                class="inline-select"
+                type="button"
+                onclick={() => toggleMenu('trigger')}
+              >
+                <span>{TRIGGER_OPTIONS.find((t) => t.id === trigger)?.label ?? 'Once only'}</span>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+                </svg>
+              </button>
+              {#if openMenu === 'trigger'}
+                <div class="custom-menu">
+                  {#each TRIGGER_OPTIONS as opt (opt.id)}
+                    <button
+                      class="menu-opt"
+                      class:active={trigger === opt.id}
+                      type="button"
+                      onclick={() => {
+                        trigger = opt.id;
+                        openMenu = null;
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
       </div>
 
@@ -685,7 +1314,7 @@
               </svg>
             </button>
             {#if openMenu === 'expiry'}
-              <div class="custom-menu">
+              <div class="custom-menu up">
                 {#each EXPIRY_OPTIONS as opt (opt.id)}
                   <button
                     class="menu-opt"
@@ -713,7 +1342,7 @@
           <input
             class="tv-input"
             type="text"
-            placeholder="Custom note (e.g. Demand tap — watch 5m CHoCH)"
+            placeholder="Custom note (e.g. Demand tap + DXY breakdown)"
             value={displayedMessage}
             oninput={(e) => {
               messageEdited = true;
@@ -742,22 +1371,25 @@
     </div>
 
     <div class="modal-footer">
-      <button
-        class="btn-cancel"
-        type="button"
-        onclick={() => {
-          endDrag();
-          onClose();
-        }}
-      >
-        Cancel
-      </button>
-      <button class="btn-primary" type="button" onclick={submitAlert}>
-        {editingAlert ? 'Save' : 'Create'}
-      </button>
+      <span class="closed-hint">Live while open · Checks missed price levels on reopen</span>
+      <div class="footer-acts">
+        <button
+          class="btn-cancel"
+          type="button"
+          onclick={() => {
+            endDrag();
+            onClose();
+          }}
+        >
+          Cancel
+        </button>
+        <button class="btn-primary" type="button" onclick={submitAlert}>
+          {editingAlert ? 'Save' : 'Create'}
+        </button>
+      </div>
     </div>
   {:else}
-    <!-- Notifications sub-view (100% custom checkboxes & dropdowns — zero WebView2 OS popup freezes) -->
+    <!-- Notifications sub-view -->
     <div class="modal-body notif-body">
       <button
         class="check-item"
@@ -795,7 +1427,7 @@
         </span>
         <span class="check-copy">
           <span class="check-title">Show toast notification</span>
-          <span class="check-desc">Displays an onsite notification in the window corner.</span>
+          <span class="check-desc">Displays a clickable corner notification to jump straight to chart.</span>
         </span>
       </button>
 
@@ -903,9 +1535,11 @@
       {/if}
     </div>
 
-    <div class="modal-footer">
-      <button class="btn-cancel" type="button" onclick={cancelNotifications}>Cancel</button>
-      <button class="btn-primary" type="button" onclick={applyNotifications}>Apply</button>
+    <div class="modal-footer end">
+      <div class="footer-acts">
+        <button class="btn-cancel" type="button" onclick={cancelNotifications}>Cancel</button>
+        <button class="btn-primary" type="button" onclick={applyNotifications}>Apply</button>
+      </div>
     </div>
   {/if}
 </div>
@@ -918,7 +1552,6 @@
     cursor: grabbing;
   }
 
-  /* Exact dark glass tokens matching SettingsModal.svelte */
   .alert-modal {
     --am-bg: var(--dark-bg-glass);
     --am-menu-bg: var(--dark-bg-glass-strong);
@@ -938,7 +1571,7 @@
 
     position: fixed;
     z-index: 110;
-    width: 440px;
+    width: 460px;
     max-width: calc(100vw - 32px);
     border-radius: 12px;
     color: var(--am-text);
@@ -972,7 +1605,7 @@
   }
 
   .modal-header {
-    height: 54px;
+    height: 52px;
     padding: 0 18px;
     border-bottom: 1px solid var(--am-divider);
     display: flex;
@@ -990,12 +1623,14 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
   }
 
   .modal-title {
-    font-size: 16px;
+    font-size: 15.5px;
     font-weight: 700;
     letter-spacing: -0.015em;
+    white-space: nowrap;
   }
 
   .back-btn,
@@ -1010,6 +1645,7 @@
     color: var(--am-text);
     background: transparent;
     cursor: pointer;
+    flex: 0 0 30px;
   }
 
   .back-btn:hover,
@@ -1042,7 +1678,7 @@
 
   .sym-trigger {
     height: 28px;
-    padding: 0 8px 0 5px;
+    padding: 0 8px 0 6px;
     border: 0;
     border-radius: 7px;
     background: var(--am-hover);
@@ -1051,14 +1687,48 @@
     align-items: center;
     gap: 6px;
     font: inherit;
-    font-size: 13.5px;
+    font-size: 13px;
     font-weight: 700;
     cursor: pointer;
+    max-width: 210px;
   }
 
-  .sym-trigger svg,
+  .target-lbl {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wl-chip-ic {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: rgba(41, 98, 255, 0.16);
+    color: #2962ff;
+    display: grid;
+    place-items: center;
+    flex: 0 0 18px;
+  }
+
+  .wl-chip-ic.sm {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+  }
+
+  .wl-chip-ic svg {
+    width: 11px;
+    height: 11px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+  }
+
+  .chev-ic,
   .custom-select svg,
-  .inline-select svg {
+  .inline-select svg,
+  .mini-sym-btn svg {
     width: 13px;
     height: 13px;
     fill: none;
@@ -1066,13 +1736,14 @@
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+    flex: 0 0 13px;
   }
 
   .custom-menu {
     position: absolute;
     top: calc(100% + 5px);
     left: 0;
-    min-width: 168px;
+    min-width: 174px;
     padding: 5px;
     border-radius: 10px;
     border: 1px solid var(--am-border);
@@ -1095,7 +1766,22 @@
   }
 
   .sym-dropdown {
-    width: 248px;
+    width: 256px;
+  }
+
+  .menu-sec-lbl {
+    padding: 4px 8px 2px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--am-secondary);
+  }
+
+  .menu-div {
+    height: 1px;
+    margin: 4px 4px 2px;
+    background: var(--am-divider);
   }
 
   .sym-dropdown input {
@@ -1103,7 +1789,7 @@
     box-sizing: border-box;
     height: 28px;
     padding: 0 8px;
-    margin-bottom: 4px;
+    margin: 2px 0 4px;
     border-radius: 6px;
     border: 1px solid var(--am-control-border);
     background: var(--am-control-bg);
@@ -1114,9 +1800,10 @@
   }
 
   .menu-scroll {
-    max-height: 185px;
+    max-height: 175px;
     overflow-y: auto;
     scrollbar-width: none;
+    scroll-behavior: smooth;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -1128,7 +1815,7 @@
 
   .menu-opt {
     width: 100%;
-    padding: 7px 9px;
+    padding: 6px 9px;
     border: 0;
     border-radius: 6px;
     background: transparent;
@@ -1163,16 +1850,29 @@
     text-overflow: ellipsis;
   }
 
+  .wl-cnt {
+    margin-left: auto;
+    font-size: 11px;
+  }
+
   .modal-body {
-    padding: 16px 18px;
+    padding: 15px 18px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 11px;
+    max-height: calc(100vh - 170px);
+    overflow-y: auto;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+  }
+
+  .modal-body::-webkit-scrollbar {
+    display: none;
   }
 
   .form-row {
     display: grid;
-    grid-template-columns: 96px 1fr;
+    grid-template-columns: 90px 1fr;
     align-items: center;
     gap: 12px;
   }
@@ -1200,34 +1900,173 @@
     gap: 8px;
   }
 
-  .static-select,
+  /* Multi-condition compact hairline layout (no card boxes) */
+  .cond-block {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .cond-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+  }
+
+  .cond-sym-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .cond-sym-lbl {
+    font-size: 11px;
+    color: var(--am-secondary);
+  }
+
+  .mini-sym-btn {
+    height: 24px;
+    padding: 0 7px 0 5px;
+    border-radius: 6px;
+    border: 1px solid var(--am-control-border);
+    background: var(--am-control-bg);
+    color: var(--am-text);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .mini-sym-btn:hover {
+    background: var(--am-hover);
+  }
+
+  .cross-tag {
+    font-size: 9.5px;
+    font-weight: 600;
+    color: #2962ff;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .logic-sep {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 2px 0;
+  }
+
+  .logic-line {
+    flex: 1;
+    height: 1px;
+    background: var(--am-divider);
+  }
+
+  .logic-seg {
+    display: inline-flex;
+    border: 1px solid var(--am-control-border);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+
+  .logic-seg button {
+    height: 20px;
+    padding: 0 8px;
+    border: 0;
+    background: transparent;
+    color: var(--am-secondary);
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+
+  .logic-seg button.active {
+    background: var(--am-btn-bg);
+    color: var(--am-btn-fg);
+  }
+
+  .logic-echo {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--am-secondary);
+  }
+
+  .cond-rm {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--am-secondary);
+    font-size: 15px;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+  }
+
+  .cond-rm:hover {
+    color: #f23645;
+    background: var(--am-hover);
+  }
+
+  .add-cond-btn {
+    align-self: flex-start;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px dashed var(--am-control-border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--am-secondary);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
+  }
+
+  .add-cond-btn:hover {
+    color: var(--am-text);
+    border-color: var(--am-text);
+    background: var(--am-hover);
+  }
+
   .custom-select,
   .tv-input {
     width: 100%;
     box-sizing: border-box;
     height: 34px;
-    padding: 0 10px;
+    padding: 0 9px;
     border-radius: 8px;
     border: 1px solid var(--am-control-border);
     background: var(--am-control-bg);
     color: var(--am-text);
     font: inherit;
-    font-size: 13px;
+    font-size: 12.5px;
     outline: none;
-  }
-
-  .static-select {
-    display: flex;
-    align-items: center;
   }
 
   .custom-select {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
     cursor: pointer;
     text-align: left;
+  }
+
+  .custom-select span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .custom-select:hover {
@@ -1256,19 +2095,19 @@
 
   .value-split {
     display: grid;
-    grid-template-columns: 92px 1fr;
-    gap: 8px;
+    grid-template-columns: 82px 1fr;
+    gap: 7px;
   }
 
   .value-kind {
     height: 34px;
-    padding: 0 10px;
+    padding: 0 9px;
     border-radius: 8px;
     border: 1px solid var(--am-control-border);
     background: var(--am-control-bg);
     display: flex;
     align-items: center;
-    font-size: 13px;
+    font-size: 12px;
     color: var(--am-secondary);
   }
 
@@ -1430,17 +2269,35 @@
   }
 
   .modal-footer {
-    padding: 12px 18px 16px;
+    padding: 11px 18px 14px;
     border-top: 1px solid var(--am-divider);
     display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .modal-footer.end {
     justify-content: flex-end;
+  }
+
+  .closed-hint {
+    font-size: 10.5px;
+    color: var(--am-secondary);
+    line-height: 1.3;
+  }
+
+  .footer-acts {
+    display: flex;
+    align-items: center;
     gap: 8px;
+    flex: 0 0 auto;
   }
 
   .btn-cancel,
   .btn-primary {
     height: 34px;
-    padding: 0 16px;
+    padding: 0 15px;
     border-radius: 8px;
     font: inherit;
     font-size: 13px;
