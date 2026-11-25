@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AppLogoIcon from '../AppLogoIcon.svelte';
   import { formatUsd } from './instruments';
   import {
     computeAccountMetrics,
@@ -82,7 +83,7 @@
   >
     {#if connected}
       <span class="badge-circle" aria-hidden="true">
-        <span class="badge-text">PL</span>
+        <AppLogoIcon size={11} />
         <span class="conn-dot"></span>
       </span>
       <span class="pill-label">Trade</span>
@@ -104,7 +105,7 @@
     >
       <div class="pop-header">
         <div class="pop-acct-row">
-          <span class="pop-badge" aria-hidden="true">PL</span>
+          <span class="pop-badge" aria-hidden="true"><AppLogoIcon size={18} /></span>
           <div class="pop-acct-info">
             <div class="pop-acct-name">
               <span>{account.name}</span>
@@ -288,12 +289,6 @@
   .trade-pill-wrap.light .badge-circle {
     background: #131722;
     color: #ffffff;
-  }
-
-  .badge-text {
-    font-size: 8px;
-    font-weight: 800;
-    letter-spacing: -0.04em;
   }
 
   .conn-dot {

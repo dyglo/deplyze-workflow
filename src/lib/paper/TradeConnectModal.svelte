@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AppLogoIcon from '../AppLogoIcon.svelte';
   import {
     connectPaperLedger,
     createNewPaperAccount,
@@ -116,7 +117,7 @@
       </div>
 
       <button class="provider-card" type="button" onclick={() => (step = 'confirm')}>
-        <span class="provider-logo" aria-hidden="true">PL</span>
+        <span class="provider-logo" aria-hidden="true"><AppLogoIcon size={24} /></span>
         <div class="provider-copy">
           <div class="provider-name">Paper Ledger</div>
           <div class="provider-sub">Simulated trading engine · Local workspace</div>
@@ -132,7 +133,7 @@
     {:else if mode === 'connect' && step === 'confirm'}
       <div class="modal-head">
         <div class="confirm-title-wrap">
-          <span class="provider-logo sm" aria-hidden="true">PL</span>
+          <span class="provider-logo sm" aria-hidden="true"><AppLogoIcon size={19} /></span>
           <h2>Paper Ledger</h2>
         </div>
         <button class="close-x" type="button" aria-label="Close" onclick={onClose}>
@@ -175,7 +176,7 @@
       <!-- Settings & Account Management -->
       <div class="modal-head">
         <div class="confirm-title-wrap">
-          <span class="provider-logo sm" aria-hidden="true">PL</span>
+          <span class="provider-logo sm" aria-hidden="true"><AppLogoIcon size={19} /></span>
           <h2>Paper Ledger Settings</h2>
         </div>
         <button class="close-x" type="button" aria-label="Close" onclick={onClose}>

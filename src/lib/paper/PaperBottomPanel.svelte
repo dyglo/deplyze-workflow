@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AppLogoIcon from '../AppLogoIcon.svelte';
   import { savePaperTradeToPlaybook } from '../playbook/store';
   import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
@@ -455,7 +456,7 @@
             onclick={() => (brokerMenuOpen = !brokerMenuOpen)}
           >
             <span class="pl-ico" aria-hidden="true">
-              <span class="pl-txt">PL</span>
+              <AppLogoIcon size={11} />
               <span class="pl-dot"></span>
             </span>
             <span class="broker-title">Paper Ledger</span>

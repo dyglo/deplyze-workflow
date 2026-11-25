@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import PanelShell from './PanelShell.svelte';
+  import SessionClockStrip from './SessionClockStrip.svelte';
+  import { loadRoutinesState, type RitualItem } from '../routines/store';
   import {
     fetchCalendarWeek,
     getLocalTimeZone,
@@ -74,6 +76,11 @@
   let paperSentFeedback = $state(false);
   let paperState = $state<PaperLedgerState | null>(null);
   let paperQuotes = $state<Record<string, PaperLiveQuote>>({});
+
+  // One-time non-destructive migration banner for retired Routines rituals
+  const ROUTINES_MIGRATION_KEY = 'deplyzeworkflow.routines_migrated_v1';
+  let legacyRituals = $state<RitualItem[]>([]);
+  let showLegacyBanner = $state(false);
 
   const paperEquity = $derived.by(() => {
     if (!paperState?.connected) return null;
@@ -192,6 +199,21 @@
     const unsubPaperQuotes = subscribePaperQuotes((q) => {
       paperQuotes = q;
     });
+
+    const alreadyDismissed =
+      typeof localStorage !== 'undefined' && localStorage.getItem(ROUTINES_MIGRATION_KEY) === '1';
+    if (!alreadyDismissed) {
+      void loadRoutinesState()
+        .then((rs) => {
+          if (Array.isArray(rs?.items) && rs.items.length > 0) {
+            legacyRituals = rs.items;
+            showLegacyBanner = true;
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+    }
 
     return () => {
       unsubTasks();
@@ -340,6 +362,50 @@
       todos: tasksState.todos.filter((t) => t.id !== id)
     });
   }
+
+  function dismissLegacyRoutines() {
+    showLegacyBanner = false;
+    try {
+      localStorage.setItem(ROUTINES_MIGRATION_KEY, '1');
+    } catch {
+      // ignore
+    }
+  }
+
+  function importLegacyToChecklist() {
+    const existing = new Set(tasksState.rules.map((r) => r.label.trim().toLowerCase()));
+    const added = legacyRituals
+      .map((item) => item.label.trim())
+      .filter((label) => label.length > 0 && !existing.has(label.toLowerCase()))
+      .map((label) => ({
+        id: makeWorkspaceId('rule'),
+        label,
+        checked: false
+      }));
+    if (added.length > 0) {
+      commit({ ...tasksState, rules: [...tasksState.rules, ...added] });
+    }
+    dismissLegacyRoutines();
+  }
+
+  function importLegacyToTodo() {
+    const existing = new Set(tasksState.todos.map((t) => t.title.trim().toLowerCase()));
+    const nowIso = new Date().toISOString();
+    const added = legacyRituals
+      .map((item) => item.label.trim())
+      .filter((title) => title.length > 0 && !existing.has(title.toLowerCase()))
+      .map((title) => ({
+        id: makeWorkspaceId('todo'),
+        title,
+        symbol: 'Routine',
+        done: false,
+        createdAt: nowIso
+      }));
+    if (added.length > 0) {
+      commit({ ...tasksState, todos: [...added, ...tasksState.todos] });
+    }
+    dismissLegacyRoutines();
+  }
 </script>
 
 <PanelShell {theme} title="Tasks" {onClose}>
@@ -351,6 +417,22 @@
   {/snippet}
 
   <div class="tasks-panel" class:light={theme === 'light'}>
+    <!-- Market Session Clock moved from retired Routines panel -->
+    <SessionClockStrip {theme} />
+
+    {#if showLegacyBanner && legacyRituals.length > 0}
+      <div class="legacy-banner">
+        <div class="lb-text">
+          Routines moved here ({legacyRituals.length} saved rituals kept in <code>routines.json</code>). Import them?
+        </div>
+        <div class="lb-acts">
+          <button class="lb-btn" type="button" onclick={importLegacyToChecklist}>To Checklist</button>
+          <button class="lb-btn" type="button" onclick={importLegacyToTodo}>To To-Do</button>
+          <button class="lb-btn ghost" type="button" onclick={dismissLegacyRoutines}>Dismiss</button>
+        </div>
+      </div>
+    {/if}
+
     <!-- Segmented tab header -->
     <div class="tab-bar" role="tablist">
       <button
@@ -1255,6 +1337,54 @@
   .log-btn.primary-paper:hover:not(:disabled) {
     background: var(--tk-btn-bg);
     opacity: 0.9;
+  }
+
+  .legacy-banner {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--tk-border);
+    background: var(--tk-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .lb-text {
+    font-size: 11px;
+    line-height: 1.38;
+    color: var(--tk-secondary);
+  }
+
+  .lb-text code {
+    font-size: 10.5px;
+    color: var(--tk-text);
+  }
+
+  .lb-acts {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .lb-btn {
+    height: 23px;
+    padding: 0 8px;
+    border-radius: 5px;
+    border: 1px solid var(--tk-border);
+    background: transparent;
+    color: var(--tk-text);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .lb-btn:hover {
+    background: var(--tk-hover);
+  }
+
+  .lb-btn.ghost {
+    border-color: transparent;
+    color: var(--tk-secondary);
   }
 
   /* To-Do */

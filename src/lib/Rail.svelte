@@ -9,7 +9,7 @@
   import LayoutPopover from './panels/LayoutPopover.svelte';
   import NewsFlowPanel from './panels/NewsFlowPanel.svelte';
   import NotesPanel from './panels/NotesPanel.svelte';
-  import RoutinesPanel from './panels/RoutinesPanel.svelte';
+  import ScreenerPanel from './panels/ScreenerPanel.svelte';
   import SettingsModal from './panels/SettingsModal.svelte';
   import TasksPanel from './panels/TasksPanel.svelte';
   import WatchlistPanel from './panels/WatchlistPanel.svelte';
@@ -43,6 +43,9 @@
       view: InsightsViewId
     ) => void;
     onSelectInsightsSymbol: (symbol: string, shortName: string, description: string) => void;
+    screenerFullscreen?: boolean;
+    onToggleScreenerFullscreen?: () => void;
+    onCloseScreenerFullscreen?: () => void;
   }
 
   let {
@@ -63,7 +66,10 @@
     onOpenOnChart,
     insightsOpen = false,
     onOpenSymbolInsights,
-    onSelectInsightsSymbol
+    onSelectInsightsSymbol,
+    screenerFullscreen = false,
+    onToggleScreenerFullscreen,
+    onCloseScreenerFullscreen
   }: Props = $props();
 
   type RailId =
@@ -73,7 +79,7 @@
     | 'note'
     | 'ai'
     | 'alerts'
-    | 'routines'
+    | 'screener'
     | 'favorites'
     | 'news'
     | 'cloud';
@@ -85,7 +91,7 @@
     'note',
     'ai',
     'alerts',
-    'routines',
+    'screener',
     'favorites',
     'news',
     'cloud'
@@ -94,6 +100,7 @@
 
   function parseRailId(raw: unknown): RailId | null {
     if (typeof raw !== 'string') return null;
+    if (raw === 'routines') return 'screener';
     return VALID_RAIL_IDS.includes(raw as RailId) ? (raw as RailId) : null;
   }
 
@@ -173,11 +180,14 @@
 
   function select(id: RailId) {
     layoutAnchor = null;
+    if (id !== 'screener') onCloseScreenerFullscreen?.();
     active = active === id ? null : id;
+    if (active === null) onCloseScreenerFullscreen?.();
     persistRail(active);
   }
 
   function closePanel() {
+    onCloseScreenerFullscreen?.();
     active = null;
     persistRail(null);
   }
@@ -250,8 +260,15 @@
     {onSelectSymbol}
     onClose={closePanel}
   />
-{:else if active === 'routines'}
-  <RoutinesPanel {theme} onClose={closePanel} />
+{:else if active === 'screener' && !screenerFullscreen}
+  <ScreenerPanel
+    {theme}
+    fullscreen={false}
+    onToggleFullscreen={() => onToggleScreenerFullscreen?.()}
+    {onSelectSymbol}
+    {onOpenSymbolInsights}
+    onClose={closePanel}
+  />
 {:else if active === 'favorites'}
   <FavoritesPanel
     {theme}
@@ -403,16 +420,17 @@
 
   <button
     class="rail-button"
-    class:active={active === 'routines'}
+    class:active={active === 'screener'}
     type="button"
-    aria-label="Routines"
-    title="Routines"
-    aria-pressed={active === 'routines'}
-    onclick={() => select('routines')}
+    aria-label="Screener & Heatmap"
+    title="Screener & Heatmap"
+    aria-pressed={active === 'screener'}
+    onclick={() => select('screener')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M11 6.25h2.5a3.75 3.75 0 0 1 0 7.5h-7a3.75 3.75 0 0 1 0-7.5" />
-      <circle cx="7.25" cy="6.25" r="1.15" />
+      <rect x="2.75" y="3.25" width="14.5" height="13.5" rx="2.75" />
+      <path d="M6.25 7.5h4.5M6.25 10.5h7.5M6.25 13.5h5.5" />
+      <circle cx="13.5" cy="7.5" r="1.25" />
     </svg>
   </button>
 

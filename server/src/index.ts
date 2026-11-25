@@ -30,6 +30,7 @@ import {
 } from './insights/service.js';
 import { getSymbolTechnicalsPayload } from './insights/technicals.js';
 import { getSymbolSeasonalsPayload } from './insights/seasonals.js';
+import { getScreenerPayload } from './screener/service.js';
 import type { EdgeAuditEntryInput, TechBiasInput } from './insights/types.js';
 
 /** Load local .env files (repo root + server dir) without overriding real environment variables. */
@@ -141,7 +142,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.15',
+        version: '0.1.16',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -155,7 +156,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.15',
+      version: '0.1.16',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
@@ -163,6 +164,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         'GET /api/quotes?symbols=OANDA:XAUUSD,TVC:DXY',
         'GET /api/quotes/sparkline?symbol=OANDA:XAUUSD',
         'GET /api/quotes/bars?symbol=OANDA:XAUUSD&from=1730000000',
+        'GET /api/screener?symbols=OANDA:XAUUSD,TVC:DXY',
+        'POST /api/screener',
         'GET /api/news?mode=symbol&symbol=OANDA:XAUUSD',
         'GET /api/news/article?url=...',
         'GET /api/news/providers',
@@ -268,6 +271,34 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       .filter(Boolean);
     const payload = await getQuotesPayload(symbols);
     sendJson(res, 200, payload, 'public, max-age=5');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/screener') {
+    const raw = url.searchParams.get('symbols') ?? '';
+    const symbols = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const force = url.searchParams.get('force') === '1';
+    const payload = await getScreenerPayload(symbols, force);
+    sendJson(res, 200, payload, 'public, max-age=10');
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/screener') {
+    let body: { symbols?: string[]; force?: boolean };
+    try {
+      body = await readJsonBody<{ symbols?: string[]; force?: boolean }>(req, 128 * 1024);
+    } catch (err) {
+      sendJson(res, 400, { error: (err as Error).message }, 'no-store');
+      return;
+    }
+    const symbols = Array.isArray(body.symbols)
+      ? body.symbols.filter((s): s is string => typeof s === 'string')
+      : [];
+    const payload = await getScreenerPayload(symbols, Boolean(body.force));
+    sendJson(res, 200, payload, 'no-store');
     return;
   }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AppLogoIcon from '../AppLogoIcon.svelte';
   import {
     calculatePositionSize,
     loadTasksState,
@@ -550,7 +551,7 @@
     <!-- Top Header -->
     <header class="ticket-header">
       <div class="th-left">
-        <span class="pl-mark" aria-hidden="true">PL</span>
+        <span class="pl-mark" aria-hidden="true"><AppLogoIcon size={12} /></span>
         <span class="th-sym">{shortName}</span>
       </div>
 

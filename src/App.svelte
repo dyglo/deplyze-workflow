@@ -5,6 +5,7 @@
   import ChartGrid from './lib/ChartGrid.svelte';
   import SymbolInsightsPage from './lib/insights/SymbolInsightsPage.svelte';
   import type { InsightsViewId } from './lib/insights/symbolInsightsApi';
+  import ScreenerPanel from './lib/panels/ScreenerPanel.svelte';
   import ClosePositionModal from './lib/paper/ClosePositionModal.svelte';
   import ModifyPositionModal from './lib/paper/ModifyPositionModal.svelte';
   import OrderTicketPanel from './lib/paper/OrderTicketPanel.svelte';
@@ -79,6 +80,7 @@
   let paperModalMode: 'connect' | 'settings' | null = null;
   let closingPosition: PaperPosition | null = null;
   let modifyingPosition: { position: PaperPosition; focusField: 'tp' | 'sl' | null } | null = null;
+  let screenerFullscreen = false;
   let symbolInsights: {
     symbol: string;
     shortName: string;
@@ -636,6 +638,23 @@
             onClose={closeSymbolInsights}
           />
         {/if}
+
+        {#if screenerFullscreen}
+          <ScreenerPanel
+            {theme}
+            fullscreen={true}
+            onToggleFullscreen={() => (screenerFullscreen = false)}
+            onSelectSymbol={(sym, short) => {
+              screenerFullscreen = false;
+              loadSymbolInActiveTab(sym, short);
+            }}
+            onOpenSymbolInsights={(sym, short, desc, v) => {
+              screenerFullscreen = false;
+              openSymbolInsights(sym, short, desc, v);
+            }}
+            onClose={() => (screenerFullscreen = false)}
+          />
+        {/if}
       </div>
 
       {#if paperState?.connected}
@@ -682,6 +701,9 @@
       insightsOpen={Boolean(symbolInsights)}
       onOpenSymbolInsights={openSymbolInsights}
       onSelectInsightsSymbol={syncInsightsSymbol}
+      {screenerFullscreen}
+      onToggleScreenerFullscreen={() => (screenerFullscreen = !screenerFullscreen)}
+      onCloseScreenerFullscreen={() => (screenerFullscreen = false)}
     />
   </div>
 
