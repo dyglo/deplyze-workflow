@@ -1,4 +1,16 @@
+import { getCalendarEventsPayload } from '../calendar/service.js';
+import type { CountryCode, EconomicEvent } from '../calendar/types.js';
+import {
+  fetchOandaSeries,
+  fetchOandaSyntheticDxy,
+  isOandaConfigured,
+  type OandaGranularity
+} from '../quotes/oanda.js';
 import { getQuotesPayload, type MarketQuote } from '../quotes/service.js';
+import {
+  recordSystemAuditCandidate,
+  type AuditTrendAlign
+} from './auditLog.js';
 import { normalizeShortSymbol } from './macro.js';
 
 export type DislocationTimeframe = '15m' | '1h' | '4h';
@@ -12,6 +24,7 @@ export type VerdictKind =
   | 'rich'
   | 'cheap'
   | 'weak_fit'
+  | 'event_lock'
   | 'equilibrium';
 
 export interface OhlcBar {
@@ -20,6 +33,58 @@ export interface OhlcBar {
   high: number;
   low: number;
   close: number;
+  volume?: number;
+  spread?: number;
+}
+
+export interface FeedInfo {
+  source: 'oanda' | 'hybrid' | 'yahoo';
+  label: string;
+  instrument: string | null;
+  liveSpreadPx: number | null;
+  liveSpreadPct: number | null;
+  spreadInAtrPct: number | null;
+  wideSpread: boolean;
+}
+
+export interface EventRiskInfo {
+  status: 'clear' | 'caution' | 'locked';
+  headline: string;
+  eventTitle: string | null;
+  country: string | null;
+  minutesUntil: number | null;
+}
+
+export interface HtfContextInfo {
+  timeframeLabel: '4H' | 'Daily';
+  bias: 'bull' | 'bear' | 'range';
+  biasLabel: string;
+  alignment: 'with_trend' | 'counter_trend' | 'neutral';
+  alignmentLabel: string;
+  summary: string;
+}
+
+export interface DriverLinkInfo {
+  status: 'stable' | 'shifting' | 'breaking';
+  label: string;
+  baselineFitPct: number;
+  recentFitPct: number;
+  summary: string;
+}
+
+export interface CandleConfirmInfo {
+  turnConfirmed: boolean;
+  label: string;
+  volumeRatio: number | null;
+  volumeLabel: string;
+}
+
+export interface SetupLevelsInfo {
+  actionableBias: 'buy_watch' | 'sell_watch' | 'wait';
+  expectedTarget: number;
+  invalidationLevel: number | null;
+  invalidationLabel: string | null;
+  distanceInAvgMoves: number;
 }
 
 export interface DriverContribution {
@@ -27,13 +92,14 @@ export interface DriverContribution {
   shortName: string;
   price: number | null;
   windowChangePct: number;
-  beta: number; // stationary return elasticity
-  correlation: number; // bar-to-bar return correlation (-1..1)
-  weightPct: number; // share of model impact (0..100)
+  beta: number;
+  correlation: number;
+  weightPct: number;
   pull: 'up' | 'down' | 'flat';
   lagBars: number;
   lagCorrelation: number;
   active: boolean;
+  feed: 'oanda' | 'yahoo';
 }
 
 export interface SmtSignal {
@@ -53,11 +119,13 @@ export interface SmtSignal {
   peerShortName: string;
   relation: 'positive' | 'inverse';
   sweptBy: 'target' | 'peer';
+  alignedWithHtf: 'with_trend' | 'counter_trend' | 'neutral';
+  contextNote: string;
   targetLevel: number;
   targetExtreme: number;
   peerLevel: number;
   peerExtreme: number;
-  peerGapAtr: number; // how many peer avg-bar moves short of confirming
+  peerGapAtr: number;
   peerGapPct: number;
   minutesAgo: number;
   freshness: 'fresh' | 'recent';
@@ -88,7 +156,7 @@ export interface LeadLagReadout {
 
 export interface ResidualPoint {
   ts: number;
-  z: number; // stretch multiple vs typical H-bar gap
+  z: number;
   spot: number;
   fair: number;
 }
@@ -100,7 +168,12 @@ export interface ScoreBreakdown {
   maxFitPts: number;
   smtPts: number;
   maxSmtPts: number;
+  alignBonus: number;
+  maxAlignBonus: number;
   conflictPenalty: number;
+  decouplingPenalty: number;
+  counterTrendPenalty: number;
+  eventLocked: boolean;
   total: number;
   explanation: string;
 }
@@ -109,14 +182,20 @@ export interface DislocationPayload {
   symbol: string;
   shortName: string;
   timeframe: DislocationTimeframe;
+  feedInfo: FeedInfo;
+  eventRisk: EventRiskInfo;
+  htfContext: HtfContextInfo;
+  driverLink: DriverLinkInfo;
+  candleConfirm: CandleConfirmInfo;
+  setupLevels: SetupLevelsInfo;
   spotPrice: number;
   fairValuePrice: number;
   gapPoints: number;
   gapPct: number;
-  zScore: number; // stretch multiple (plain UI shows e.g. +1.8x normal)
-  rSquared: number; // honest Adjusted Return R² (0..0.99)
+  zScore: number;
+  rSquared: number;
   driverFitLabel: 'Strong' | 'Moderate' | 'Weak';
-  atr: number; // avg bar range (14 bars)
+  atr: number;
   atrPct: number;
   windowBars: number;
   horizonBars: number;
@@ -125,7 +204,7 @@ export interface DislocationPayload {
   verdictLabel: string;
   verdictDetail: string;
   verdictReason: string;
-  convictionScore: number; // 0..100
+  convictionScore: number;
   scoreBreakdown: ScoreBreakdown;
   drivers: DriverContribution[];
   leadLag: LeadLagReadout | null;
@@ -138,12 +217,19 @@ export interface DislocationPayload {
 export interface DislocationScanRow {
   symbol: string;
   shortName: string;
+  feedSource: 'oanda' | 'hybrid' | 'yahoo';
   spotPrice: number;
   fairValuePrice: number;
   gapPct: number;
   zScore: number;
   rSquared: number;
   driverFitLabel: 'Strong' | 'Moderate' | 'Weak';
+  driverLinkStatus: 'stable' | 'shifting' | 'breaking';
+  htfBias: 'bull' | 'bear' | 'range';
+  htfAlignment: 'with_trend' | 'counter_trend' | 'neutral';
+  eventRiskStatus: 'clear' | 'caution' | 'locked';
+  eventRiskLabel: string | null;
+  turnConfirmed: boolean;
   atr: number;
   verdict: VerdictKind;
   verdictLabel: string;
@@ -157,6 +243,7 @@ export interface DislocationScanRow {
 
 export interface DislocationScanPayload {
   timeframe: DislocationTimeframe;
+  oandaActive: boolean;
   rows: DislocationScanRow[];
   updatedAt: string;
 }
@@ -253,7 +340,6 @@ const SCAN_UNIVERSE: string[] = [
   'BITSTAMP:BTCUSD'
 ];
 
-// Clean, high-correlation structural peers (avoids noisy weak cross-pairs)
 const MODEL_SPECS: Record<string, { drivers: DriverSpec[]; peers: PeerSpec[] }> = {
   XAUUSD: {
     drivers: [
@@ -450,6 +536,26 @@ const MODEL_SPECS: Record<string, { drivers: DriverSpec[]; peers: PeerSpec[] }> 
   }
 };
 
+function sensitiveCountriesFor(shortName: string): CountryCode[] {
+  const s = shortName.toUpperCase();
+  const out = new Set<CountryCode>();
+  if (s.includes('USD') || ['XAUUSD', 'XAGUSD', 'NAS100', 'SPX', 'US30', 'USOIL', 'BTCUSD', 'ETHUSD', 'DXY'].includes(s)) {
+    out.add('US');
+  }
+  if (s.includes('EUR')) {
+    out.add('EU');
+    out.add('DE');
+  }
+  if (s.includes('GBP') || s === 'UK100') out.add('GB');
+  if (s.includes('JPY')) out.add('JP');
+  if (s.includes('AUD')) out.add('AU');
+  if (s.includes('CAD')) out.add('CA');
+  if (s.includes('NZD')) out.add('NZ');
+  if (s.includes('CHF')) out.add('CH');
+  if (out.size === 0) out.add('US');
+  return Array.from(out);
+}
+
 function resolveModelSpec(rawSymbol: string): SymbolModelSpec {
   const short = normalizeShortSymbol(rawSymbol);
   const canonical = rawSymbol.includes(':')
@@ -509,18 +615,31 @@ function resolveModelSpec(rawSymbol: string): SymbolModelSpec {
   };
 }
 
-// ── Cached Yahoo OHLC Fetcher ────────────────────────────────────────────────
+// ── Hybrid Market Data Layer (OANDA v20 Primary + Yahoo Macro Fallback) ──────
+
+interface SeriesBundle {
+  bars: OhlcBar[];
+  source: 'oanda' | 'yahoo';
+  instrument: string | null;
+  livePrice: number | null;
+  liveSpreadPx: number | null;
+  liveSpreadPct: number | null;
+}
 
 const FETCH_TIMEOUT_MS = 10_000;
-const BAR_CACHE_TTL_MS = 60_000;
-const PAYLOAD_CACHE_TTL_MS = 45_000;
-const SCAN_CACHE_TTL_MS = 75_000;
+const BAR_CACHE_TTL_MS = 55_000;
+const PAYLOAD_CACHE_TTL_MS = 40_000;
+const SCAN_CACHE_TTL_MS = 65_000;
+const CALENDAR_CACHE_TTL_MS = 5 * 60_000;
 
-const barCache = new Map<string, { bars: OhlcBar[]; fetchedAt: number }>();
-const barInflight = new Map<string, Promise<OhlcBar[]>>();
+const yahooBarCache = new Map<string, { bars: OhlcBar[]; fetchedAt: number }>();
+const yahooBarInflight = new Map<string, Promise<OhlcBar[]>>();
 const payloadCache = new Map<string, { data: DislocationPayload; fetchedAt: number }>();
 const scanCache = new Map<string, { data: DislocationScanPayload; fetchedAt: number }>();
 const scanInflight = new Map<string, Promise<DislocationScanPayload>>();
+
+let calendarCache: { events: EconomicEvent[]; fetchedAt: number } | null = null;
+let calendarInflight: Promise<EconomicEvent[]> | null = null;
 
 export function parseTimeframe(raw: string | null | undefined): DislocationTimeframe {
   const clean = (raw ?? '').trim().toLowerCase();
@@ -535,9 +654,16 @@ function stepSecondsForTf(tf: DislocationTimeframe): number {
   return 3_600;
 }
 
-function yahooQueryForTf(tf: DislocationTimeframe): { range: string; interval: string } {
+function oandaPlanForTf(tf: DislocationTimeframe): { gran: OandaGranularity; count: number } {
+  if (tf === '15m') return { gran: 'M15', count: 240 };
+  if (tf === '4h') return { gran: 'H4', count: 160 };
+  return { gran: 'H1', count: 220 };
+}
+
+function yahooQueryForTf(tf: DislocationTimeframe | '1d'): { range: string; interval: string } {
   if (tf === '15m') return { range: '5d', interval: '15m' };
   if (tf === '4h') return { range: '3mo', interval: '1h' };
+  if (tf === '1d') return { range: '6mo', interval: '1d' };
   return { range: '1mo', interval: '1h' };
 }
 
@@ -559,7 +685,7 @@ function aggregateTo4h(hourly: OhlcBar[]): OhlcBar[] {
 
 async function fetchYahooSeries(
   shortName: string,
-  tf: DislocationTimeframe,
+  tf: DislocationTimeframe | '1d',
   force = false
 ): Promise<OhlcBar[]> {
   const norm = normalizeShortSymbol(shortName);
@@ -568,11 +694,11 @@ async function fetchYahooSeries(
   const now = Date.now();
 
   if (!force) {
-    const cached = barCache.get(cacheKey);
+    const cached = yahooBarCache.get(cacheKey);
     if (cached && now - cached.fetchedAt < BAR_CACHE_TTL_MS) {
       return cached.bars;
     }
-    const existing = barInflight.get(cacheKey);
+    const existing = yahooBarInflight.get(cacheKey);
     if (existing) return existing;
   }
 
@@ -583,7 +709,7 @@ async function fetchYahooSeries(
     try {
       const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?range=${range}&interval=${interval}&includePrePost=true`;
       const res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 DeplyzeWorkflow/0.1.19' },
+        headers: { 'User-Agent': 'Mozilla/5.0 DeplyzeWorkflow/0.1.20' },
         signal: controller.signal
       });
       if (!res.ok) return [];
@@ -642,27 +768,189 @@ async function fetchYahooSeries(
 
       rawBars.sort((a, b) => a.ts - b.ts);
       const bars = tf === '4h' ? aggregateTo4h(rawBars) : rawBars;
-      barCache.set(cacheKey, { bars, fetchedAt: Date.now() });
-      if (barCache.size > 90) {
-        const oldest = barCache.keys().next().value;
-        if (oldest) barCache.delete(oldest);
+      yahooBarCache.set(cacheKey, { bars, fetchedAt: Date.now() });
+      if (yahooBarCache.size > 100) {
+        const oldest = yahooBarCache.keys().next().value;
+        if (oldest) yahooBarCache.delete(oldest);
       }
       return bars;
     } catch (err) {
-      console.warn(`[insights:dislocation] bars ${yahooSym} (${tf}) failed:`, (err as Error).message);
-      const fallback = barCache.get(cacheKey);
+      console.warn(`[insights:dislocation] yahoo ${yahooSym} (${tf}) failed:`, (err as Error).message);
+      const fallback = yahooBarCache.get(cacheKey);
       return fallback?.bars ?? [];
     } finally {
       clearTimeout(timer);
-      barInflight.delete(cacheKey);
+      yahooBarInflight.delete(cacheKey);
     }
   })();
 
-  barInflight.set(cacheKey, task);
+  yahooBarInflight.set(cacheKey, task);
   return task;
 }
 
-// ── Math Utilities (Stationary Return OLS + Adjusted R², Correlation, ATR) ──
+async function fetchHybridSeries(
+  shortName: string,
+  tf: DislocationTimeframe,
+  force = false
+): Promise<SeriesBundle> {
+  const norm = normalizeShortSymbol(shortName);
+
+  if (isOandaConfigured()) {
+    const { gran, count } = oandaPlanForTf(tf);
+    if (norm === 'DXY') {
+      const synth = await fetchOandaSyntheticDxy(gran, count, force);
+      if (synth && synth.bars.length >= 24) {
+        return {
+          bars: synth.bars,
+          source: 'oanda',
+          instrument: synth.instrument,
+          livePrice: synth.livePrice,
+          liveSpreadPx: synth.liveSpreadPx,
+          liveSpreadPct: synth.liveSpreadPct
+        };
+      }
+    } else if (norm !== 'US10Y' && norm !== 'VIX') {
+      const oanda = await fetchOandaSeries(norm, gran, count, force);
+      if (oanda && oanda.bars.length >= 24) {
+        return {
+          bars: oanda.bars,
+          source: 'oanda',
+          instrument: oanda.instrument,
+          livePrice: oanda.livePrice,
+          liveSpreadPx: oanda.liveSpreadPx,
+          liveSpreadPct: oanda.liveSpreadPct
+        };
+      }
+    }
+  }
+
+  const yahooBars = await fetchYahooSeries(norm, tf, force);
+  return {
+    bars: yahooBars,
+    source: 'yahoo',
+    instrument: YAHOO_MAP[norm] ?? norm,
+    livePrice: yahooBars.length > 0 ? yahooBars[yahooBars.length - 1].close : null,
+    liveSpreadPx: null,
+    liveSpreadPct: null
+  };
+}
+
+async function fetchHigherTfBars(
+  shortName: string,
+  tf: DislocationTimeframe,
+  force = false
+): Promise<{ label: '4H' | 'Daily'; bars: OhlcBar[] }> {
+  const norm = normalizeShortSymbol(shortName);
+  const label: '4H' | 'Daily' = tf === '4h' ? 'Daily' : '4H';
+  const oandaGran: OandaGranularity = tf === '4h' ? 'D' : 'H4';
+  const count = 90;
+
+  if (isOandaConfigured()) {
+    if (norm === 'DXY') {
+      const synth = await fetchOandaSyntheticDxy(oandaGran, count, force);
+      if (synth && synth.bars.length >= 40) return { label, bars: synth.bars };
+    } else if (norm !== 'US10Y' && norm !== 'VIX') {
+      const oanda = await fetchOandaSeries(norm, oandaGran, count, force);
+      if (oanda && oanda.bars.length >= 40) return { label, bars: oanda.bars };
+    }
+  }
+
+  const fallbackBars = await fetchYahooSeries(norm, tf === '4h' ? '1d' : '4h', force);
+  return { label, bars: fallbackBars };
+}
+
+// ── Live Macro Event Risk Lock (Wired to App Economic Calendar) ──────────────
+
+async function getUpcomingHighImpactEvents(): Promise<EconomicEvent[]> {
+  const now = Date.now();
+  if (calendarCache && now - calendarCache.fetchedAt < CALENDAR_CACHE_TTL_MS) {
+    return calendarCache.events;
+  }
+  if (calendarInflight) return calendarInflight;
+
+  calendarInflight = (async (): Promise<EconomicEvent[]> => {
+    try {
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      const tomorrowUtc = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+      const [d0, d1] = await Promise.all([
+        getCalendarEventsPayload(todayUtc, 'economic', 'UTC').catch(() => null),
+        getCalendarEventsPayload(tomorrowUtc, 'economic', 'UTC').catch(() => null)
+      ]);
+      const combined = [...(d0?.events ?? []), ...(d1?.events ?? [])].filter(
+        (e) => e.impact === 'high'
+      );
+      const dedup = new Map<string, EconomicEvent>();
+      for (const e of combined) dedup.set(e.id, e);
+      const events = Array.from(dedup.values()).sort((a, b) => a.ts - b.ts);
+      calendarCache = { events, fetchedAt: Date.now() };
+      return events;
+    } catch {
+      return calendarCache?.events ?? [];
+    } finally {
+      calendarInflight = null;
+    }
+  })();
+
+  return calendarInflight;
+}
+
+function evaluateEventRisk(shortName: string, highEvents: EconomicEvent[]): EventRiskInfo {
+  const countries = new Set(sensitiveCountriesFor(shortName));
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  let lockedEv: { ev: EconomicEvent; diffMin: number } | null = null;
+  let cautionEv: { ev: EconomicEvent; diffMin: number } | null = null;
+
+  for (const ev of highEvents) {
+    if (!countries.has(ev.country)) continue;
+    const diffMin = Math.round((ev.ts - nowSec) / 60);
+    // Lock window: 30m before release through 35m after release
+    if (diffMin >= -30 && diffMin <= 35) {
+      if (!lockedEv || Math.abs(diffMin) < Math.abs(lockedEv.diffMin)) {
+        lockedEv = { ev, diffMin };
+      }
+    } else if (diffMin > 35 && diffMin <= 120) {
+      if (!cautionEv || diffMin < cautionEv.diffMin) {
+        cautionEv = { ev, diffMin };
+      }
+    }
+  }
+
+  if (lockedEv) {
+    const m = lockedEv.diffMin;
+    const timing = m > 0 ? `in ${m}m` : m === 0 ? 'now' : `${Math.abs(m)}m ago`;
+    return {
+      status: 'locked',
+      headline: `Event Risk Lock: ${lockedEv.ev.country} ${lockedEv.ev.title} (${timing}) — move may be fundamental repricing, avoid fading.`,
+      eventTitle: lockedEv.ev.title,
+      country: lockedEv.ev.country,
+      minutesUntil: m
+    };
+  }
+
+  if (cautionEv) {
+    const h = Math.floor(cautionEv.diffMin / 60);
+    const rem = cautionEv.diffMin % 60;
+    const timing = h > 0 ? `${h}h ${rem}m` : `${rem}m`;
+    return {
+      status: 'caution',
+      headline: `High-impact ${cautionEv.ev.country} release in ${timing}: ${cautionEv.ev.title}.`,
+      eventTitle: cautionEv.ev.title,
+      country: cautionEv.ev.country,
+      minutesUntil: cautionEv.diffMin
+    };
+  }
+
+  return {
+    status: 'clear',
+    headline: 'No high-impact economic releases in the next 2 hours.',
+    eventTitle: null,
+    country: null,
+    minutesUntil: null
+  };
+}
+
+// ── Math Utilities (Stationary Return OLS + Adjusted R², EMA, ATR) ───────────
 
 function mean(arr: number[]): number {
   if (arr.length === 0) return 0;
@@ -757,6 +1045,43 @@ function computeAtr(bars: OhlcBar[], period = 14): number {
   return count > 0 ? trSum / count : 0;
 }
 
+function computeEma(closes: number[], period: number): number[] {
+  const out: number[] = new Array(closes.length).fill(NaN);
+  if (closes.length < period) return out;
+  const k = 2 / (period + 1);
+  let ema = 0;
+  for (let i = 0; i < period; i++) ema += closes[i];
+  ema /= period;
+  out[period - 1] = ema;
+  for (let i = period; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k);
+    out[i] = ema;
+  }
+  return out;
+}
+
+function computeHtfBias(bars: OhlcBar[]): 'bull' | 'bear' | 'range' {
+  if (bars.length < 52) return 'range';
+  const closes = bars.map((b) => b.close);
+  const ema20 = computeEma(closes, 20);
+  const ema50 = computeEma(closes, 50);
+  const lastIdx = closes.length - 1;
+  const c = closes[lastIdx];
+  const e20 = ema20[lastIdx];
+  const e50 = ema50[lastIdx];
+  const e20Prev = ema20[Math.max(0, lastIdx - 4)];
+  if (!Number.isFinite(e20) || !Number.isFinite(e50)) return 'range';
+
+  const rising = Number.isFinite(e20Prev) && e20 > e20Prev;
+  const falling = Number.isFinite(e20Prev) && e20 < e20Prev;
+
+  if (c > e20 && e20 > e50) return 'bull';
+  if (c < e20 && e20 < e50) return 'bear';
+  if (c > e50 && e20 > e50 && rising) return 'bull';
+  if (c < e50 && e20 < e50 && falling) return 'bear';
+  return 'range';
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
@@ -831,7 +1156,67 @@ function computeBestLeadLag(
   return { bestLag, bestCorr, zeroCorr };
 }
 
-// ── Ultra-Strict 4-Gate Session & Major-Swing SMT Engine ─────────────────────
+/** Fit stationary return OLS with mild ridge penalty and return Adjusted Return R². */
+function fitStationaryReturnOls(
+  yRet: number[],
+  xRets: number[][]
+): { intercept: number; stdBetas: number[]; rawBetas: number[]; adjR2: number } | null {
+  const nRet = yRet.length;
+  const m = xRets.length;
+  if (nRet < 10 || m === 0) return null;
+
+  const means = xRets.map((arr) => mean(arr));
+  const stds = xRets.map((arr, k) => stdDev(arr, means[k]));
+  if (stds.some((s) => s < 1e-6)) return null;
+
+  const dim = m + 1;
+  const XtX: number[][] = Array.from({ length: dim }, () => new Array(dim).fill(0));
+  const Xty: number[] = new Array(dim).fill(0);
+
+  for (let t = 0; t < nRet; t++) {
+    const row = [1];
+    for (let k = 0; k < m; k++) {
+      row.push((xRets[k][t] - means[k]) / stds[k]);
+    }
+    for (let r = 0; r < dim; r++) {
+      Xty[r] += row[r] * yRet[t];
+      for (let c = 0; c < dim; c++) {
+        XtX[r][c] += row[r] * row[c];
+      }
+    }
+  }
+
+  const ridge = 0.02 * nRet;
+  for (let k = 1; k < dim; k++) XtX[k][k] += ridge;
+
+  const coeffs = solveLinearSystem(XtX, Xty);
+  if (!coeffs) return null;
+
+  const intercept = coeffs[0];
+  const stdBetas = coeffs.slice(1);
+  const rawBetas = stdBetas.map((b, k) => b / stds[k]);
+
+  const yMean = mean(yRet);
+  let ssTot = 0;
+  let ssRes = 0;
+  for (let t = 0; t < nRet; t++) {
+    let pred = intercept;
+    for (let k = 0; k < m; k++) {
+      pred += stdBetas[k] * ((xRets[k][t] - means[k]) / stds[k]);
+    }
+    const dy = yRet[t] - yMean;
+    const e = yRet[t] - pred;
+    ssTot += dy * dy;
+    ssRes += e * e;
+  }
+  const rawR2 = ssTot > 1e-12 ? clamp(1 - ssRes / ssTot, 0, 0.99) : 0;
+  const adjR2 =
+    nRet > m + 1 ? clamp(1 - (1 - rawR2) * ((nRet - 1) / (nRet - m - 1)), 0, 0.99) : rawR2;
+
+  return { intercept, stdBetas, rawBetas, adjR2 };
+}
+
+// ── Strict 4-Gate Session & Major-Swing SMT Engine (OANDA Wick Parity) ───────
 
 interface RefPool {
   kind: SmtSignal['levelKind'];
@@ -936,7 +1321,7 @@ function extractReferencePools(bars: OhlcBar[]): RefPool[] {
     }
   }
 
-  // Major 5-bar Swing High & Swing Low (strictly 5 bars higher/lower on BOTH sides)
+  // Major 5-bar Swing High & Swing Low
   const swingRadius = 5;
   const lookbackStart = Math.max(swingRadius, bars.length - 64);
   const lookbackEnd = bars.length - swingRadius - 3;
@@ -995,13 +1380,6 @@ function mirrorPoolKind(kind: SmtSignal['levelKind']): SmtSignal['levelKind'] {
   }
 }
 
-/**
- * Ultra-Strict 4-Gate SMT Divergence Detection:
- * 1. Fresh Sweep Only: Pool must have been unswept until the last 2 bars.
- * 2. ATR-Scaled Separation: Sweeper breaks by >= 0.10 ATR; peer fails by >= 0.40 peer ATR.
- * 3. Rejection Close: Latest close is back inside the swept level (liquidity trap, not breakout).
- * 4. Active Proximity: Price is still within 1.2 ATR of the swept level.
- */
 function detectSmtForPeer(
   targetShort: string,
   targetBars: OhlcBar[],
@@ -1009,7 +1387,9 @@ function detectSmtForPeer(
   peerSpec: PeerSpec,
   peerBars: OhlcBar[],
   peerScaleRatio: number,
-  stepSec: number
+  stepSec: number,
+  htfBias: 'bull' | 'bear' | 'range',
+  htfLabel: '4H' | 'Daily'
 ): { signals: SmtSignal[]; poolWatches: SessionPoolWatch[] } {
   const signals: SmtSignal[] = [];
   const poolWatches: SessionPoolWatch[] = [];
@@ -1045,7 +1425,6 @@ function detectSmtForPeer(
     const pAfter = peerBars.filter((b) => b.ts > pPool.endTs);
     if (tAfter.length === 0 || pAfter.length === 0) continue;
 
-    // Overall swept status for the Pool Monitor display
     const tOverallEx =
       tPool.side === 'high'
         ? Math.max(...tAfter.map((b) => b.high))
@@ -1063,7 +1442,7 @@ function detectSmtForPeer(
         ? pOverallEx > pPool.level + 0.08 * pAtrRaw
         : pOverallEx < pPool.level - 0.08 * pAtrRaw;
 
-    // Gate 1: Must NOT have been swept earlier before the last 2 bars
+    // Gate 1: Untouched prior to the last 2 bars
     const tEarly = tAfter.filter((b) => b.ts <= recentCutoffTs);
     const pEarly = pAfter.filter((b) => b.ts <= recentCutoffTs);
     const tEarlySwept = tEarly.some((b) =>
@@ -1097,7 +1476,6 @@ function detectSmtForPeer(
         const pBreachAtr =
           pPool.side === 'high' ? (pEx - pPool.level) / pAtrRaw : (pPool.level - pEx) / pAtrRaw;
 
-        // Gate 2: Sweeper clears level by >= 0.10 ATR; non-sweeper stays >= 0.40 ATR shy
         const tSw = tBreachAtr >= 0.1;
         const pSw = pBreachAtr >= 0.1;
 
@@ -1106,7 +1484,6 @@ function detectSmtForPeer(
           const missAtr = sweptBy === 'target' ? -pBreachAtr : -tBreachAtr;
           const distFromLvlAtr = Math.abs(lastTargetBar.close - tPool.level) / tAtrRaw;
 
-          // Gate 3 & 4: Still within 1.2 ATR of level + closed back inside the swept level
           const direction: SmDirection = tPool.side === 'high' ? 'bearish' : 'bullish';
           const closedInside =
             direction === 'bearish'
@@ -1146,6 +1523,21 @@ function detectSmtForPeer(
                 ? (Math.abs(pPool.level - pEx) / pPool.level) * 100
                 : (Math.abs(tPool.level - tEx) / tPool.level) * 100;
 
+            const alignedWithHtf: SmtSignal['alignedWithHtf'] =
+              htfBias === 'range'
+                ? 'neutral'
+                : (direction === 'bullish' && htfBias === 'bull') ||
+                    (direction === 'bearish' && htfBias === 'bear')
+                  ? 'with_trend'
+                  : 'counter_trend';
+
+            const contextNote =
+              alignedWithHtf === 'with_trend'
+                ? `Aligned with ${htfLabel} trend (pullback sweep)`
+                : alignedWithHtf === 'counter_trend'
+                  ? `Against ${htfLabel} trend — wait for structure break before fading`
+                  : `${htfLabel} range — watch for follow-through`;
+
             const sweepAction =
               tPool.side === 'high' ? 'poked above and rejected' : 'dipped below and reclaimed';
             const peerRef = pPool.label.toLowerCase();
@@ -1154,8 +1546,8 @@ function detectSmtForPeer(
 
             const summary =
               sweptBy === 'target'
-                ? `${targetShort} ${sweepAction} ${targetRef} (${scaledTargetLevel}), while ${peerSpec.shortName} stayed far from its ${peerRef} (${missAtr.toFixed(1)}× avg move away).`
-                : `${peerSpec.shortName} ${peerSweepVerb} its ${peerRef}, while ${targetShort} held firmly inside ${targetRef} (${missAtr.toFixed(1)}× avg move away).`;
+                ? `${targetShort} ${sweepAction} ${targetRef} (${scaledTargetLevel}), while ${peerSpec.shortName} stayed ${missAtr.toFixed(1)}× avg move away from its ${peerRef}.`
+                : `${peerSpec.shortName} ${peerSweepVerb} its ${peerRef}, while ${targetShort} held ${missAtr.toFixed(1)}× avg move inside ${targetRef}.`;
 
             signals.push({
               id: `smt-${tPool.kind}-${peerSpec.shortName}`,
@@ -1166,6 +1558,8 @@ function detectSmtForPeer(
               peerShortName: peerSpec.shortName,
               relation: peerSpec.relation,
               sweptBy,
+              alignedWithHtf,
+              contextNote,
               targetLevel: scaledTargetLevel,
               targetExtreme: scaledTargetExtreme,
               peerLevel: scaledPeerLevel,
@@ -1209,7 +1603,7 @@ function detectSmtForPeer(
   return { signals, poolWatches };
 }
 
-// ── Core Dislocation Computation (Stationary Return OLS) ─────────────────────
+// ── Core Institutional Intermarket Computation ───────────────────────────────
 
 async function computeDislocationForSpec(
   spec: SymbolModelSpec,
@@ -1230,28 +1624,85 @@ async function computeDislocationForSpec(
   }
 
   const shortList = Array.from(uniqueShortNames);
-  const [quotesRes, ...barArrays] = await Promise.all([
+
+  // Fetch OANDA/hybrid candles in gentle parallel waves + quotes + HTF bars + live calendar events
+  const [quotesRes, htfBundle, highEvents] = await Promise.all([
     getQuotesPayload(Array.from(quoteSymbols)),
-    ...shortList.map((s) => fetchYahooSeries(s, tf, force))
+    fetchHigherTfBars(spec.shortName, tf, force),
+    getUpcomingHighImpactEvents()
   ]);
 
-  const barsByShort = new Map<string, OhlcBar[]>();
-  for (let i = 0; i < shortList.length; i++) {
-    barsByShort.set(shortList[i], barArrays[i]);
+  const seriesByShort = new Map<string, SeriesBundle>();
+  for (let i = 0; i < shortList.length; i += 4) {
+    const batch = shortList.slice(i, i + 4);
+    const res = await Promise.all(batch.map((s) => fetchHybridSeries(s, tf, force)));
+    batch.forEach((s, idx) => seriesByShort.set(s, res[idx]));
   }
 
-  const targetBars = barsByShort.get(spec.shortName) ?? [];
+  const targetSeries = seriesByShort.get(spec.shortName)!;
+  const targetBars = targetSeries?.bars ?? [];
   const targetQuote: MarketQuote | undefined = quotesRes.quotes[spec.canonical];
 
   const lastBar = targetBars.length > 0 ? targetBars[targetBars.length - 1] : null;
   const lastBarClose = lastBar?.close ?? 0;
-  const spotPrice = targetQuote?.price && targetQuote.price > 0 ? targetQuote.price : lastBarClose;
-  const targetScaleRatio = lastBarClose > 0 && spotPrice > 0 ? spotPrice / lastBarClose : 1;
+
+  // When target comes directly from OANDA, its live candle close IS exact OANDA spot (ratio = 1.0)!
+  const isTargetOanda = targetSeries?.source === 'oanda';
+  const spotPrice =
+    isTargetOanda && targetSeries.livePrice && targetSeries.livePrice > 0
+      ? targetSeries.livePrice
+      : targetQuote?.price && targetQuote.price > 0
+        ? targetQuote.price
+        : lastBarClose;
+  const targetScaleRatio =
+    isTargetOanda
+      ? 1
+      : lastBarClose > 0 && spotPrice > 0
+        ? spotPrice / lastBarClose
+        : 1;
   const decimals = priceDecimals(spec.shortName, spotPrice || 100);
 
   const rawAtr = computeAtr(targetBars, 14) * targetScaleRatio;
   const atr = roundTo(rawAtr, decimals);
   const atrPct = spotPrice > 0 ? roundTo((rawAtr / spotPrice) * 100, 2) : 0;
+
+  // Feed & Live Spread Info
+  const liveSpreadPx =
+    targetSeries?.liveSpreadPx !== null && targetSeries?.liveSpreadPx !== undefined
+      ? roundTo(targetSeries.liveSpreadPx, Math.min(5, decimals + 1))
+      : null;
+  const liveSpreadPct = targetSeries?.liveSpreadPct ?? null;
+  const spreadInAtrPct =
+    liveSpreadPx !== null && rawAtr > 0 ? roundTo((liveSpreadPx / rawAtr) * 100, 1) : null;
+  const wideSpread = spreadInAtrPct !== null && spreadInAtrPct >= 12;
+
+  const oandaDriverCount = Array.from(seriesByShort.values()).filter((s) => s.source === 'oanda').length;
+  const feedSource: FeedInfo['source'] = isTargetOanda
+    ? oandaDriverCount === seriesByShort.size
+      ? 'oanda'
+      : 'hybrid'
+    : 'yahoo';
+  const feedInfo: FeedInfo = {
+    source: feedSource,
+    label: isTargetOanda ? 'OANDA Live' : 'Yahoo Proxy',
+    instrument: targetSeries?.instrument ?? null,
+    liveSpreadPx,
+    liveSpreadPct,
+    spreadInAtrPct,
+    wideSpread
+  };
+
+  // Live Macro Event Risk Lock
+  const eventRisk = evaluateEventRisk(spec.shortName, highEvents);
+
+  // Higher-Timeframe Trend Context
+  const htfBias = computeHtfBias(htfBundle.bars);
+  const htfBiasLabel =
+    htfBias === 'bull'
+      ? `${htfBundle.label} Uptrend`
+      : htfBias === 'bear'
+        ? `${htfBundle.label} Downtrend`
+        : `${htfBundle.label} Range`;
 
   // Stationary Return Regression Window: 72 bars (~3 days on 1H); Horizon H = 8 bars
   const HORIZON = 8;
@@ -1262,6 +1713,7 @@ async function computeDislocationForSpec(
 
   let zScore = 0;
   let adjRSquared = 0;
+  let recentAdjR2 = 0;
   let gapPct = 0;
   let fairValuePrice = spotPrice;
   const residualSeries: ResidualPoint[] = [];
@@ -1269,9 +1721,7 @@ async function computeDislocationForSpec(
   let bestLeadLag: LeadLagReadout | null = null;
 
   if (slice.length >= 24 && yCloses[0] > 0) {
-    // Bar-to-bar stationary log returns (length = N - 1)
     const nBars = slice.length;
-    const nRet = nBars - 1;
     const yRet: number[] = [];
     for (let i = 1; i < nBars; i++) {
       yRet.push(Math.log(yCloses[i] / yCloses[i - 1]));
@@ -1282,20 +1732,20 @@ async function computeDislocationForSpec(
       spec: DriverSpec;
       closes: number[];
       xRet: number[];
-      meanRet: number;
-      stdRet: number;
       windowChangePct: number;
       price: number | null;
       corr: number;
       lagBars: number;
       lagCorr: number;
+      feed: 'oanda' | 'yahoo';
     }
 
     const activeDrivers: ActiveDriverData[] = [];
     const inactiveDrivers: DriverContribution[] = [];
 
     for (const d of spec.drivers) {
-      const dBars = barsByShort.get(d.shortName) ?? [];
+      const dSeries = seriesByShort.get(d.shortName);
+      const dBars = dSeries?.bars ?? [];
       const dQuote = quotesRes.quotes[d.symbol];
       const aligned = alignSeriesToTimestamps(targetTs, dBars, maxStaleSec);
       const validCount = aligned.filter((v) => v !== null).length;
@@ -1308,11 +1758,16 @@ async function computeDislocationForSpec(
         }
       }
 
+      const dLivePrice =
+        dSeries?.source === 'oanda' && dSeries.livePrice
+          ? dSeries.livePrice
+          : (dQuote?.price ?? (dBars.length > 0 ? dBars[dBars.length - 1].close : null));
+
       if (validCount < Math.floor(nBars * 0.7) || firstValid === null) {
         inactiveDrivers.push({
           symbol: d.symbol,
           shortName: d.shortName,
-          price: dQuote?.price ?? (dBars.length > 0 ? dBars[dBars.length - 1].close : null),
+          price: dLivePrice,
           windowChangePct: 0,
           beta: 0,
           correlation: 0,
@@ -1320,7 +1775,8 @@ async function computeDislocationForSpec(
           pull: 'flat',
           lagBars: 0,
           lagCorrelation: 0,
-          active: false
+          active: false,
+          feed: dSeries?.source ?? 'yahoo'
         });
         continue;
       }
@@ -1336,17 +1792,15 @@ async function computeDislocationForSpec(
       for (let i = 1; i < nBars; i++) {
         xRet.push(Math.log(filled[i] / filled[i - 1]));
       }
-      const mRet = mean(xRet);
-      const sRet = stdDev(xRet, mRet);
+      const sRet = stdDev(xRet);
       const hStart = Math.max(0, nBars - 1 - HORIZON);
       const recentChgPct = ((filled[nBars - 1] - filled[hStart]) / filled[hStart]) * 100;
 
-      // Drop flat/closed drivers (e.g. DXY during crypto weekend)
       if (sRet < 1e-5) {
         inactiveDrivers.push({
           symbol: d.symbol,
           shortName: d.shortName,
-          price: dQuote?.price ?? filled[nBars - 1],
+          price: dLivePrice,
           windowChangePct: roundTo(recentChgPct, 2),
           beta: 0,
           correlation: 0,
@@ -1354,7 +1808,8 @@ async function computeDislocationForSpec(
           pull: 'flat',
           lagBars: 0,
           lagCorrelation: 0,
-          active: false
+          active: false,
+          feed: dSeries?.source ?? 'yahoo'
         });
         continue;
       }
@@ -1366,75 +1821,41 @@ async function computeDislocationForSpec(
         spec: d,
         closes: filled,
         xRet,
-        meanRet: mRet,
-        stdRet: sRet,
         windowChangePct: roundTo(recentChgPct, 2),
-        price: dQuote?.price ?? filled[nBars - 1],
+        price: dLivePrice,
         corr,
         lagBars: ll.bestLag,
-        lagCorr: ll.bestCorr
+        lagCorr: ll.bestCorr,
+        feed: dSeries?.source ?? 'yahoo'
       });
     }
 
     if (activeDrivers.length > 0) {
-      const m = activeDrivers.length;
-      const dim = m + 1;
-      const XtX: number[][] = Array.from({ length: dim }, () => new Array(dim).fill(0));
-      const Xty: number[] = new Array(dim).fill(0);
+      const xRetList = activeDrivers.map((a) => a.xRet);
+      const fullFit = fitStationaryReturnOls(yRet, xRetList);
 
-      // Fit stationary bar-to-bar return OLS with mild ridge penalty
-      for (let t = 0; t < nRet; t++) {
-        const row = [1];
-        for (let k = 0; k < m; k++) {
-          row.push((activeDrivers[k].xRet[t] - activeDrivers[k].meanRet) / activeDrivers[k].stdRet);
+      if (fullFit) {
+        const { stdBetas, rawBetas } = fullFit;
+        adjRSquared = fullFit.adjR2;
+
+        // Regime-Break Check: Compare recent 18-bar fit vs 72-bar baseline fit
+        const shortN = Math.min(18, yRet.length);
+        if (shortN >= 12) {
+          const shortFit = fitStationaryReturnOls(
+            yRet.slice(yRet.length - shortN),
+            xRetList.map((xr) => xr.slice(xr.length - shortN))
+          );
+          recentAdjR2 = shortFit ? shortFit.adjR2 : adjRSquared;
+        } else {
+          recentAdjR2 = adjRSquared;
         }
-        for (let r = 0; r < dim; r++) {
-          Xty[r] += row[r] * yRet[t];
-          for (let c = 0; c < dim; c++) {
-            XtX[r][c] += row[r] * row[c];
-          }
-        }
-      }
 
-      const ridge = 0.02 * nRet;
-      for (let k = 1; k < dim; k++) {
-        XtX[k][k] += ridge;
-      }
-
-      const coeffs = solveLinearSystem(XtX, Xty);
-      if (coeffs) {
-        const intercept = coeffs[0];
-        const stdBetas = coeffs.slice(1);
-        const rawBetas = stdBetas.map((b, k) => b / activeDrivers[k].stdRet);
-
-        // Honest Adjusted Return R² (never spurious level R²!)
-        const yMean = mean(yRet);
-        let ssTot = 0;
-        let ssRes = 0;
-        for (let t = 0; t < nRet; t++) {
-          let pred = intercept;
-          for (let k = 0; k < m; k++) {
-            const zX =
-              (activeDrivers[k].xRet[t] - activeDrivers[k].meanRet) / activeDrivers[k].stdRet;
-            pred += stdBetas[k] * zX;
-          }
-          const dy = yRet[t] - yMean;
-          const e = yRet[t] - pred;
-          ssTot += dy * dy;
-          ssRes += e * e;
-        }
-        const rawR2 = ssTot > 1e-12 ? clamp(1 - ssRes / ssTot, 0, 0.99) : 0;
-        adjRSquared =
-          nRet > m + 1
-            ? clamp(1 - (1 - rawR2) * ((nRet - 1) / (nRet - m - 1)), 0, 0.99)
-            : rawR2;
-
-        // Compute stationary H-bar return prediction errors across the window
+        // Compute stationary H-bar return prediction errors
         const hErrors: { idx: number; err: number }[] = [];
         for (let i = HORIZON; i < nBars; i++) {
           const actualH = Math.log(yCloses[i] / yCloses[i - HORIZON]);
           let impliedH = 0;
-          for (let k = 0; k < m; k++) {
+          for (let k = 0; k < activeDrivers.length; k++) {
             const drvH = Math.log(
               activeDrivers[k].closes[i] / activeDrivers[k].closes[i - HORIZON]
             );
@@ -1454,7 +1875,6 @@ async function computeDislocationForSpec(
           fairValuePrice = spotPrice > 0 ? spotPrice / impliedRatio : spotPrice;
           gapPct = (impliedRatio - 1) * 100;
 
-          // Build trailing 36-point stretch history
           const startPlot = Math.max(0, hErrors.length - 36);
           for (let j = startPlot; j < hErrors.length; j++) {
             const pt = hErrors[j];
@@ -1470,9 +1890,8 @@ async function computeDislocationForSpec(
           }
         }
 
-        // Factor weights & lead-lag summary
         const absSum = stdBetas.reduce((acc, b) => acc + Math.abs(b), 0) || 1;
-        for (let k = 0; k < m; k++) {
+        for (let k = 0; k < activeDrivers.length; k++) {
           const ad = activeDrivers[k];
           const weightPct = Math.round((Math.abs(stdBetas[k]) / absSum) * 100);
           const look = Math.max(0, ad.closes.length - 1 - HORIZON);
@@ -1492,7 +1911,8 @@ async function computeDislocationForSpec(
             pull,
             lagBars: ad.lagBars,
             lagCorrelation: roundTo(ad.lagCorr, 2),
-            active: true
+            active: true,
+            feed: ad.feed
           });
 
           if (
@@ -1522,17 +1942,24 @@ async function computeDislocationForSpec(
     driversOut.sort((a, b) => Number(b.active) - Number(a.active) || b.weightPct - a.weightPct);
   }
 
-  // ── Ultra-Strict SMT Detection across Peers ────────────────────────────────
+  // ── Strict SMT Detection across Peers (OANDA Wick Parity) ──────────────────
   const allSmtSignals: SmtSignal[] = [];
   let primaryPoolWatches: SessionPoolWatch[] = [];
 
   for (let i = 0; i < spec.peers.length; i++) {
     const peer = spec.peers[i];
-    const pBars = barsByShort.get(peer.shortName) ?? [];
+    const pSeries = seriesByShort.get(peer.shortName);
+    const pBars = pSeries?.bars ?? [];
     const pQuote = quotesRes.quotes[peer.symbol];
     const pLastClose = pBars.length > 0 ? pBars[pBars.length - 1].close : 0;
-    const pSpot = pQuote?.price && pQuote.price > 0 ? pQuote.price : pLastClose;
-    const pScale = pLastClose > 0 && pSpot > 0 ? pSpot / pLastClose : 1;
+    const isPeerOanda = pSeries?.source === 'oanda';
+    const pSpot =
+      isPeerOanda && pSeries.livePrice
+        ? pSeries.livePrice
+        : pQuote?.price && pQuote.price > 0
+          ? pQuote.price
+          : pLastClose;
+    const pScale = isPeerOanda ? 1 : pLastClose > 0 && pSpot > 0 ? pSpot / pLastClose : 1;
 
     const { signals, poolWatches } = detectSmtForPeer(
       spec.shortName,
@@ -1541,7 +1968,9 @@ async function computeDislocationForSpec(
       peer,
       pBars,
       pScale,
-      stepSec
+      stepSec,
+      htfBias,
+      htfBundle.label
     );
     allSmtSignals.push(...signals);
     if (i === 0) {
@@ -1551,38 +1980,146 @@ async function computeDislocationForSpec(
 
   allSmtSignals.sort((a, b) => a.minutesAgo - b.minutesAgo || b.peerGapAtr - a.peerGapAtr);
 
-  // ── Explicit Tie-Breaking, Plain-English Verdict & Transparent 0–100 Score ─
+  // ── Regime-Break / Decoupling Evaluation ───────────────────────────────────
+  const roundedSpot = roundTo(spotPrice, decimals);
+  const roundedFair = roundTo(fairValuePrice, decimals);
+  const gapPoints = roundTo(roundedSpot - roundedFair, decimals);
+  const roundedZ = roundTo(zScore, 2);
+  const roundedR2 = roundTo(adjRSquared, 2);
+  const roundedRecentR2 = roundTo(recentAdjR2, 2);
+  const roundedGapPct = roundTo(gapPct, 2);
+  const fitPct = Math.round(roundedR2 * 100);
+  const recentFitPct = Math.round(roundedRecentR2 * 100);
+  const driverFitLabel: 'Strong' | 'Moderate' | 'Weak' =
+    roundedR2 >= 0.55 ? 'Strong' : roundedR2 >= 0.3 ? 'Moderate' : 'Weak';
+
+  const fitDrop = fitPct - recentFitPct;
+  const driverLinkStatus: DriverLinkInfo['status'] =
+    driverFitLabel === 'Weak'
+      ? 'breaking'
+      : fitPct >= 35 && (recentFitPct < 20 || fitDrop >= 30)
+        ? 'breaking'
+        : fitPct >= 35 && fitDrop >= 18
+          ? 'shifting'
+          : 'stable';
+
+  const driverLink: DriverLinkInfo = {
+    status: driverLinkStatus,
+    label:
+      driverLinkStatus === 'breaking'
+        ? 'Decoupling'
+        : driverLinkStatus === 'shifting'
+          ? 'Softening'
+          : 'Stable',
+    baselineFitPct: fitPct,
+    recentFitPct,
+    summary:
+      driverLinkStatus === 'breaking'
+        ? `Recent driver link dropped to ${recentFitPct}% (vs ${fitPct}% baseline) — treat expected price with caution.`
+        : driverLinkStatus === 'shifting'
+          ? `Short-term link eased to ${recentFitPct}% (vs ${fitPct}% baseline).`
+          : `Drivers tracking cleanly (${recentFitPct}% recent vs ${fitPct}% baseline).`
+  };
+
+  // ── Candle Turn & OANDA Tick-Volume Confirmation ───────────────────────────
   const bearSmts = allSmtSignals.filter((s) => s.direction === 'bearish');
   const bullSmts = allSmtSignals.filter((s) => s.direction === 'bullish');
   const hasBearSmt = bearSmts.length > 0;
   const hasBullSmt = bullSmts.length > 0;
   const smtConflict = hasBearSmt && hasBullSmt;
 
-  const roundedSpot = roundTo(spotPrice, decimals);
-  const roundedFair = roundTo(fairValuePrice, decimals);
-  const gapPoints = roundTo(roundedSpot - roundedFair, decimals);
-  const roundedZ = roundTo(zScore, 2);
-  const roundedR2 = roundTo(adjRSquared, 2);
-  const roundedGapPct = roundTo(gapPct, 2);
-  const fitPct = Math.round(roundedR2 * 100);
-  const driverFitLabel: 'Strong' | 'Moderate' | 'Weak' =
-    roundedR2 >= 0.55 ? 'Strong' : roundedR2 >= 0.3 ? 'Moderate' : 'Weak';
+  // Intended directional lean
+  let leanDir: 'long' | 'short' | null = null;
+  if (!smtConflict) {
+    if (driverFitLabel !== 'Weak' && roundedZ >= 1.4) leanDir = 'short';
+    else if (driverFitLabel !== 'Weak' && roundedZ <= -1.4) leanDir = 'long';
+    else if (hasBearSmt) leanDir = 'short';
+    else if (hasBullSmt) leanDir = 'long';
+  }
 
-  const reversingCandle = Boolean(
-    lastBar &&
-      ((roundedZ >= 1.5 && lastBar.close < lastBar.open) ||
-        (roundedZ <= -1.5 && lastBar.close > lastBar.open))
-  );
+  let turnConfirmed = false;
+  if (lastBar && leanDir) {
+    const range = Math.max(lastBar.high - lastBar.low, 1e-9);
+    const upperWickRatio = (lastBar.high - Math.max(lastBar.open, lastBar.close)) / range;
+    const lowerWickRatio = (Math.min(lastBar.open, lastBar.close) - lastBar.low) / range;
+    if (leanDir === 'short') {
+      turnConfirmed = lastBar.close < lastBar.open || upperWickRatio >= 0.38;
+    } else {
+      turnConfirmed = lastBar.close > lastBar.open || lowerWickRatio >= 0.38;
+    }
+  }
 
+  let volumeRatio: number | null = null;
+  if (targetBars.length >= 22 && typeof targetBars[targetBars.length - 2].volume === 'number') {
+    const checkBar = targetBars[targetBars.length - 2]; // latest completed bar for honest volume ratio
+    const prev20 = targetBars.slice(targetBars.length - 22, targetBars.length - 2);
+    const avgVol = mean(prev20.map((b) => b.volume ?? 0));
+    if (avgVol > 0 && (checkBar.volume ?? 0) > 0) {
+      volumeRatio = roundTo((checkBar.volume ?? 0) / avgVol, 2);
+    }
+  }
+  const volumeLabel =
+    volumeRatio === null
+      ? 'No volume feed'
+      : volumeRatio >= 1.3
+        ? `High vol (${volumeRatio.toFixed(1)}×)`
+        : volumeRatio <= 0.65
+          ? `Light vol (${volumeRatio.toFixed(1)}×)`
+          : `Normal vol (${volumeRatio.toFixed(1)}×)`;
+
+  const candleConfirm: CandleConfirmInfo = {
+    turnConfirmed,
+    label: !leanDir ? 'Neutral' : turnConfirmed ? 'Turn Confirmed' : 'Waiting for Turn',
+    volumeRatio,
+    volumeLabel
+  };
+
+  // HTF Alignment relative to directional lean
+  const htfAlignment: AuditTrendAlign =
+    !leanDir || htfBias === 'range'
+      ? 'neutral'
+      : (leanDir === 'long' && htfBias === 'bull') || (leanDir === 'short' && htfBias === 'bear')
+        ? 'with_trend'
+        : 'counter_trend';
+
+  const htfContext: HtfContextInfo = {
+    timeframeLabel: htfBundle.label,
+    bias: htfBias,
+    biasLabel: htfBiasLabel,
+    alignment: htfAlignment,
+    alignmentLabel:
+      htfAlignment === 'with_trend'
+        ? 'With Trend'
+        : htfAlignment === 'counter_trend'
+          ? 'Counter-Trend'
+          : 'Neutral',
+    summary:
+      htfAlignment === 'with_trend'
+        ? `Aligned with ${htfBiasLabel} — higher-probability pullback context.`
+        : htfAlignment === 'counter_trend'
+          ? `Against ${htfBiasLabel} — wait for clear turn or structure break.`
+          : htfBias !== 'range'
+            ? `${htfBiasLabel} active — wait for a pullback or sweep aligned with it.`
+            : `${htfBiasLabel} — no dominant higher-timeframe push.`
+  };
+
+  // ── Headline Verdict & Plain-English Explanation ───────────────────────────
   let verdict: VerdictKind = 'equilibrium';
   let verdictLabel = 'In Line';
   let verdictDetail = `${spec.shortName} is moving in step with its related markets right now.`;
-  let verdictReason = 'Price is within its normal range vs. drivers and no clean peer divergence is active.';
+  let verdictReason =
+    'Price is within its normal range vs. drivers and no clean peer divergence is active.';
 
-  if (smtConflict) {
+  if (eventRisk.status === 'locked') {
+    verdict = 'event_lock';
+    verdictLabel = 'Event Risk Lock';
+    verdictDetail = eventRisk.headline;
+    verdictReason = `Setup strength is capped because high-impact ${eventRisk.country} news (${eventRisk.eventTitle}) is inside the ±30m lock window.`;
+  } else if (smtConflict) {
     verdict = 'mixed';
     verdictLabel = 'Mixed Signals';
-    verdictDetail = `Opposing peer divergences are active on both highs and lows — choppy range, wait for a clean break.`;
+    verdictDetail =
+      'Opposing peer divergences are active on both highs and lows — choppy range, wait for a clean break.';
     verdictReason = `Headline set to Mixed because both a bullish sweep (${bullSmts[0].levelLabel}) and a bearish sweep (${bearSmts[0].levelLabel}) are active at once.`;
   } else if (driverFitLabel === 'Weak' && !hasBearSmt && !hasBullSmt) {
     verdict = 'weak_fit';
@@ -1591,38 +2128,56 @@ async function computeDislocationForSpec(
     verdictReason = `Driver fit is below 30% (${fitPct}%), so stretch readings are muted until correlation returns.`;
   } else if (driverFitLabel !== 'Weak' && roundedZ >= 1.6 && hasBearSmt) {
     verdict = 'bearish_trap';
-    verdictLabel = 'Stretched High + Bearish Sweep';
-    verdictDetail = `${spec.shortName} is ${Math.abs(roundedZ).toFixed(1)}× above normal vs. drivers (expected ${roundedFair}) and just failed a high sweep against ${bearSmts[0].peerShortName}.`;
-    verdictReason = 'Both price stretch above drivers and a fresh bearish peer divergence point lower.';
+    verdictLabel =
+      htfAlignment === 'with_trend'
+        ? 'With-Trend High Sweep'
+        : 'Stretched High + Bearish Sweep';
+    verdictDetail = `${spec.shortName} is ${Math.abs(roundedZ).toFixed(1)}× above drivers (expected ${roundedFair}) and rejected ${bearSmts[0].levelLabel.toLowerCase()} vs ${bearSmts[0].peerShortName}.`;
+    verdictReason = `Price stretch and bearish peer divergence align (${htfContext.alignmentLabel.toLowerCase()}).`;
   } else if (driverFitLabel !== 'Weak' && roundedZ <= -1.6 && hasBullSmt) {
     verdict = 'bullish_spring';
-    verdictLabel = 'Lagging Low + Bullish Sweep';
-    verdictDetail = `${spec.shortName} is ${Math.abs(roundedZ).toFixed(1)}× below normal vs. drivers (expected ${roundedFair}) and just reclaimed a low sweep against ${bullSmts[0].peerShortName}.`;
-    verdictReason = 'Both price lag below drivers and a fresh bullish peer divergence point higher.';
+    verdictLabel =
+      htfAlignment === 'with_trend'
+        ? 'With-Trend Low Sweep'
+        : 'Lagging Low + Bullish Sweep';
+    verdictDetail = `${spec.shortName} is ${Math.abs(roundedZ).toFixed(1)}× below drivers (expected ${roundedFair}) and reclaimed ${bullSmts[0].levelLabel.toLowerCase()} vs ${bullSmts[0].peerShortName}.`;
+    verdictReason = `Price lag and bullish peer divergence align (${htfContext.alignmentLabel.toLowerCase()}).`;
   } else if (driverFitLabel !== 'Weak' && roundedZ >= 2.0) {
     verdict = 'rich';
-    verdictLabel = reversingCandle ? 'Stretched High · Turning' : 'Stretched High';
-    verdictDetail = reversingCandle
-      ? `${spec.shortName} ran ${Math.abs(roundedZ).toFixed(1)}× above its drivers (expected ${roundedFair}) and the latest candle is turning down.`
-      : `${spec.shortName} ran ${Math.abs(roundedZ).toFixed(1)}× above its drivers (expected ${roundedFair}) — wait for a red reversal candle before fading.`;
+    verdictLabel =
+      htfAlignment === 'with_trend' && turnConfirmed
+        ? 'With-Trend Pullback High'
+        : turnConfirmed
+          ? 'Stretched High · Turning'
+          : 'Stretched High';
+    verdictDetail = turnConfirmed
+      ? `${spec.shortName} ran ${Math.abs(roundedZ).toFixed(1)}× above its drivers (expected ${roundedFair}) with a turning candle (${htfContext.alignmentLabel.toLowerCase()}).`
+      : `${spec.shortName} ran ${Math.abs(roundedZ).toFixed(1)}× above its drivers (expected ${roundedFair}) — wait for a clear reversal candle before acting.`;
     verdictReason = `Driven by a ≥2.0× stretch above expected price with ${driverFitLabel.toLowerCase()} driver fit (${fitPct}%).`;
   } else if (driverFitLabel !== 'Weak' && roundedZ <= -2.0) {
     verdict = 'cheap';
-    verdictLabel = reversingCandle ? 'Lagging Behind · Turning' : 'Lagging Behind';
-    verdictDetail = reversingCandle
-      ? `${spec.shortName} sits ${Math.abs(roundedZ).toFixed(1)}× behind its drivers (expected ${roundedFair}) and the latest candle is turning up.`
-      : `${spec.shortName} sits ${Math.abs(roundedZ).toFixed(1)}× behind its drivers (expected ${roundedFair}) — wait for a green reversal candle before buying.`;
+    verdictLabel =
+      htfAlignment === 'with_trend' && turnConfirmed
+        ? 'With-Trend Pullback Dip'
+        : turnConfirmed
+          ? 'Lagging Behind · Turning'
+          : 'Lagging Behind';
+    verdictDetail = turnConfirmed
+      ? `${spec.shortName} sits ${Math.abs(roundedZ).toFixed(1)}× behind its drivers (expected ${roundedFair}) with a turning candle (${htfContext.alignmentLabel.toLowerCase()}).`
+      : `${spec.shortName} sits ${Math.abs(roundedZ).toFixed(1)}× behind its drivers (expected ${roundedFair}) — wait for a green reversal candle before acting.`;
     verdictReason = `Driven by a ≥2.0× lag below expected price with ${driverFitLabel.toLowerCase()} driver fit (${fitPct}%).`;
   } else if (hasBearSmt) {
     verdict = 'bearish_smt';
-    verdictLabel = 'Bearish Peer Divergence';
-    verdictDetail = bearSmts[0].summary;
-    verdictReason = `Fresh bearish peer divergence on ${bearSmts[0].levelLabel} vs ${bearSmts[0].peerShortName} (no conflicting bullish divergence).`;
+    verdictLabel =
+      htfAlignment === 'with_trend' ? 'With-Trend Bearish Sweep' : 'Bearish Peer Divergence';
+    verdictDetail = `${bearSmts[0].summary} ${bearSmts[0].contextNote}.`;
+    verdictReason = `Fresh bearish peer divergence on ${bearSmts[0].levelLabel} vs ${bearSmts[0].peerShortName} (${htfContext.alignmentLabel.toLowerCase()}).`;
   } else if (hasBullSmt) {
     verdict = 'bullish_smt';
-    verdictLabel = 'Bullish Peer Divergence';
-    verdictDetail = bullSmts[0].summary;
-    verdictReason = `Fresh bullish peer divergence on ${bullSmts[0].levelLabel} vs ${bullSmts[0].peerShortName} (no conflicting bearish divergence).`;
+    verdictLabel =
+      htfAlignment === 'with_trend' ? 'With-Trend Bullish Sweep' : 'Bullish Peer Divergence';
+    verdictDetail = `${bullSmts[0].summary} ${bullSmts[0].contextNote}.`;
+    verdictReason = `Fresh bullish peer divergence on ${bullSmts[0].levelLabel} vs ${bullSmts[0].peerShortName} (${htfContext.alignmentLabel.toLowerCase()}).`;
   } else if (driverFitLabel !== 'Weak' && roundedZ >= 1.4) {
     verdict = 'rich';
     verdictLabel = 'Slightly High';
@@ -1635,11 +2190,12 @@ async function computeDislocationForSpec(
     verdictReason = `Mild lag (-${Math.abs(roundedZ).toFixed(1)}×) with ${driverFitLabel.toLowerCase()} driver fit (${fitPct}%).`;
   }
 
-  // Transparent 0–100 Setup Strength formula:
-  //   Stretch (0–45) + Driver Fit (0–25) + Clean Peer Divergence (0–30) - Conflict Penalty (0 or 20)
-  //   Stretch points are halved if Driver Fit is Weak (<30%).
-  const fitMultiplier = driverFitLabel === 'Weak' ? 0.35 : 1.0;
-  const stretchPts = Math.round(Math.min(45, Math.abs(roundedZ) * 18) * fitMultiplier);
+  // ── Empirically Calibrated Transparent 0–100 Setup Strength ────────────────
+  //   Stretch (0–40) + Driver Fit (0–25) + Divergence (0–25) + Trend & Turn Bonus (0–10)
+  //   minus Conflict (-20), Decoupling (-12), Unconfirmed Counter-Trend (-10), capped <=35 on Event Lock.
+  const fitMultiplier =
+    driverFitLabel === 'Weak' ? 0.3 : driverLinkStatus === 'breaking' ? 0.55 : 1.0;
+  const stretchPts = Math.round(Math.min(40, Math.abs(roundedZ) * 16) * fitMultiplier);
   const fitPts = Math.round(Math.min(25, roundedR2 * 30));
   const smtDirectionAligned =
     !smtConflict &&
@@ -1648,33 +2204,107 @@ async function computeDislocationForSpec(
     ? 0
     : hasBearSmt || hasBullSmt
       ? smtDirectionAligned
-        ? 30
-        : 20
+        ? 25
+        : 18
       : 0;
+
+  let alignBonus = 0;
+  if (leanDir && !smtConflict) {
+    if (htfAlignment === 'with_trend' && turnConfirmed) alignBonus = 10;
+    else if (htfAlignment === 'with_trend' || turnConfirmed) alignBonus = 5;
+  }
+
   const conflictPenalty = smtConflict ? 20 : 0;
-  const convictionScore = Math.round(
-    clamp(stretchPts + fitPts + smtPts - conflictPenalty, 0, 100)
+  const decouplingPenalty = driverLinkStatus === 'breaking' && driverFitLabel !== 'Weak' ? 12 : 0;
+  const counterTrendPenalty =
+    leanDir && htfAlignment === 'counter_trend' && !turnConfirmed ? 10 : 0;
+
+  let rawScore = clamp(
+    stretchPts +
+      fitPts +
+      smtPts +
+      alignBonus -
+      conflictPenalty -
+      decouplingPenalty -
+      counterTrendPenalty,
+    0,
+    100
   );
+  const eventLocked = eventRisk.status === 'locked';
+  if (eventLocked) rawScore = Math.min(rawScore, 35);
+  const convictionScore = Math.round(rawScore);
+
+  const parts: string[] = [
+    `Stretch ${stretchPts}/40`,
+    `Fit ${fitPts}/25`,
+    `Divergence ${smtPts}/25`
+  ];
+  if (alignBonus > 0) parts.push(`Trend/Turn +${alignBonus}`);
+  if (conflictPenalty > 0) parts.push(`Conflict −${conflictPenalty}`);
+  if (decouplingPenalty > 0) parts.push(`Decoupling −${decouplingPenalty}`);
+  if (counterTrendPenalty > 0) parts.push(`Counter-trend −${counterTrendPenalty}`);
+  if (eventLocked) parts.push('Capped ≤35 (News Lock)');
 
   const scoreBreakdown: ScoreBreakdown = {
     stretchPts,
-    maxStretchPts: 45,
+    maxStretchPts: 40,
     fitPts,
     maxFitPts: 25,
     smtPts,
-    maxSmtPts: 30,
+    maxSmtPts: 25,
+    alignBonus,
+    maxAlignBonus: 10,
     conflictPenalty,
+    decouplingPenalty,
+    counterTrendPenalty,
+    eventLocked,
     total: convictionScore,
-    explanation:
-      conflictPenalty > 0
-        ? `Stretch ${stretchPts}/45 + Driver Fit ${fitPts}/25 − Conflict ${conflictPenalty}`
-        : `Stretch ${stretchPts}/45 + Driver Fit ${fitPts}/25 + Divergence ${smtPts}/30`
+    explanation: parts.join(' · ')
+  };
+
+  // Structural reference levels (purely informational, matching exact OANDA prices)
+  const topSmt = allSmtSignals[0] ?? null;
+  let invalidationLevel: number | null = null;
+  let invalidationLabel: string | null = null;
+  if (topSmt) {
+    invalidationLevel = topSmt.targetExtreme;
+    invalidationLabel = `${topSmt.levelLabel} extreme`;
+  } else if (leanDir && targetBars.length >= 6) {
+    const rec6 = targetBars.slice(targetBars.length - 6);
+    invalidationLevel = roundTo(
+      (leanDir === 'short'
+        ? Math.max(...rec6.map((b) => b.high))
+        : Math.min(...rec6.map((b) => b.low))) * targetScaleRatio,
+      decimals
+    );
+    invalidationLabel = leanDir === 'short' ? 'Recent 6-bar high' : 'Recent 6-bar low';
+  }
+
+  const actionableBias: SetupLevelsInfo['actionableBias'] =
+    eventLocked || smtConflict || !leanDir || convictionScore < 55
+      ? 'wait'
+      : leanDir === 'long'
+        ? 'buy_watch'
+        : 'sell_watch';
+
+  const setupLevels: SetupLevelsInfo = {
+    actionableBias,
+    expectedTarget: roundedFair,
+    invalidationLevel,
+    invalidationLabel,
+    distanceInAvgMoves: rawAtr > 0 ? roundTo(Math.abs(spotPrice - fairValuePrice) / rawAtr, 2) : 0
   };
 
   return {
     symbol: spec.canonical,
     shortName: spec.shortName,
     timeframe: tf,
+    feedInfo,
+    eventRisk,
+    htfContext,
+    driverLink,
+    candleConfirm,
+    setupLevels,
     spotPrice: roundedSpot,
     fairValuePrice: roundedFair,
     gapPoints,
@@ -1686,7 +2316,7 @@ async function computeDislocationForSpec(
     atrPct,
     windowBars: slice.length,
     horizonBars: HORIZON,
-    reversingCandle,
+    reversingCandle: turnConfirmed,
     verdict,
     verdictLabel,
     verdictDetail,
@@ -1746,7 +2376,7 @@ export async function getDislocationScanPayload(
 
   const task = (async (): Promise<DislocationScanPayload> => {
     const results: DislocationPayload[] = [];
-    const batchSize = 4;
+    const batchSize = 3; // gentle concurrency for OANDA + Yahoo
     for (let i = 0; i < SCAN_UNIVERSE.length; i += batchSize) {
       const slice = SCAN_UNIVERSE.slice(i, i + batchSize);
       const batch = await Promise.all(
@@ -1754,6 +2384,40 @@ export async function getDislocationScanPayload(
       );
       for (const item of batch) {
         if (item && item.spotPrice > 0) results.push(item);
+      }
+    }
+
+    // Automatically log high-conviction 1H setups into the rolling System Audit journal
+    if (tf === '1h') {
+      for (const r of results) {
+        const hasConflict =
+          r.smtSignals.some((s) => s.direction === 'bullish') &&
+          r.smtSignals.some((s) => s.direction === 'bearish');
+        if (
+          r.convictionScore >= 62 &&
+          !hasConflict &&
+          r.eventRisk.status !== 'locked' &&
+          r.driverLink.status !== 'breaking' &&
+          r.driverFitLabel !== 'Weak' &&
+          r.setupLevels.actionableBias !== 'wait'
+        ) {
+          const dir = r.setupLevels.actionableBias === 'buy_watch' ? 'long' : 'short';
+          const spreadPx =
+            r.feedInfo.liveSpreadPx ?? r.spotPrice * 0.0002;
+          recordSystemAuditCandidate({
+            symbol: r.symbol,
+            shortName: r.shortName,
+            direction: dir,
+            setupKind: r.verdictLabel,
+            convictionScore: r.convictionScore,
+            entryPrice: r.spotPrice,
+            expectedPrice: r.fairValuePrice,
+            atr: r.atr,
+            spreadPx,
+            spreadSource: r.feedInfo.liveSpreadPx !== null ? 'oanda' : 'est',
+            trendAlign: r.htfContext.alignment
+          });
+        }
       }
     }
 
@@ -1767,12 +2431,24 @@ export async function getDislocationScanPayload(
         return {
           symbol: r.symbol,
           shortName: r.shortName,
+          feedSource: r.feedInfo.source,
           spotPrice: r.spotPrice,
           fairValuePrice: r.fairValuePrice,
           gapPct: r.gapPct,
           zScore: r.zScore,
           rSquared: r.rSquared,
           driverFitLabel: r.driverFitLabel,
+          driverLinkStatus: r.driverLink.status,
+          htfBias: r.htfContext.bias,
+          htfAlignment: r.htfContext.alignment,
+          eventRiskStatus: r.eventRisk.status,
+          eventRiskLabel:
+            r.eventRisk.status === 'locked'
+              ? `News Lock (${r.eventRisk.country})`
+              : r.eventRisk.status === 'caution'
+                ? `${r.eventRisk.country} News <2h`
+                : null,
+          turnConfirmed: r.candleConfirm.turnConfirmed,
           atr: r.atr,
           verdict: r.verdict,
           verdictLabel: r.verdictLabel,
@@ -1790,6 +2466,7 @@ export async function getDislocationScanPayload(
 
     const payload: DislocationScanPayload = {
       timeframe: tf,
+      oandaActive: isOandaConfigured(),
       rows,
       updatedAt: new Date().toISOString()
     };

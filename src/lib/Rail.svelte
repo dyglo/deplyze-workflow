@@ -15,6 +15,10 @@
   import WatchlistPanel from './panels/WatchlistPanel.svelte';
   import { upsertAlert, type TradingAlert } from './alerts/store';
   import { getLayoutById, type LayoutId } from './chart/layouts';
+  import {
+    fetchDislocationScan,
+    loadDislocationState
+  } from './dislocation/store';
   import type { InsightsViewId } from './insights/symbolInsightsApi';
   import type { ChartSettings } from './settings/chartSettings';
   import { loadWorkspaceJson, saveWorkspaceJson } from './workspace/storage';
@@ -126,6 +130,9 @@
     editing: TradingAlert | null;
   } | null>(null);
   let screenerInitialWlGroupId = $state<string | null>(null);
+  let radarWatchEnabled = $state(true);
+  let radarReadyCount = $state(0);
+  let radarTopSetupLabel = $state<string | null>(null);
 
   const activeLayoutDef = $derived(getLayoutById(layoutId));
 
@@ -161,6 +168,46 @@
         }
       });
     }
+    void loadDislocationState().then((st) => {
+      radarWatchEnabled = st.watchAlertsEnabled;
+    });
+  });
+
+  $effect(() => {
+    if (!radarWatchEnabled) {
+      radarReadyCount = 0;
+      radarTopSetupLabel = null;
+      return;
+    }
+
+    let cancelled = false;
+    async function pollRadar() {
+      try {
+        const scan = await fetchDislocationScan('1h', { force: false });
+        if (cancelled) return;
+        const ready = scan.rows.filter(
+          (r) =>
+            r.convictionScore >= 65 &&
+            !r.smtConflict &&
+            r.eventRiskStatus !== 'locked' &&
+            r.driverLinkStatus !== 'breaking'
+        );
+        radarReadyCount = ready.length;
+        radarTopSetupLabel =
+          ready.length > 0
+            ? `${ready[0].shortName} (${ready[0].convictionScore}/100 · ${ready[0].verdictLabel})`
+            : null;
+      } catch {
+        // silent background poll
+      }
+    }
+
+    void pollRadar();
+    const timer = setInterval(() => void pollRadar(), 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   });
 
   function openCreateAlertModal(
@@ -309,6 +356,7 @@
     {activeFullSymbol}
     {onSelectSymbol}
     onCreateAlertAtPrice={(sym, short, price) => openCreateAlertModal(sym, short, price, null)}
+    onWatchChange={(enabled) => (radarWatchEnabled = enabled)}
     onClose={closePanel}
   />
 {/if}
@@ -512,11 +560,13 @@
   </button>
 
   <button
-    class="rail-button"
+    class="rail-button radar-rail-btn"
     class:active={active === 'dislocation'}
     type="button"
     aria-label="Intermarket Radar"
-    title="Intermarket Radar"
+    title={radarReadyCount > 0 && radarTopSetupLabel
+      ? `Intermarket Radar — ${radarReadyCount} setup${radarReadyCount === 1 ? '' : 's'} ready: ${radarTopSetupLabel}`
+      : 'Intermarket Radar'}
     aria-pressed={active === 'dislocation'}
     onclick={() => select('dislocation')}
   >
@@ -525,6 +575,9 @@
       <path d="M2.75 6.5c2.4 0 3.6 4.75 6.25 4.75 2.5 0 3.6 4.25 8.25 4.25" />
       <circle cx="9" cy="10" r="1.5" />
     </svg>
+    {#if radarReadyCount > 0}
+      <span class="radar-alert-dot" aria-hidden="true"></span>
+    {/if}
   </button>
 
   <button
@@ -621,5 +674,24 @@
 
   .rail-button.active svg {
     opacity: 1;
+  }
+
+  .radar-rail-btn {
+    position: relative;
+  }
+
+  .radar-alert-dot {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #089981;
+    box-shadow: 0 0 0 2px var(--dark-bg-base);
+  }
+
+  .rail.light .radar-alert-dot {
+    box-shadow: 0 0 0 2px #ffffff;
   }
 </style>

@@ -34,6 +34,8 @@ import {
   getDislocationPayload,
   getDislocationScanPayload
 } from './insights/dislocation.js';
+import { getSystemAuditPayload } from './insights/auditLog.js';
+import { getOandaEnv, isOandaConfigured } from './quotes/oanda.js';
 import { getScreenerPayload } from './screener/service.js';
 import type { EdgeAuditEntryInput, TechBiasInput } from './insights/types.js';
 
@@ -59,6 +61,9 @@ function loadLocalEnv(): void {
           (val.startsWith("'") && val.endsWith("'"))
         ) {
           val = val.slice(1, -1);
+        } else {
+          // Strip unquoted inline comments like `OANDA_ENV=practice   # comment`
+          val = val.replace(/\s+#.*$/, '').trim();
         }
         if (key && process.env[key] === undefined) {
           process.env[key] = val;
@@ -146,10 +151,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.19',
+        version: '0.1.20',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
+        oandaConfigured: isOandaConfigured(),
+        oandaEnv: isOandaConfigured() ? getOandaEnv() : null,
         timestamp: new Date().toISOString()
       },
       'no-store'
@@ -160,7 +167,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.19',
+      version: '0.1.20',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
@@ -180,6 +187,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         'GET /api/insights/seasonals?symbol=OANDA:XAUUSD',
         'GET /api/insights/dislocation?symbol=OANDA:XAUUSD&tf=1h',
         'GET /api/insights/dislocation/scan?tf=1h',
+        'GET /api/insights/dislocation/audit',
         'GET /api/insights/event?title=Consumer%20Price%20Index%20YoY&country=US',
         'POST /api/insights/edge-audit',
         'GET /api/ai/models',
@@ -388,6 +396,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const force = url.searchParams.get('force') === '1';
     const payload = await getDislocationScanPayload(tf, force);
     sendJson(res, 200, payload, 'public, max-age=45');
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/insights/dislocation/audit') {
+    const payload = await getSystemAuditPayload();
+    sendJson(res, 200, payload, 'public, max-age=60');
     return;
   }
 

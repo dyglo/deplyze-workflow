@@ -1,3 +1,5 @@
+import { fetchOandaSeries, isOandaConfigured, type OandaGranularity } from './oanda.js';
+
 export interface QuotePerformance {
   w1: number | null;
   m1: number | null;
@@ -558,7 +560,7 @@ export interface HistoricalBarsPayload {
   shortName: string;
   interval: string;
   bars: HistoricalBar[];
-  source: 'yahoo';
+  source: 'oanda' | 'yahoo';
   updatedAt: string;
 }
 
@@ -699,6 +701,46 @@ export async function getHistoricalBarsPayload(
       clearTimeout(timer);
     }
   };
+
+  // Prefer native OANDA v20 candles when configured so chart overlays & Scorecard grading match OANDA wicks
+  if (isOandaConfigured()) {
+    const oandaGran: OandaGranularity | null =
+      plan.interval === '5m'
+        ? 'M5'
+        : plan.interval === '15m'
+          ? 'M15'
+          : plan.interval === '30m'
+            ? 'M30'
+            : plan.interval === '1h'
+              ? 'H1'
+              : plan.interval === '1d'
+                ? 'D'
+                : null;
+    if (oandaGran) {
+      const wantCount = plan.maxBars ? Math.min(440, plan.maxBars + 10) : 260;
+      const oandaRes = await fetchOandaSeries(short, oandaGran, wantCount, false);
+      if (oandaRes && oandaRes.bars.length > 0) {
+        let filtered: HistoricalBar[] = oandaRes.bars
+          .filter((b) => b.ts >= fromSec - plan.padSec)
+          .map((b) => ({ ts: b.ts, open: b.open, high: b.high, low: b.low, close: b.close }));
+        if (plan.maxBars && filtered.length > plan.maxBars) {
+          filtered = filtered.slice(filtered.length - plan.maxBars);
+        }
+        if (filtered.length > 0) {
+          const data: HistoricalBarsPayload = {
+            symbol: requested,
+            shortName: short,
+            interval: plan.interval,
+            bars: filtered,
+            source: 'oanda',
+            updatedAt: new Date().toISOString()
+          };
+          barsCache.set(cacheKey, { data, fetchedAt: Date.now() });
+          return data;
+        }
+      }
+    }
+  }
 
   let bars = await fetchBars(plan.range, plan.interval);
   let usedInterval = plan.interval;

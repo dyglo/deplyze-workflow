@@ -6,6 +6,7 @@
     computeScorecardStats,
     createPinnedSignal,
     fetchDislocation,
+    fetchDislocationAudit,
     fetchDislocationScan,
     formatAgeCompact,
     formatCorrPlain,
@@ -20,6 +21,8 @@
     type DislocationScanPayload,
     type DislocationTimeframe,
     type PinnedDislocationSignal,
+    type SetupContextTag,
+    type SystemAuditPayload,
     type VerdictKind
   } from '../dislocation/store';
 
@@ -29,6 +32,7 @@
     activeFullSymbol: string;
     onSelectSymbol: (symbol: string, shortName: string) => void;
     onCreateAlertAtPrice: (symbol: string, shortName: string, price?: number) => void;
+    onWatchChange?: (enabled: boolean) => void;
     onClose: () => void;
   }
 
@@ -38,11 +42,13 @@
     activeFullSymbol,
     onSelectSymbol,
     onCreateAlertAtPrice,
+    onWatchChange,
     onClose
   }: Props = $props();
 
   type TabId = 'symbol' | 'scanner' | 'scorecard';
-  type ScanFilter = 'all' | 'stretched' | 'smt';
+  type ScanFilter = 'all' | 'ready' | 'stretched' | 'smt';
+  type ScorecardSubTab = 'mine' | 'system';
 
   const TIMEFRAMES: { id: DislocationTimeframe; label: string }[] = [
     { id: '15m', label: '15m' },
@@ -50,8 +56,12 @@
     { id: '4h', label: '4H' }
   ];
 
+  const CONTEXT_TAGS: SetupContextTag[] = ['With Trend', 'Counter-Trend', 'Swept Pool', 'News'];
+
   let activeTab = $state<TabId>('symbol');
+  let scorecardSub = $state<ScorecardSubTab>('mine');
   let timeframe = $state<DislocationTimeframe>('1h');
+  let watchAlertsEnabled = $state(true);
   let scanFilter = $state<ScanFilter>('all');
   let showScoreFormula = $state(false);
 
@@ -63,6 +73,10 @@
   let scanLoading = $state(false);
   let scanError = $state<string | null>(null);
 
+  let auditPayload = $state<SystemAuditPayload | null>(null);
+  let auditLoading = $state(false);
+  let auditError = $state<string | null>(null);
+
   let signals = $state<PinnedDislocationSignal[]>([]);
   let resolving = $state(false);
   let feedbackNotice = $state<string | null>(null);
@@ -71,6 +85,7 @@
 
   let symbolAbort: AbortController | null = null;
   let scanAbort: AbortController | null = null;
+  let auditAbort: AbortController | null = null;
   let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
 
   const targetFullSymbol = $derived(activeFullSymbol || activeSymbol || 'OANDA:XAUUSD');
@@ -78,6 +93,15 @@
 
   const filteredScanRows = $derived.by(() => {
     const rows = scanPayload?.rows ?? [];
+    if (scanFilter === 'ready') {
+      return rows.filter(
+        (r) =>
+          r.convictionScore >= 60 &&
+          !r.smtConflict &&
+          r.eventRiskStatus !== 'locked' &&
+          r.driverLinkStatus !== 'breaking'
+      );
+    }
     if (scanFilter === 'stretched') {
       return rows.filter((r) => Math.abs(r.zScore) >= 1.5 && r.driverFitLabel !== 'Weak');
     }
@@ -87,6 +111,15 @@
     return rows;
   });
 
+  const scanReadyCount = $derived(
+    (scanPayload?.rows ?? []).filter(
+      (r) =>
+        r.convictionScore >= 60 &&
+        !r.smtConflict &&
+        r.eventRiskStatus !== 'locked' &&
+        r.driverLinkStatus !== 'breaking'
+    ).length
+  );
   const scanStretchedCount = $derived(
     (scanPayload?.rows ?? []).filter(
       (r) => Math.abs(r.zScore) >= 1.5 && r.driverFitLabel !== 'Weak'
@@ -96,9 +129,9 @@
     (scanPayload?.rows ?? []).filter((r) => r.topSmtLabel !== null).length
   );
 
-  // SVG Sparkline geometry (340 x 76 viewBox)
+  // SVG Sparkline geometry (340 x 74 viewBox)
   const CHART_W = 340;
-  const CHART_H = 76;
+  const CHART_H = 74;
   const CHART_PAD_X = 4;
   const CHART_PAD_Y = 7;
 
@@ -137,7 +170,7 @@
 
   function verdictTone(v: VerdictKind): 'bull' | 'bear' | 'warn' | 'neutral' {
     if (v === 'bullish_spring' || v === 'bullish_smt' || v === 'cheap') return 'bull';
-    if (v === 'bearish_trap' || v === 'bearish_smt' || v === 'rich') return 'bear';
+    if (v === 'bearish_trap' || v === 'bearish_smt' || v === 'rich' || v === 'event_lock') return 'bear';
     if (v === 'mixed' || v === 'weak_fit') return 'warn';
     return 'neutral';
   }
@@ -201,6 +234,25 @@
     }
   }
 
+  async function loadAuditView(force = false) {
+    auditAbort?.abort();
+    const controller = new AbortController();
+    auditAbort = controller;
+
+    auditLoading = true;
+    auditError = null;
+    try {
+      const data = await fetchDislocationAudit({ force, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      auditPayload = data;
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      auditError = err instanceof Error ? err.message : 'Unable to load System Audit.';
+    } finally {
+      if (!controller.signal.aborted) auditLoading = false;
+    }
+  }
+
   async function runSignalResolution(showFeedback = false) {
     if (resolving || signals.length === 0) return;
     resolving = true;
@@ -208,7 +260,7 @@
       const res = await resolvePendingSignals(signals);
       if (res.updatedCount > 0) {
         signals = res.signals;
-        await saveDislocationState({ timeframe, signals });
+        await saveDislocationState({ timeframe, watchAlertsEnabled, signals });
         if (showFeedback) {
           flashNotice(
             `Updated ${res.updatedCount} tracked setup${res.updatedCount === 1 ? '' : 's'}.`
@@ -225,8 +277,10 @@
   onMount(() => {
     void loadDislocationState().then((loaded) => {
       timeframe = loaded.timeframe;
+      watchAlertsEnabled = loaded.watchAlertsEnabled;
       signals = loaded.signals;
       stateReady = true;
+      onWatchChange?.(loaded.watchAlertsEnabled);
       if (loaded.signals.some((s) => s.status === 'pending')) {
         void runSignalResolution(false);
       }
@@ -235,6 +289,7 @@
     return () => {
       symbolAbort?.abort();
       scanAbort?.abort();
+      auditAbort?.abort();
       if (feedbackTimer) clearTimeout(feedbackTimer);
     };
   });
@@ -252,10 +307,26 @@
     void loadScannerView(tf, false);
   });
 
+  $effect(() => {
+    if (!stateReady || activeTab !== 'scorecard' || scorecardSub !== 'system') return;
+    void loadAuditView(false);
+  });
+
   function selectTimeframe(nextTf: DislocationTimeframe) {
     if (timeframe === nextTf) return;
     timeframe = nextTf;
-    void saveDislocationState({ timeframe: nextTf, signals });
+    void saveDislocationState({ timeframe: nextTf, watchAlertsEnabled, signals });
+  }
+
+  function toggleWatchAlerts() {
+    watchAlertsEnabled = !watchAlertsEnabled;
+    onWatchChange?.(watchAlertsEnabled);
+    void saveDislocationState({ timeframe, watchAlertsEnabled, signals });
+    flashNotice(
+      watchAlertsEnabled
+        ? 'Background Watch on — rail dot lights up when any market hits 65+.'
+        : 'Background Watch paused.'
+    );
   }
 
   function handleRefresh() {
@@ -263,6 +334,8 @@
       void loadSymbolView(targetFullSymbol, timeframe, true);
     } else if (activeTab === 'scanner') {
       void loadScannerView(timeframe, true);
+    } else if (scorecardSub === 'system') {
+      void loadAuditView(true);
     } else {
       void runSignalResolution(true);
     }
@@ -272,10 +345,18 @@
     if (!payload) return;
     const sig = createPinnedSignal(payload);
     signals = [sig, ...signals].slice(0, 160);
-    await saveDislocationState({ timeframe, signals });
+    await saveDislocationState({ timeframe, watchAlertsEnabled, signals });
+    const spreadTxt = sig.spreadSource === 'oanda' ? 'real OANDA spread' : 'est. spread';
     flashNotice(
-      `Tracking ${sig.shortName} ${sig.direction === 'long' ? 'Buy' : 'Sell'} setup (${horizonPlainLabel(sig.timeframe)} check).`
+      `Tracking ${sig.shortName} ${sig.direction === 'long' ? 'Buy' : 'Sell'} (${horizonPlainLabel(sig.timeframe)} check · ${spreadTxt}).`
     );
+  }
+
+  async function handleToggleSignalTag(id: string, tag: SetupContextTag) {
+    signals = signals.map((s) =>
+      s.id === id ? { ...s, contextTag: s.contextTag === tag ? null : tag } : s
+    );
+    await saveDislocationState({ timeframe, watchAlertsEnabled, signals });
   }
 
   function handleAlertAtFairValue() {
@@ -287,7 +368,7 @@
     if (!payload) return;
     try {
       await saveDislocationSnapshotToNotes(payload);
-      flashNotice(`Saved ${payload.shortName} summary to Notes.`);
+      flashNotice(`Saved ${payload.shortName} institutional brief to Notes.`);
     } catch {
       flashNotice('Could not save summary to Notes.');
     }
@@ -295,7 +376,7 @@
 
   async function handleDeleteSignal(id: string) {
     signals = signals.filter((s) => s.id !== id);
-    await saveDislocationState({ timeframe, signals });
+    await saveDislocationState({ timeframe, watchAlertsEnabled, signals });
   }
 
   function formatShortTime(tsSec: number): string {
@@ -341,7 +422,7 @@
   {/snippet}
 
   <div class="radar" class:light={theme === 'light'}>
-    <!-- Top Pill Tabs (matching CalendarPanel pills) -->
+    <!-- Top Pill Tabs (matching CalendarPanel) -->
     <div class="pill-bar" role="tablist" aria-label="Intermarket radar views">
       <button
         class="pill"
@@ -375,7 +456,7 @@
       </button>
     </div>
 
-    <!-- Flat Toolbar Row: Timeframe + Refresh -->
+    <!-- Flat Toolbar Row: Timeframe + Passive Watch Toggle + Refresh -->
     <div class="sub-toolbar">
       <div class="tf-row" role="group" aria-label="Chart timeframe">
         {#each TIMEFRAMES as tf (tf.id)}
@@ -390,22 +471,37 @@
         {/each}
       </div>
 
-      <button
-        class="square-btn"
-        type="button"
-        title="Refresh"
-        aria-label="Refresh"
-        disabled={loading || scanLoading || resolving}
-        onclick={handleRefresh}
-      >
-        <svg
-          viewBox="0 0 16 16"
-          class:spinning={loading || scanLoading || resolving}
-          aria-hidden="true"
+      <div class="tool-right">
+        <button
+          class="outline-btn watch-btn"
+          class:active={watchAlertsEnabled}
+          type="button"
+          title={watchAlertsEnabled
+            ? 'Background Watch ON — rail dot alerts when any market hits 65+ outside news lock'
+            : 'Enable Background Watch alerts on rail icon'}
+          onclick={toggleWatchAlerts}
         >
-          <path d="M13 8a5 5 0 1 1-1.35-3.4M13 3.25v2.75h-2.75" />
-        </svg>
-      </button>
+          <span class="watch-dot" class:on={watchAlertsEnabled}></span>
+          Watch
+        </button>
+
+        <button
+          class="square-btn"
+          type="button"
+          title="Refresh"
+          aria-label="Refresh"
+          disabled={loading || scanLoading || resolving || auditLoading}
+          onclick={handleRefresh}
+        >
+          <svg
+            viewBox="0 0 16 16"
+            class:spinning={loading || scanLoading || resolving || auditLoading}
+            aria-hidden="true"
+          >
+            <path d="M13 8a5 5 0 1 1-1.35-3.4M13 3.25v2.75h-2.75" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     {#if feedbackNotice}
@@ -415,7 +511,7 @@
     <div class="scroll-area">
       {#if activeTab === 'symbol'}
         {#if loading && !payload}
-          <div class="flat-empty">Comparing {activeSymbol || 'XAUUSD'} with related markets…</div>
+          <div class="flat-empty">Comparing {activeSymbol || 'XAUUSD'} on OANDA feed…</div>
         {:else if loadError && !payload}
           <div class="flat-empty err">
             <p>{loadError}</p>
@@ -430,14 +526,64 @@
         {:else if payload}
           {@const tone = verdictTone(payload.verdict)}
           {@const fitPct = Math.round(payload.rSquared * 100)}
+          {@const feed = payload.feedInfo}
+          {@const evRisk = payload.eventRisk}
+          {@const htf = payload.htfContext}
+          {@const dLink = payload.driverLink}
+          {@const candle = payload.candleConfirm}
+          {@const levels = payload.setupLevels}
 
-          <!-- 1. Headline Verdict & Price vs. Drivers (Flat, zero card box) -->
+          <!-- Slim Flat Live Feed & Event Risk Telemetry Strip -->
+          <div class="telemetry-strip">
+            <div class="tele-left">
+              <span class="live-dot" class:oanda={feed?.source !== 'yahoo'}></span>
+              <span class="tele-strong">{feed?.label ?? 'Live Feed'}</span>
+              {#if feed?.liveSpreadPx !== null && feed?.liveSpreadPx !== undefined}
+                <span class="tele-sep">·</span>
+                <span class:txt-warn={feed.wideSpread}>
+                  Spread {feed.liveSpreadPx}
+                  {#if feed.wideSpread}(Wide){/if}
+                </span>
+              {/if}
+            </div>
+            <span
+              class="tele-risk"
+              class:txt-bear={evRisk?.status === 'locked'}
+              class:txt-warn={evRisk?.status === 'caution'}
+              class:txt-bull={evRisk?.status === 'clear'}
+            >
+              {#if evRisk?.status === 'locked'}
+                News Lock
+              {:else if evRisk?.status === 'caution'}
+                {evRisk.country} News &lt;2h
+              {:else}
+                News Clear
+              {/if}
+            </span>
+          </div>
+
+          <!-- Full-Bleed Event Risk Alert Strip (only when locked or upcoming <2h) -->
+          {#if evRisk && evRisk.status !== 'clear'}
+            <div class="risk-banner" class:locked={evRisk.status === 'locked'}>
+              <strong>{evRisk.status === 'locked' ? 'Event Risk Lock' : 'Upcoming Release'}:</strong>
+              {evRisk.headline}
+            </div>
+          {/if}
+
+          <!-- Regime Decoupling Warning (only when short-window correlation breaks) -->
+          {#if dLink && dLink.status === 'breaking' && payload.driverFitLabel !== 'Weak'}
+            <div class="risk-banner">
+              <strong>Drivers Decoupling:</strong> {dLink.summary}
+            </div>
+          {/if}
+
+          <!-- 1. Headline Verdict & Price vs. Drivers -->
           <div class="section-strip">
             <span class="strip-title">{payload.shortName} · Price vs. Drivers</span>
             <button
               class="score-toggle"
               type="button"
-              title="Click to see how the 0–100 Setup Strength is computed"
+              title="Click to inspect the 0–100 Setup Strength formula"
               onclick={() => (showScoreFormula = !showScoreFormula)}
             >
               Strength <strong>{payload.convictionScore}/100</strong>
@@ -499,7 +645,70 @@
               </div>
             </div>
 
-            <!-- Flat Equilibrium Bar -->
+            <!-- Flat 3-Column Institutional Context Strip (HTF Trend · Driver Link · Candle/Vol) -->
+            {#if htf && dLink && candle}
+              <div class="context-strip">
+                <div class="ctx-col" title={htf.summary}>
+                  <span class="m-lbl">Higher Trend</span>
+                  <span
+                    class="ctx-val"
+                    class:txt-bull={htf.bias === 'bull'}
+                    class:txt-bear={htf.bias === 'bear'}
+                  >
+                    {htf.biasLabel}
+                  </span>
+                  <span
+                    class="ctx-sub"
+                    class:txt-bull={htf.alignment === 'with_trend'}
+                    class:txt-warn={htf.alignment === 'counter_trend'}
+                  >
+                    {htf.alignmentLabel}
+                  </span>
+                </div>
+
+                <div class="ctx-col" title={dLink.summary}>
+                  <span class="m-lbl">Driver Link</span>
+                  <span
+                    class="ctx-val"
+                    class:txt-bull={dLink.status === 'stable'}
+                    class:txt-warn={dLink.status === 'shifting'}
+                    class:txt-bear={dLink.status === 'breaking'}
+                  >
+                    {dLink.label}
+                  </span>
+                  <span class="ctx-sub">{dLink.recentFitPct}% vs {dLink.baselineFitPct}%</span>
+                </div>
+
+                <div class="ctx-col">
+                  <span class="m-lbl">Turn &amp; Volume</span>
+                  <span class="ctx-val" class:txt-bull={candle.turnConfirmed}>
+                    {candle.label}
+                  </span>
+                  <span class="ctx-sub">{candle.volumeLabel}</span>
+                </div>
+              </div>
+            {/if}
+
+            <!-- Structural Reference Levels (shown when a directional extreme exists) -->
+            {#if levels && levels.invalidationLevel !== null}
+              <div class="ref-levels-row">
+                <div class="ref-item">
+                  <span class="m-lbl">Expected Magnet</span>
+                  <span class="ref-val">
+                    {formatRadarPrice(levels.expectedTarget, payload.shortName)}
+                    <span class="ref-note">({levels.distanceInAvgMoves.toFixed(1)}× avg move)</span>
+                  </span>
+                </div>
+                <div class="ref-item right">
+                  <span class="m-lbl">{levels.invalidationLabel ?? 'Recent Extreme'}</span>
+                  <span class="ref-val">
+                    {formatRadarPrice(levels.invalidationLevel, payload.shortName)}
+                  </span>
+                </div>
+              </div>
+            {/if}
+
+            <!-- Flat Equilibrium Stretch Bar -->
             <div class="stretch-bar-wrap">
               <div class="stretch-labels">
                 <span>Lagging behind</span>
@@ -520,7 +729,9 @@
                 ></div>
               </div>
               <div class="meta-foot">
-                <span>Avg {tfBarLabel(timeframe)} move: <strong>{formatRadarPrice(payload.atr, payload.shortName)}</strong> ({payload.atrPct.toFixed(2)}%)</span>
+                <span>
+                  Avg {tfBarLabel(timeframe)} move: <strong>{formatRadarPrice(payload.atr, payload.shortName)}</strong> ({payload.atrPct.toFixed(2)}%)
+                </span>
                 <span>Last {payload.horizonBars} {tfBarLabel(timeframe)} bars</span>
               </div>
             </div>
@@ -595,7 +806,7 @@
             </div>
           </div>
 
-          <!-- 2. Peer Divergences (Strict SMT) -->
+          <!-- 2. Peer Divergences (Strict OANDA SMT) -->
           <div class="section-strip">
             <span class="strip-title">Peer Divergences (SMT)</span>
             <span class="strip-meta">
@@ -630,16 +841,25 @@
                     </div>
                   </div>
                   <p class="row-desc">{sig.summary}</p>
+                  {#if sig.contextNote}
+                    <div
+                      class="smt-ctx"
+                      class:txt-bull={sig.alignedWithHtf === 'with_trend'}
+                      class:txt-warn={sig.alignedWithHtf === 'counter_trend'}
+                    >
+                      {sig.contextNote}
+                    </div>
+                  {/if}
                 </div>
               {/each}
             </div>
           {:else}
             <div class="flat-quiet">
-              No clean peer divergence right now. Flags only fire on fresh sweeps that reject back inside a major level while the peer stays well away.
+              No clean peer divergence right now. Flags only fire on fresh OANDA sweeps that close back inside a major level while the peer stays far away.
             </div>
           {/if}
 
-          <!-- 3. Key Session Levels -->
+          <!-- 3. Key Session Levels (Exact OANDA Chart Levels) -->
           {#if payload.sessionPools.length > 0}
             <div class="section-strip">
               <span class="strip-title">Key Session Levels</span>
@@ -722,14 +942,17 @@
                 </div>
                 <div class="drv-sub">
                   <span>{drv.active ? formatCorrPlain(drv.correlation) : 'Market closed'}</span>
-                  <span class="drv-wt">{drv.active ? `Impact ${drv.weightPct}%` : ''}</span>
+                  <span class="drv-wt">
+                    {drv.active ? `Impact ${drv.weightPct}%` : ''}
+                    {#if drv.feed === 'oanda'}· OANDA{/if}
+                  </span>
                 </div>
               </button>
             {/each}
           </div>
         {/if}
       {:else if activeTab === 'scanner'}
-        <!-- Flat Cross-Market Scanner -->
+        <!-- Flat Cross-Market Institutional Scanner -->
         <div class="filter-strip">
           <button
             class="mini-pill"
@@ -738,6 +961,14 @@
             onclick={() => (scanFilter = 'all')}
           >
             All ({scanPayload?.rows.length ?? 0})
+          </button>
+          <button
+            class="mini-pill"
+            class:active={scanFilter === 'ready'}
+            type="button"
+            onclick={() => (scanFilter = 'ready')}
+          >
+            Ready ({scanReadyCount})
           </button>
           <button
             class="mini-pill"
@@ -753,17 +984,19 @@
             type="button"
             onclick={() => (scanFilter = 'smt')}
           >
-            Divergence ({scanSmtCount})
+            SMT ({scanSmtCount})
           </button>
         </div>
 
         <div class="section-strip">
           <span class="strip-title">Markets Ranked by Setup Strength</span>
-          <span class="strip-meta">0–100 score</span>
+          <span class="strip-meta">
+            {scanPayload?.oandaActive ? 'OANDA Live · ' : ''}0–100 score
+          </span>
         </div>
 
         {#if scanLoading && !scanPayload}
-          <div class="flat-empty">Scanning 12 markets on {tfBarLabel(timeframe)}…</div>
+          <div class="flat-empty">Scanning 12 OANDA markets on {tfBarLabel(timeframe)}…</div>
         {:else if scanError && !scanPayload}
           <div class="flat-empty err">
             <p>{scanError}</p>
@@ -824,18 +1057,42 @@
                 </div>
 
                 <div class="scan-foot">
-                  <span>{row.driverFitLabel} fit ({Math.round(row.rSquared * 100)}%)</span>
-                  {#if row.smtConflict}
-                    <span class="txt-warn">Opposing sweeps (Mixed)</span>
+                  <span class="scan-badges">
+                    <span>{row.driverFitLabel} ({Math.round(row.rSquared * 100)}%)</span>
+                    {#if row.htfBias}
+                      <span
+                        class="tiny-chip"
+                        class:txt-bull={row.htfBias === 'bull'}
+                        class:txt-bear={row.htfBias === 'bear'}
+                      >
+                        4H {row.htfBias === 'bull' ? '↑' : row.htfBias === 'bear' ? '↓' : '—'}
+                      </span>
+                    {/if}
+                    {#if row.driverLinkStatus === 'breaking'}
+                      <span class="tiny-chip txt-bear">Decoupling</span>
+                    {/if}
+                  </span>
+
+                  {#if row.eventRiskLabel}
+                    <span
+                      class:txt-bear={row.eventRiskStatus === 'locked'}
+                      class:txt-warn={row.eventRiskStatus === 'caution'}
+                    >
+                      {row.eventRiskLabel}
+                    </span>
+                  {:else if row.smtConflict}
+                    <span class="txt-warn">Opposing sweeps</span>
                   {:else if row.topSmtLabel}
                     <span
                       class:txt-bull={row.topSmtDirection === 'bullish'}
                       class:txt-bear={row.topSmtDirection === 'bearish'}
                     >
-                      {row.topSmtDirection === 'bullish' ? 'Bullish' : 'Bearish'}: {row.topSmtLabel} ({formatAgeCompact(row.topSmtMinutesAgo ?? 0)})
+                      {row.topSmtDirection === 'bullish' ? 'Bull' : 'Bear'}: {row.topSmtLabel}
                     </span>
+                  {:else if row.htfAlignment === 'with_trend'}
+                    <span class="txt-bull">With 4H Trend</span>
                   {:else}
-                    <span>No fresh divergence</span>
+                    <span>No fresh SMT</span>
                   {/if}
                 </div>
               </button>
@@ -843,152 +1100,344 @@
           </div>
         {/if}
       {:else}
-        <!-- Flat Market-Truth Scorecard (Spread & Confidence-Range Aware) -->
-        <div class="section-strip">
-          <span class="strip-title">Live Edge Verification</span>
+        <!-- Dual-Track Institutional Scorecard -->
+        <div class="filter-strip">
           <button
-            class="strip-action"
+            class="mini-pill"
+            class:active={scorecardSub === 'mine'}
             type="button"
-            disabled={resolving || scorecard.pending === 0}
-            onclick={() => void runSignalResolution(true)}
+            onclick={() => (scorecardSub = 'mine')}
           >
-            {resolving ? 'Checking…' : `Check Open (${scorecard.pending})`}
+            My Setups ({signals.length})
+          </button>
+          <button
+            class="mini-pill"
+            class:active={scorecardSub === 'system'}
+            type="button"
+            onclick={() => (scorecardSub = 'system')}
+          >
+            System Audit &amp; Proof
           </button>
         </div>
 
-        <div class="flat-block">
-          <p class="plain-copy">
-            Every tracked setup is graded 8 bars later after deducting estimated spread. Keep only once at least <strong>{scorecard.minSampleSize} decided setups</strong> show a 95% confidence low bound above <strong>{scorecard.breakEvenPct}%</strong> break-even and positive net average move.
-          </p>
-
-          <div class="sc-metrics">
-            <div class="m-col">
-              <span class="m-lbl">Win Rate (after spread)</span>
-              <span
-                class="m-val"
-                class:txt-bull={scorecard.ciLowPct !== null && scorecard.ciLowPct > scorecard.breakEvenPct}
-                class:txt-bear={scorecard.ciHighPct !== null && scorecard.ciHighPct < scorecard.breakEvenPct}
-              >
-                {scorecard.hitRatePct !== null ? `${scorecard.hitRatePct}%` : '—'}
-              </span>
-              <span class="m-sub">
-                {scorecard.ciLowPct !== null && scorecard.ciHighPct !== null
-                  ? `95% range: ${scorecard.ciLowPct}%–${scorecard.ciHighPct}%`
-                  : `Break-even: ${scorecard.breakEvenPct}%`}
-              </span>
-            </div>
-
-            <div class="m-col">
-              <span class="m-lbl">Avg Net Move</span>
-              <span
-                class="m-val"
-                class:txt-bull={scorecard.avgNetAtr !== null && scorecard.avgNetAtr >= 0.1}
-                class:txt-bear={scorecard.avgNetAtr !== null && scorecard.avgNetAtr < 0}
-              >
-                {scorecard.avgNetAtr !== null ? `${formatSigned(scorecard.avgNetAtr, 2)}× avg` : '—'}
-              </span>
-              <span class="m-sub">
-                {scorecard.hits}W · {scorecard.misses}L ({scorecard.flats} flat)
-              </span>
-            </div>
-          </div>
-
-          <div class="sc-bar-wrap">
-            <div class="sc-track">
-              <div
-                class="sc-fill"
-                style:width="{Math.min(100, Math.round(((scorecard.hits + scorecard.misses) / scorecard.minSampleSize) * 100))}%"
-              ></div>
-            </div>
-            <span
-              class="sc-status"
-              class:txt-bull={scorecard.verdict === 'keep'}
-              class:txt-bear={scorecard.verdict === 'drop'}
-              class:txt-warn={scorecard.verdict === 'early_warning'}
+        {#if scorecardSub === 'mine'}
+          <div class="section-strip">
+            <span class="strip-title">Live Edge Verification</span>
+            <button
+              class="strip-action"
+              type="button"
+              disabled={resolving || scorecard.pending === 0}
+              onclick={() => void runSignalResolution(true)}
             >
-              {scorecard.statusLabel}
-            </span>
+              {resolving ? 'Checking…' : `Check Open (${scorecard.pending})`}
+            </button>
           </div>
-        </div>
 
-        <div class="section-strip">
-          <span class="strip-title">Tracked Setups</span>
-          <span class="strip-meta">{signals.length} total</span>
-        </div>
+          <div class="flat-block">
+            <p class="plain-copy">
+              Each tracked setup is graded 8 bars later on OANDA candles after deducting live spread. Keep only once <strong>{scorecard.minSampleSize} decided setups</strong> show a 95% low bound above <strong>{scorecard.breakEvenPct}%</strong> break-even and positive average net move.
+            </p>
 
-        {#if signals.length === 0}
-          <div class="flat-quiet">
-            No tracked setups yet. Click <strong>Track Setup</strong> on the Symbol tab to log a live setup and automatically check its outcome after spread.
+            <div class="sc-metrics">
+              <div class="m-col">
+                <span class="m-lbl">Win Rate (after spread)</span>
+                <span
+                  class="m-val"
+                  class:txt-bull={scorecard.ciLowPct !== null && scorecard.ciLowPct > scorecard.breakEvenPct}
+                  class:txt-bear={scorecard.ciHighPct !== null && scorecard.ciHighPct < scorecard.breakEvenPct}
+                >
+                  {scorecard.hitRatePct !== null ? `${scorecard.hitRatePct}%` : '—'}
+                </span>
+                <span class="m-sub">
+                  {scorecard.ciLowPct !== null && scorecard.ciHighPct !== null
+                    ? `95% range: ${scorecard.ciLowPct}%–${scorecard.ciHighPct}%`
+                    : `Break-even: ${scorecard.breakEvenPct}%`}
+                </span>
+              </div>
+
+              <div class="m-col">
+                <span class="m-lbl">Avg Net Move</span>
+                <span
+                  class="m-val"
+                  class:txt-bull={scorecard.avgNetAtr !== null && scorecard.avgNetAtr >= 0.1}
+                  class:txt-bear={scorecard.avgNetAtr !== null && scorecard.avgNetAtr < 0}
+                >
+                  {scorecard.avgNetAtr !== null ? `${formatSigned(scorecard.avgNetAtr, 2)}× avg` : '—'}
+                </span>
+                <span class="m-sub">
+                  {scorecard.hits}W · {scorecard.misses}L ({scorecard.flats} flat)
+                </span>
+              </div>
+            </div>
+
+            <div class="sc-bar-wrap">
+              <div class="sc-track">
+                <div
+                  class="sc-fill"
+                  style:width="{Math.min(100, Math.round(((scorecard.hits + scorecard.misses) / scorecard.minSampleSize) * 100))}%"
+                ></div>
+              </div>
+              <span
+                class="sc-status"
+                class:txt-bull={scorecard.verdict === 'keep'}
+                class:txt-bear={scorecard.verdict === 'drop'}
+                class:txt-warn={scorecard.verdict === 'early_warning'}
+              >
+                {scorecard.statusLabel}
+              </span>
+            </div>
           </div>
-        {:else}
-          <div class="flat-list">
-            {#each signals as sig (sig.id)}
-              <div class="list-row sig-row">
-                <div class="row-top">
-                  <button
-                    class="sig-sym"
-                    type="button"
-                    onclick={() => {
-                      onSelectSymbol(sig.symbol, sig.shortName);
-                      activeTab = 'symbol';
-                    }}
+
+          {#if scorecard.hits + scorecard.misses > 0}
+            <div class="section-strip">
+              <span class="strip-title">Edge Breakdown (Session &amp; Trend)</span>
+              <span class="strip-meta">After spread</span>
+            </div>
+            <div class="flat-list">
+              {#each [...scorecard.byAlign, ...scorecard.bySession].filter((r) => r.decided > 0) as slice (slice.label)}
+                <div class="list-row slice-row">
+                  <span class="slice-lbl">{slice.label}</span>
+                  <span class="row-muted">{slice.decided} trades</span>
+                  <span class="slice-wr">{slice.winRatePct ?? 0}% WR</span>
+                  <strong
+                    class="slice-net"
+                    class:txt-bull={(slice.avgNetAtr ?? 0) > 0}
+                    class:txt-bear={(slice.avgNetAtr ?? 0) < 0}
                   >
-                    <strong>{sig.shortName}</strong>
-                    <span
-                      class="dir-pill"
-                      class:bull={sig.direction === 'long'}
-                      class:bear={sig.direction === 'short'}
-                    >
-                      {sig.direction === 'long' ? 'Buy' : 'Sell'}
-                    </span>
-                    <span class="row-muted">{tfBarLabel(sig.timeframe)}</span>
-                  </button>
+                    {slice.avgNetAtr !== null ? `${formatSigned(slice.avgNetAtr, 2)}×` : '—'}
+                  </strong>
+                </div>
+              {/each}
+            </div>
+          {/if}
 
-                  <div class="row-right">
-                    <span
-                      class="outcome-tag"
-                      class:txt-bull={sig.status === 'hit'}
-                      class:txt-bear={sig.status === 'miss'}
-                    >
-                      {sig.status === 'hit'
-                        ? 'Win'
-                        : sig.status === 'miss'
-                          ? 'Loss'
-                          : sig.status === 'flat'
-                            ? 'Flat'
-                            : 'Open'}
-                    </span>
+          <div class="section-strip">
+            <span class="strip-title">Tracked Setups</span>
+            <span class="strip-meta">{signals.length} total</span>
+          </div>
+
+          {#if signals.length === 0}
+            <div class="flat-quiet">
+              No tracked setups yet. Click <strong>Track Setup</strong> on the Symbol tab to log a live setup with real OANDA spread and check its 8-bar outcome automatically.
+            </div>
+          {:else}
+            <div class="flat-list">
+              {#each signals as sig (sig.id)}
+                <div class="list-row sig-row">
+                  <div class="row-top">
                     <button
-                      class="del-x"
+                      class="sig-sym"
                       type="button"
-                      aria-label="Remove tracked setup"
-                      onclick={() => void handleDeleteSignal(sig.id)}
+                      onclick={() => {
+                        onSelectSymbol(sig.symbol, sig.shortName);
+                        activeTab = 'symbol';
+                      }}
                     >
-                      ×
+                      <strong>{sig.shortName}</strong>
+                      <span
+                        class="dir-pill"
+                        class:bull={sig.direction === 'long'}
+                        class:bear={sig.direction === 'short'}
+                      >
+                        {sig.direction === 'long' ? 'Buy' : 'Sell'}
+                      </span>
+                      <span class="row-muted">{tfBarLabel(sig.timeframe)}</span>
+                      {#if sig.session}
+                        <span class="row-muted">· {sig.session}</span>
+                      {/if}
                     </button>
+
+                    <div class="row-right">
+                      <span
+                        class="outcome-tag"
+                        class:txt-bull={sig.status === 'hit'}
+                        class:txt-bear={sig.status === 'miss'}
+                      >
+                        {sig.status === 'hit'
+                          ? 'Win'
+                          : sig.status === 'miss'
+                            ? 'Loss'
+                            : sig.status === 'flat'
+                              ? 'Flat'
+                              : 'Open'}
+                      </span>
+                      <button
+                        class="del-x"
+                        type="button"
+                        aria-label="Remove tracked setup"
+                        onclick={() => void handleDeleteSignal(sig.id)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="sig-sub">
+                    <span>
+                      Entry {formatRadarPrice(sig.entryPrice, sig.shortName)} → Exp {formatRadarPrice(sig.fairValuePrice, sig.shortName)}
+                    </span>
+                    <span>
+                      {sig.spreadSource === 'oanda' ? 'OANDA' : 'Est'} spread {sig.spreadPct.toFixed(3)}%
+                    </span>
+                  </div>
+
+                  <div class="sig-sub">
+                    <span>Best +{sig.maxFavorableAtr.toFixed(1)}× · Heat -{sig.maxAdverseAtr.toFixed(1)}×</span>
+                    {#if sig.netReturnAtr !== null}
+                      <strong class:txt-bull={sig.netReturnAtr > 0} class:txt-bear={sig.netReturnAtr < 0}>
+                        Net {formatSigned(sig.netReturnAtr, 2)}×
+                      </strong>
+                    {:else}
+                      <span>{sig.smtLabel ?? sig.verdictLabel}</span>
+                    {/if}
+                  </div>
+
+                  <!-- 1-click user context tags -->
+                  <div class="tag-row">
+                    {#each CONTEXT_TAGS as tag (tag)}
+                      <button
+                        class="ctx-tag"
+                        class:on={sig.contextTag === tag}
+                        type="button"
+                        onclick={() => void handleToggleSignalTag(sig.id, tag)}
+                      >
+                        {tag}
+                      </button>
+                    {/each}
                   </div>
                 </div>
+              {/each}
+            </div>
+          {/if}
+        {:else}
+          <!-- System Live Audit + Verified OANDA 9-Month Walk-Forward Benchmark -->
+          <div class="section-strip">
+            <span class="strip-title">OANDA 9-Month Out-of-Sample Proof</span>
+            <span class="strip-meta">Real spread</span>
+          </div>
 
-                <div class="sig-sub">
-                  <span>
-                    Entry {formatRadarPrice(sig.entryPrice, sig.shortName)} → Exp {formatRadarPrice(sig.fairValuePrice, sig.shortName)}
-                  </span>
-                  <span>{formatStretchPlain(sig.zScore)}</span>
-                </div>
+          {#if auditLoading && !auditPayload}
+            <div class="flat-empty">Loading System Audit &amp; OANDA benchmark…</div>
+          {:else if auditError && !auditPayload}
+            <div class="flat-empty err">
+              <p>{auditError}</p>
+              <button class="outline-btn" type="button" onclick={() => void loadAuditView(true)}>
+                Retry
+              </button>
+            </div>
+          {:else if auditPayload}
+            <div class="flat-block">
+              <p class="plain-copy">
+                {auditPayload.oandaBenchmark.windowLabel}. This is why Radar rewards <strong>with-trend pullbacks</strong> and warns against fading counter-trend sweeps blindly.
+              </p>
+            </div>
 
-                <div class="sig-sub">
-                  <span>Best +{sig.maxFavorableAtr.toFixed(1)}× · Heat -{sig.maxAdverseAtr.toFixed(1)}×</span>
-                  {#if sig.netReturnAtr !== null}
-                    <strong class:txt-bull={sig.netReturnAtr > 0} class:txt-bear={sig.netReturnAtr < 0}>
-                      Net {formatSigned(sig.netReturnAtr, 2)}×
+            <div class="flat-list">
+              {#each auditPayload.oandaBenchmark.rows as row (row.label)}
+                <div class="list-row bench-row">
+                  <div class="row-top">
+                    <span class="row-strong">{row.label}</span>
+                    <strong
+                      class="slice-net"
+                      class:txt-bull={row.avgNetAtr > 0}
+                      class:txt-bear={row.avgNetAtr < 0}
+                    >
+                      {formatSigned(row.avgNetAtr, 2)}× avg
                     </strong>
-                  {:else}
-                    <span>{sig.smtLabel ?? sig.verdictLabel}</span>
-                  {/if}
+                  </div>
+                  <div class="sig-sub">
+                    <span>N = {row.sampleSize} · {row.winRatePct}% WR (95% range {row.ciRange})</span>
+                  </div>
+                  <div class="bench-note">{row.note}</div>
+                </div>
+              {/each}
+            </div>
+
+            <div class="section-strip">
+              <span class="strip-title">Live Auto-Logged Setups (1H, 62+)</span>
+              <span class="strip-meta">{auditPayload.summary.total} logged</span>
+            </div>
+
+            {#if auditPayload.entries.length === 0}
+              <div class="flat-quiet">
+                No 1H setups have cleared 62+ strength outside news lock since the server started. Clean high-conviction setups log here automatically and self-grade 8 hours later on OANDA candles.
+              </div>
+            {:else}
+              <div class="flat-block">
+                <div class="sc-metrics">
+                  <div class="m-col">
+                    <span class="m-lbl">System Win Rate</span>
+                    <span class="m-val">
+                      {auditPayload.summary.winRatePct !== null ? `${auditPayload.summary.winRatePct}%` : '—'}
+                    </span>
+                    <span class="m-sub">
+                      {auditPayload.summary.hits}W · {auditPayload.summary.misses}L · {auditPayload.summary.pending} open
+                    </span>
+                  </div>
+                  <div class="m-col">
+                    <span class="m-lbl">System Avg Net</span>
+                    <span
+                      class="m-val"
+                      class:txt-bull={(auditPayload.summary.avgNetAtr ?? 0) > 0}
+                      class:txt-bear={(auditPayload.summary.avgNetAtr ?? 0) < 0}
+                    >
+                      {auditPayload.summary.avgNetAtr !== null
+                        ? `${formatSigned(auditPayload.summary.avgNetAtr, 2)}× avg`
+                        : '—'}
+                    </span>
+                    <span class="m-sub">
+                      {auditPayload.summary.ciLowPct !== null
+                        ? `95% range ${auditPayload.summary.ciLowPct}%–${auditPayload.summary.ciHighPct}%`
+                        : 'Awaiting 8h closes'}
+                    </span>
+                  </div>
                 </div>
               </div>
-            {/each}
-          </div>
+
+              <div class="flat-list">
+                {#each auditPayload.entries.slice(0, 15) as item (item.id)}
+                  <div class="list-row sig-row">
+                    <div class="row-top">
+                      <span class="row-left">
+                        <strong>{item.shortName}</strong>
+                        <span
+                          class="dir-pill"
+                          class:bull={item.direction === 'long'}
+                          class:bear={item.direction === 'short'}
+                        >
+                          {item.direction === 'long' ? 'Buy' : 'Sell'}
+                        </span>
+                        <span class="row-muted">{item.convictionScore}/100 · {item.session}</span>
+                      </span>
+                      <span
+                        class="outcome-tag"
+                        class:txt-bull={item.status === 'hit'}
+                        class:txt-bear={item.status === 'miss'}
+                      >
+                        {item.status === 'hit'
+                          ? 'Win'
+                          : item.status === 'miss'
+                            ? 'Loss'
+                            : item.status === 'flat'
+                              ? 'Flat'
+                              : 'Open'}
+                      </span>
+                    </div>
+                    <div class="sig-sub">
+                      <span>{item.setupKind}</span>
+                      {#if item.netReturnAtr !== null}
+                        <strong class:txt-bull={item.netReturnAtr > 0} class:txt-bear={item.netReturnAtr < 0}>
+                          Net {formatSigned(item.netReturnAtr, 2)}×
+                        </strong>
+                      {:else}
+                        <span>Entry {formatRadarPrice(item.entryPrice, item.shortName)}</span>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {/if}
         {/if}
       {/if}
     </div>
@@ -996,7 +1445,7 @@
 </PanelShell>
 
 <style>
-  /* Flat design matching CalendarPanel.svelte — pure background, hairline dividers, zero boxed cards */
+  /* Pure Flat Design matching CalendarPanel.svelte — zero boxed cards, hairline dividers */
   .radar {
     --rd-bg: var(--dark-bg-panel);
     --rd-border: var(--dark-border);
@@ -1034,7 +1483,6 @@
     --rd-warn: #b57a00;
   }
 
-  /* Pill bar matching CalendarPanel */
   .pill-bar {
     padding: 0 16px 12px;
     display: flex;
@@ -1073,7 +1521,8 @@
     flex: 0 0 auto;
   }
 
-  .tf-row {
+  .tf-row,
+  .tool-right {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1081,13 +1530,13 @@
 
   .outline-btn {
     height: 30px;
-    padding: 0 11px;
+    padding: 0 10px;
     border: 1px solid var(--rd-border);
     border-radius: 8px;
     background: transparent;
     color: var(--rd-secondary);
     font: inherit;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
@@ -1108,6 +1557,26 @@
   .outline-btn.flex1 {
     flex: 1;
     color: var(--rd-text);
+  }
+
+  .watch-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 9px;
+  }
+
+  .watch-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--rd-secondary);
+    opacity: 0.45;
+  }
+
+  .watch-dot.on {
+    background: var(--rd-bull);
+    opacity: 1;
   }
 
   .square-btn {
@@ -1169,9 +1638,70 @@
     display: none;
   }
 
-  /* Full-bleed flat section heading matching CalendarPanel .day-heading */
+  /* Live OANDA & Event Risk Telemetry Strip */
+  .telemetry-strip {
+    padding: 7px 16px;
+    border-top: 1px solid var(--rd-divider);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--rd-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tele-left {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+  }
+
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--rd-secondary);
+    flex-shrink: 0;
+  }
+
+  .live-dot.oanda {
+    background: var(--rd-bull);
+  }
+
+  .tele-strong {
+    color: var(--rd-text);
+    font-weight: 600;
+  }
+
+  .tele-sep {
+    opacity: 0.5;
+  }
+
+  .tele-risk {
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .risk-banner {
+    padding: 8px 16px;
+    border-top: 1px solid var(--rd-divider);
+    border-left: 2px solid var(--rd-warn);
+    background: rgba(224, 168, 46, 0.1);
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--rd-text);
+  }
+
+  .risk-banner.locked {
+    border-left-color: var(--rd-bear);
+    background: rgba(242, 54, 69, 0.12);
+  }
+
+  /* Full-bleed flat section heading matching CalendarPanel */
   .section-strip {
-    min-height: 36px;
+    min-height: 35px;
     padding: 0 16px 0 14px;
     background: var(--rd-strip-bg);
     border-top: 1px solid var(--rd-divider);
@@ -1200,26 +1730,20 @@
   .strip-action {
     border: 0;
     background: transparent;
-    color: var(--rd-secondary);
+    color: var(--rd-text);
     font: inherit;
     font-size: 12px;
-    cursor: pointer;
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 2px 4px;
-    border-radius: 5px;
+    cursor: pointer;
+    padding: 2px 0;
+    font-variant-numeric: tabular-nums;
   }
 
   .score-toggle:hover,
   .strip-action:hover:not(:disabled) {
-    color: var(--rd-text);
-    background: var(--rd-hover);
-  }
-
-  .score-toggle strong {
-    color: var(--rd-text);
-    font-variant-numeric: tabular-nums;
+    text-decoration: underline;
   }
 
   .strip-action:disabled {
@@ -1229,7 +1753,8 @@
 
   .chev {
     display: inline-block;
-    font-size: 10px;
+    font-size: 11px;
+    color: var(--rd-secondary);
     transition: transform 140ms ease;
   }
 
@@ -1238,51 +1763,31 @@
   }
 
   .flat-block {
-    padding: 14px 16px 16px;
+    padding: 13px 16px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-  }
-
-  .flat-empty,
-  .flat-quiet {
-    padding: 16px;
-    font-size: 12.5px;
-    line-height: 1.5;
-    color: var(--rd-secondary);
-  }
-
-  .flat-empty.err {
-    color: var(--rd-bear);
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-  }
-
-  .flat-empty.err p {
-    margin: 0;
+    gap: 11px;
   }
 
   .verdict-row {
     display: flex;
     align-items: center;
-    gap: 8px;
     flex-wrap: wrap;
+    gap: 7px;
   }
 
   .verdict-tag {
+    font-size: 11.5px;
+    font-weight: 600;
     padding: 2px 8px;
-    border-radius: 6px;
+    border-radius: 999px;
     background: var(--rd-pill-bg);
     color: var(--rd-text);
-    font-size: 12px;
-    font-weight: 600;
   }
 
   .verdict-tag.small {
-    font-size: 11px;
-    padding: 1px 6px;
+    font-size: 10.5px;
+    padding: 1px 7px;
   }
 
   .verdict-tag.bull {
@@ -1296,7 +1801,7 @@
   }
 
   .verdict-tag.warn {
-    background: rgba(224, 168, 46, 0.16);
+    background: rgba(224, 168, 46, 0.18);
     color: var(--rd-warn);
   }
 
@@ -1315,12 +1820,8 @@
   .plain-copy {
     margin: 0;
     font-size: 12.5px;
-    line-height: 1.5;
+    line-height: 1.45;
     color: var(--rd-secondary);
-  }
-
-  .plain-copy strong {
-    color: var(--rd-text);
   }
 
   .formula-note {
@@ -1330,41 +1831,52 @@
     flex-direction: column;
     gap: 4px;
     font-size: 11.5px;
-    line-height: 1.45;
-    color: var(--rd-secondary);
-  }
-
-  .formula-line strong {
+    line-height: 1.4;
     color: var(--rd-text);
   }
 
-  .metrics-strip {
+  .formula-sub {
+    color: var(--rd-secondary);
+  }
+
+  /* Flat 3-column metrics strip */
+  .metrics-strip,
+  .context-strip {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-    padding: 10px 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     border-top: 1px solid var(--rd-divider);
     border-bottom: 1px solid var(--rd-divider);
+  }
+
+  .context-strip {
+    border-top: 0;
+    margin-top: -11px;
   }
 
   .sc-metrics {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    padding: 10px 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     border-top: 1px solid var(--rd-divider);
     border-bottom: 1px solid var(--rd-divider);
   }
 
-  .m-col {
+  .m-col,
+  .ctx-col {
+    padding: 9px 6px 9px 0;
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-width: 0;
   }
 
+  .m-col + .m-col,
+  .ctx-col + .ctx-col {
+    padding-left: 10px;
+    border-left: 1px solid var(--rd-divider);
+  }
+
   .m-lbl {
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--rd-secondary);
   }
 
@@ -1377,29 +1889,61 @@
     text-overflow: ellipsis;
   }
 
-  .m-sub {
+  .ctx-val {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .m-sub,
+  .ctx-sub {
     font-size: 10.5px;
     color: var(--rd-secondary);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .txt-bull {
-    color: var(--rd-bull);
+  .ref-levels-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--rd-divider);
+    font-variant-numeric: tabular-nums;
   }
 
-  .txt-bear {
-    color: var(--rd-bear);
+  .ref-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
 
-  .txt-warn {
-    color: var(--rd-warn);
+  .ref-item.right {
+    text-align: right;
   }
 
-  /* Flat equilibrium bar */
+  .ref-val {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--rd-text);
+  }
+
+  .ref-note {
+    font-weight: 400;
+    font-size: 11px;
+    color: var(--rd-secondary);
+  }
+
+  /* Equilibrium stretch bar */
   .stretch-bar-wrap {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
   }
 
   .stretch-labels {
@@ -1411,7 +1955,7 @@
 
   .stretch-track {
     position: relative;
-    height: 8px;
+    height: 7px;
     border-radius: 999px;
     background: var(--rd-pill-bg);
   }
@@ -1425,14 +1969,14 @@
 
   .st-low {
     left: 0;
+    background: rgba(8, 153, 129, 0.28);
     border-radius: 999px 0 0 999px;
-    background: rgba(8, 153, 129, 0.24);
   }
 
   .st-high {
     right: 0;
+    background: rgba(242, 54, 69, 0.28);
     border-radius: 0 999px 999px 0;
-    background: rgba(242, 54, 69, 0.24);
   }
 
   .st-tick {
@@ -1456,7 +2000,7 @@
     border-radius: 3px;
     background: var(--rd-text);
     transform: translate(-50%, -50%);
-    box-shadow: 0 0 0 2px var(--rd-bg);
+    transition: left 180ms ease;
   }
 
   .st-pin.bull {
@@ -1470,6 +2014,7 @@
   .meta-foot {
     display: flex;
     justify-content: space-between;
+    gap: 8px;
     font-size: 11px;
     color: var(--rd-secondary);
     font-variant-numeric: tabular-nums;
@@ -1482,17 +2027,16 @@
 
   /* Flat sparkline */
   .spark-flat {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-top: 2px;
+    padding-top: 8px;
+    border-top: 1px solid var(--rd-divider);
   }
 
   .spark-head {
     display: flex;
+    align-items: baseline;
     justify-content: space-between;
-    align-items: center;
     gap: 8px;
+    margin-bottom: 5px;
   }
 
   .spark-title {
@@ -1502,12 +2046,10 @@
   }
 
   .spark-val {
-    font-size: 11px;
+    font-size: 10.5px;
     color: var(--rd-secondary);
     font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    text-align: right;
   }
 
   .spark-val strong {
@@ -1516,7 +2058,7 @@
 
   .spark-svg {
     width: 100%;
-    height: 74px;
+    height: 70px;
     display: block;
     cursor: crosshair;
   }
@@ -1536,20 +2078,18 @@
 
   .ref-line.dash {
     stroke-dasharray: 3 3;
-    opacity: 0.75;
   }
 
   .ref-line.mid {
-    stroke: var(--rd-secondary);
-    opacity: 0.45;
+    opacity: 0.7;
   }
 
   .spark-line {
     fill: none;
     stroke: var(--rd-text);
-    stroke-width: 1.6;
-    stroke-linecap: round;
+    stroke-width: 1.5;
     stroke-linejoin: round;
+    stroke-linecap: round;
   }
 
   .hover-guide {
@@ -1560,13 +2100,12 @@
 
   .spark-dot {
     fill: var(--rd-text);
-    stroke: var(--rd-bg);
-    stroke-width: 1.5;
   }
 
   .action-bar {
     display: flex;
-    gap: 7px;
+    align-items: center;
+    gap: 8px;
     padding-top: 2px;
   }
 
@@ -1579,7 +2118,7 @@
     background: var(--rd-pill-active-bg);
     color: var(--rd-pill-active-fg);
     font: inherit;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -1589,7 +2128,7 @@
     opacity: 0.9;
   }
 
-  /* Flat hairline-divided lists */
+  /* Hairline-divided flat lists */
   .flat-list {
     display: flex;
     flex-direction: column;
@@ -1597,25 +2136,31 @@
 
   .list-row {
     width: 100%;
-    padding: 11px 16px;
+    padding: 10px 16px;
     border: 0;
     border-bottom: 1px solid var(--rd-divider);
     background: transparent;
-    color: var(--rd-text);
+    color: inherit;
     font: inherit;
     text-align: left;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
   }
 
   button.list-row {
     cursor: pointer;
-    transition: background-color 130ms ease;
+    transition: background-color 120ms ease;
   }
 
   button.list-row:hover {
     background: var(--rd-hover);
+  }
+
+  .smt-row,
+  .scan-row,
+  .sig-row,
+  .bench-row {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
 
   .row-top {
@@ -1636,10 +2181,11 @@
   .row-strong {
     font-size: 12.5px;
     font-weight: 600;
+    color: var(--rd-text);
   }
 
   .row-muted {
-    font-size: 11.5px;
+    font-size: 11px;
     color: var(--rd-secondary);
     font-variant-numeric: tabular-nums;
   }
@@ -1647,15 +2193,21 @@
   .row-desc {
     margin: 0;
     font-size: 12px;
-    line-height: 1.45;
+    line-height: 1.4;
+    color: var(--rd-secondary);
+  }
+
+  .smt-ctx {
+    font-size: 11px;
+    font-weight: 500;
     color: var(--rd-secondary);
   }
 
   .dir-pill {
+    font-size: 10.5px;
+    font-weight: 700;
     padding: 1px 6px;
-    border-radius: 5px;
-    font-size: 11px;
-    font-weight: 600;
+    border-radius: 999px;
   }
 
   .dir-pill.bull {
@@ -1670,26 +2222,24 @@
 
   .link-btn {
     border: 0;
-    padding: 1px 5px;
-    border-radius: 5px;
     background: transparent;
     color: var(--rd-text);
     font: inherit;
     font-size: 11.5px;
     font-weight: 600;
+    padding: 0;
     cursor: pointer;
   }
 
   .link-btn:hover {
-    background: var(--rd-hover);
+    text-decoration: underline;
   }
 
-  /* Session pool rows */
   .pool-row {
     display: grid;
-    grid-template-columns: 1fr auto 58px auto;
+    grid-template-columns: 1.3fr 1fr 0.72fr auto;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     padding: 8px 16px;
     font-size: 12px;
     font-variant-numeric: tabular-nums;
@@ -1697,15 +2247,18 @@
 
   .pool-lbl {
     color: var(--rd-secondary);
+    font-weight: 500;
   }
 
   .pool-px {
     font-weight: 600;
+    text-align: right;
   }
 
   .pool-dist {
-    text-align: right;
+    font-size: 11px;
     color: var(--rd-secondary);
+    text-align: right;
   }
 
   .pool-dots {
@@ -1717,10 +2270,10 @@
   }
 
   .dot {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    border: 1.5px solid var(--rd-secondary);
+    border: 1px solid var(--rd-secondary);
     opacity: 0.45;
   }
 
@@ -1735,39 +2288,46 @@
     font-weight: 700;
   }
 
-  /* Drivers & lead-lag */
   .lead-row {
-    flex-direction: row;
+    display: flex;
     align-items: center;
     gap: 8px;
     padding: 9px 16px;
-    font-size: 12px;
   }
 
   .lead-tag {
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--rd-pill-active-bg);
-    color: var(--rd-pill-active-fg);
     font-size: 10px;
     font-weight: 700;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--rd-pill-bg);
+    color: var(--rd-text);
+    flex-shrink: 0;
   }
 
   .lead-copy {
     flex: 1;
-    min-width: 0;
-    color: var(--rd-text);
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--rd-secondary);
+  }
+
+  .drv-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
   }
 
   .drv-row.dim {
-    opacity: 0.5;
+    opacity: 0.45;
   }
 
   .drv-top {
     display: grid;
-    grid-template-columns: 64px 1fr auto auto;
+    grid-template-columns: 1.05fr 0.95fr 0.72fr auto;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     font-size: 12.5px;
     font-variant-numeric: tabular-nums;
   }
@@ -1776,24 +2336,22 @@
     font-weight: 700;
   }
 
-  .drv-px {
-    color: var(--rd-secondary);
-  }
-
+  .drv-px,
   .drv-chg {
-    font-weight: 600;
+    text-align: right;
   }
 
   .drv-pull {
-    font-size: 11.5px;
+    font-size: 11px;
     font-weight: 600;
     text-align: right;
+    min-width: 62px;
   }
 
   .drv-sub {
     display: flex;
     justify-content: space-between;
-    font-size: 11.5px;
+    font-size: 11px;
     color: var(--rd-secondary);
   }
 
@@ -1801,10 +2359,11 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Scanner tab */
+  /* Scanner filters & rows */
   .filter-strip {
-    padding: 0 16px 10px;
+    padding: 0 16px 12px;
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
   }
 
@@ -1823,8 +2382,8 @@
 
   .mini-pill.active {
     background: var(--rd-pill-active-bg);
+    border-color: var(--rd-pill-active-bg);
     color: var(--rd-pill-active-fg);
-    border-color: transparent;
     font-weight: 600;
   }
 
@@ -1835,6 +2394,7 @@
 
   .scan-sym {
     font-size: 13px;
+    font-weight: 700;
   }
 
   .scan-strength {
@@ -1846,10 +2406,110 @@
 
   .scan-strength strong {
     color: var(--rd-text);
+    font-weight: 700;
   }
 
-  .scan-mid,
-  .scan-foot,
+  .scan-mid {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--rd-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .scan-stretch {
+    font-weight: 600;
+    color: var(--rd-text);
+  }
+
+  .scan-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--rd-secondary);
+  }
+
+  .scan-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+
+  .tiny-chip {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--rd-pill-bg);
+    color: var(--rd-text);
+  }
+
+  /* Scorecard & Audit */
+  .sc-bar-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .sc-track {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--rd-pill-bg);
+    overflow: hidden;
+  }
+
+  .sc-fill {
+    height: 100%;
+    background: var(--rd-text);
+    transition: width 220ms ease;
+  }
+
+  .sc-status {
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: var(--rd-secondary);
+  }
+
+  .slice-row {
+    display: grid;
+    grid-template-columns: 1.35fr 0.85fr 0.7fr auto;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .slice-lbl {
+    font-weight: 600;
+    color: var(--rd-text);
+  }
+
+  .slice-wr {
+    text-align: right;
+    color: var(--rd-secondary);
+  }
+
+  .slice-net {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sig-sym {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+
   .sig-sub {
     display: flex;
     justify-content: space-between;
@@ -1859,53 +2519,41 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .scan-stretch {
-    font-weight: 600;
-  }
-
-  /* Scorecard tab */
-  .sc-bar-wrap {
+  .tag-row {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding-top: 2px;
   }
 
-  .sc-track {
-    height: 5px;
+  .ctx-tag {
+    height: 20px;
+    padding: 0 7px;
+    border: 1px solid var(--rd-border);
     border-radius: 999px;
-    background: var(--rd-pill-bg);
-    overflow: hidden;
-  }
-
-  .sc-fill {
-    height: 100%;
-    border-radius: 999px;
-    background: var(--rd-text);
-  }
-
-  .sc-status {
-    font-size: 12px;
-    line-height: 1.4;
-    color: var(--rd-secondary);
-  }
-
-  .sig-sym {
-    border: 0;
-    padding: 0;
     background: transparent;
-    color: var(--rd-text);
+    color: var(--rd-secondary);
     font: inherit;
-    font-size: 12.5px;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+    font-size: 10px;
     cursor: pointer;
   }
 
-  .outcome-tag {
-    font-size: 11.5px;
-    font-weight: 700;
+  .ctx-tag.on {
+    border-color: var(--rd-text);
+    background: var(--rd-pill-bg);
+    color: var(--rd-text);
+    font-weight: 600;
+  }
+
+  .bench-note {
+    font-size: 11px;
     color: var(--rd-secondary);
+    opacity: 0.9;
+  }
+
+  .outcome-tag {
+    font-size: 11px;
+    font-weight: 700;
   }
 
   .del-x {
@@ -1914,11 +2562,46 @@
     color: var(--rd-secondary);
     font-size: 15px;
     line-height: 1;
-    padding: 0 3px;
     cursor: pointer;
+    padding: 0 2px;
   }
 
   .del-x:hover {
     color: var(--rd-text);
+  }
+
+  .flat-quiet {
+    padding: 13px 16px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--rd-secondary);
+    border-bottom: 1px solid var(--rd-divider);
+  }
+
+  .flat-empty {
+    padding: 28px 16px;
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--rd-secondary);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .flat-empty.err {
+    color: var(--rd-bear);
+  }
+
+  .txt-bull {
+    color: var(--rd-bull);
+  }
+
+  .txt-bear {
+    color: var(--rd-bear);
+  }
+
+  .txt-warn {
+    color: var(--rd-warn);
   }
 </style>

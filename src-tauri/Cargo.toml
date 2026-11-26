@@ -1,6 +1,6 @@
 [package]
 name = "deplyzeworkflow"
-version = "0.1.19"
+version = "0.1.20"
 description = "DeplyzeWorkflow desktop trading and workflow app"
 authors = ["dyglo"]
 edition = "2021"

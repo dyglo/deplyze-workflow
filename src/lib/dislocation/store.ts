@@ -9,6 +9,10 @@ import {
 
 export type DislocationTimeframe = '15m' | '1h' | '4h';
 export type SmDirection = 'bullish' | 'bearish';
+export type SetupSession = 'Asia' | 'London' | 'New York';
+export type TrendAlignment = 'with_trend' | 'counter_trend' | 'neutral';
+export type SetupContextTag = 'With Trend' | 'Counter-Trend' | 'Swept Pool' | 'News';
+
 export type VerdictKind =
   | 'bearish_trap'
   | 'bullish_spring'
@@ -18,7 +22,58 @@ export type VerdictKind =
   | 'rich'
   | 'cheap'
   | 'weak_fit'
+  | 'event_lock'
   | 'equilibrium';
+
+export interface FeedInfo {
+  source: 'oanda' | 'hybrid' | 'yahoo';
+  label: string;
+  instrument: string | null;
+  liveSpreadPx: number | null;
+  liveSpreadPct: number | null;
+  spreadInAtrPct: number | null;
+  wideSpread: boolean;
+}
+
+export interface EventRiskInfo {
+  status: 'clear' | 'caution' | 'locked';
+  headline: string;
+  eventTitle: string | null;
+  country: string | null;
+  minutesUntil: number | null;
+}
+
+export interface HtfContextInfo {
+  timeframeLabel: '4H' | 'Daily';
+  bias: 'bull' | 'bear' | 'range';
+  biasLabel: string;
+  alignment: TrendAlignment;
+  alignmentLabel: string;
+  summary: string;
+}
+
+export interface DriverLinkInfo {
+  status: 'stable' | 'shifting' | 'breaking';
+  label: string;
+  baselineFitPct: number;
+  recentFitPct: number;
+  summary: string;
+}
+
+export interface CandleConfirmInfo {
+  turnConfirmed: boolean;
+  label: string;
+  volumeRatio: number | null;
+  volumeLabel: string;
+}
+
+export interface SetupLevelsInfo {
+  actionableBias: 'buy_watch' | 'sell_watch' | 'wait';
+  expectedTarget: number;
+  invalidationLevel: number | null;
+  invalidationLabel: string | null;
+  distanceInAvgMoves: number;
+}
 
 export interface DriverContribution {
   symbol: string;
@@ -32,6 +87,7 @@ export interface DriverContribution {
   lagBars: number;
   lagCorrelation: number;
   active: boolean;
+  feed?: 'oanda' | 'yahoo';
 }
 
 export interface SmtSignal {
@@ -51,6 +107,8 @@ export interface SmtSignal {
   peerShortName: string;
   relation: 'positive' | 'inverse';
   sweptBy: 'target' | 'peer';
+  alignedWithHtf?: TrendAlignment;
+  contextNote?: string;
   targetLevel: number;
   targetExtreme: number;
   peerLevel: number;
@@ -98,7 +156,12 @@ export interface ScoreBreakdown {
   maxFitPts: number;
   smtPts: number;
   maxSmtPts: number;
+  alignBonus?: number;
+  maxAlignBonus?: number;
   conflictPenalty: number;
+  decouplingPenalty?: number;
+  counterTrendPenalty?: number;
+  eventLocked?: boolean;
   total: number;
   explanation: string;
 }
@@ -107,6 +170,12 @@ export interface DislocationPayload {
   symbol: string;
   shortName: string;
   timeframe: DislocationTimeframe;
+  feedInfo?: FeedInfo;
+  eventRisk?: EventRiskInfo;
+  htfContext?: HtfContextInfo;
+  driverLink?: DriverLinkInfo;
+  candleConfirm?: CandleConfirmInfo;
+  setupLevels?: SetupLevelsInfo;
   spotPrice: number;
   fairValuePrice: number;
   gapPoints: number;
@@ -136,12 +205,19 @@ export interface DislocationPayload {
 export interface DislocationScanRow {
   symbol: string;
   shortName: string;
+  feedSource?: 'oanda' | 'hybrid' | 'yahoo';
   spotPrice: number;
   fairValuePrice: number;
   gapPct: number;
   zScore: number;
   rSquared: number;
   driverFitLabel: 'Strong' | 'Moderate' | 'Weak';
+  driverLinkStatus?: 'stable' | 'shifting' | 'breaking';
+  htfBias?: 'bull' | 'bear' | 'range';
+  htfAlignment?: TrendAlignment;
+  eventRiskStatus?: 'clear' | 'caution' | 'locked';
+  eventRiskLabel?: string | null;
+  turnConfirmed?: boolean;
   atr: number;
   verdict: VerdictKind;
   verdictLabel: string;
@@ -155,7 +231,72 @@ export interface DislocationScanRow {
 
 export interface DislocationScanPayload {
   timeframe: DislocationTimeframe;
+  oandaActive?: boolean;
   rows: DislocationScanRow[];
+  updatedAt: string;
+}
+
+export interface SystemAuditEntry {
+  id: string;
+  symbol: string;
+  shortName: string;
+  timeframe: '1h';
+  direction: 'long' | 'short';
+  setupKind: string;
+  convictionScore: number;
+  entryPrice: number;
+  expectedPrice: number;
+  atr: number;
+  spreadPx: number;
+  spreadSource: 'oanda' | 'est';
+  trendAlign: TrendAlignment;
+  session: SetupSession;
+  createdAt: string;
+  createdTs: number;
+  status: 'pending' | 'hit' | 'miss' | 'flat';
+  netReturnAtr: number | null;
+  resolvedPrice: number | null;
+  resolvedAt: string | null;
+}
+
+export interface SystemAuditPayload {
+  summary: {
+    total: number;
+    decided: number;
+    pending: number;
+    hits: number;
+    misses: number;
+    flats: number;
+    winRatePct: number | null;
+    ciLowPct: number | null;
+    ciHighPct: number | null;
+    avgNetAtr: number | null;
+    bySession: {
+      session: SetupSession;
+      decided: number;
+      winRatePct: number | null;
+      avgNetAtr: number | null;
+    }[];
+    byAlign: {
+      align: TrendAlignment;
+      label: string;
+      decided: number;
+      winRatePct: number | null;
+      avgNetAtr: number | null;
+    }[];
+  };
+  entries: SystemAuditEntry[];
+  oandaBenchmark: {
+    windowLabel: string;
+    rows: {
+      label: string;
+      sampleSize: number;
+      winRatePct: number;
+      ciRange: string;
+      avgNetAtr: number;
+      note: string;
+    }[];
+  };
   updatedAt: string;
 }
 
@@ -171,6 +312,10 @@ export interface PinnedDislocationSignal {
   rSquared: number;
   atr: number;
   spreadPct: number;
+  spreadSource?: 'oanda' | 'est';
+  trendAlign?: TrendAlignment;
+  session?: SetupSession;
+  contextTag?: SetupContextTag | null;
   verdictLabel: string;
   smtLabel: string | null;
   createdAt: string;
@@ -184,7 +329,15 @@ export interface PinnedDislocationSignal {
 
 export interface DislocationWorkspaceState {
   timeframe: DislocationTimeframe;
+  watchAlertsEnabled: boolean;
   signals: PinnedDislocationSignal[];
+}
+
+export interface SliceBreakdownRow {
+  label: string;
+  decided: number;
+  winRatePct: number | null;
+  avgNetAtr: number | null;
 }
 
 export interface ScorecardStats {
@@ -195,21 +348,23 @@ export interface ScorecardStats {
   misses: number;
   flats: number;
   hitRatePct: number | null;
-  ciLowPct: number | null; // 95% Wilson lower bound
-  ciHighPct: number | null; // 95% Wilson upper bound
-  breakEvenPct: number; // spread-adjusted break-even rate
+  ciLowPct: number | null;
+  ciHighPct: number | null;
+  breakEvenPct: number;
   avgNetAtr: number | null;
   minSampleSize: number;
   verdict: 'collecting' | 'keep' | 'drop' | 'early_warning';
   statusLabel: string;
+  bySession: SliceBreakdownRow[];
+  byAlign: SliceBreakdownRow[];
 }
 
 const STORAGE_KEY = 'dislocation_radar';
 const MAX_SIGNALS = 160;
 const SYMBOL_CACHE_TTL_MS = 30_000;
 const SCAN_CACHE_TTL_MS = 60_000;
+const AUDIT_CACHE_TTL_MS = 60_000;
 
-// Conservative estimated round-trip spread/slippage (% of price)
 const ESTIMATED_SPREAD_PCT: Record<string, number> = {
   XAUUSD: 0.015,
   XAGUSD: 0.06,
@@ -231,10 +386,19 @@ const ESTIMATED_SPREAD_PCT: Record<string, number> = {
 
 const symbolCache = new Map<string, { data: DislocationPayload; fetchedAt: number }>();
 const scanCache = new Map<string, { data: DislocationScanPayload; fetchedAt: number }>();
+let auditCache: { data: SystemAuditPayload; fetchedAt: number } | null = null;
 
 export function estimateSpreadPct(shortName: string): number {
   const clean = (shortName || '').trim().toUpperCase();
   return ESTIMATED_SPREAD_PCT[clean] ?? 0.025;
+}
+
+function detectSessionFromIso(iso: string): SetupSession {
+  const ms = Date.parse(iso);
+  const h = Number.isFinite(ms) ? new Date(ms).getUTCHours() : new Date().getUTCHours();
+  if (h >= 13 && h < 21) return 'New York';
+  if (h >= 7 && h < 13) return 'London';
+  return 'Asia';
 }
 
 export async function fetchDislocation(
@@ -289,31 +453,64 @@ export async function fetchDislocationScan(
   return data;
 }
 
+export async function fetchDislocationAudit(opts?: {
+  force?: boolean;
+  signal?: AbortSignal;
+}): Promise<SystemAuditPayload> {
+  if (!opts?.force && auditCache && Date.now() - auditCache.fetchedAt < AUDIT_CACHE_TTL_MS) {
+    return auditCache.data;
+  }
+  const base = getApiBaseUrl();
+  const res = await fetch(`${base}/api/insights/dislocation/audit`, {
+    headers: { Accept: 'application/json' },
+    signal: opts?.signal
+  });
+  if (!res.ok) {
+    throw new Error(`System Audit API returned HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as SystemAuditPayload;
+  auditCache = { data, fetchedAt: Date.now() };
+  return data;
+}
+
 export async function loadDislocationState(): Promise<DislocationWorkspaceState> {
-  const fallback: DislocationWorkspaceState = { timeframe: '1h', signals: [] };
+  const fallback: DislocationWorkspaceState = {
+    timeframe: '1h',
+    watchAlertsEnabled: true,
+    signals: []
+  };
   const loaded = await loadWorkspaceJson<Partial<DislocationWorkspaceState>>(STORAGE_KEY, fallback);
   const tf: DislocationTimeframe =
     loaded?.timeframe === '15m' || loaded?.timeframe === '4h' ? loaded.timeframe : '1h';
+  const watchAlertsEnabled =
+    typeof loaded?.watchAlertsEnabled === 'boolean' ? loaded.watchAlertsEnabled : true;
   const signals = Array.isArray(loaded?.signals)
     ? loaded.signals.slice(0, MAX_SIGNALS).map((s) => ({
         ...s,
         spreadPct:
           typeof s.spreadPct === 'number' && Number.isFinite(s.spreadPct)
             ? s.spreadPct
-            : estimateSpreadPct(s.shortName)
+            : estimateSpreadPct(s.shortName),
+        spreadSource: s.spreadSource ?? 'est',
+        trendAlign: s.trendAlign ?? 'neutral',
+        session: s.session ?? detectSessionFromIso(s.createdAt),
+        contextTag: s.contextTag ?? null
       }))
     : [];
-  return { timeframe: tf, signals };
+  return { timeframe: tf, watchAlertsEnabled, signals };
 }
 
 export async function saveDislocationState(next: DislocationWorkspaceState): Promise<void> {
   await saveWorkspaceJson(STORAGE_KEY, {
     timeframe: next.timeframe,
+    watchAlertsEnabled: next.watchAlertsEnabled,
     signals: next.signals.slice(0, MAX_SIGNALS)
   });
 }
 
 export function inferSignalDirection(payload: DislocationPayload): 'long' | 'short' {
+  if (payload.setupLevels?.actionableBias === 'buy_watch') return 'long';
+  if (payload.setupLevels?.actionableBias === 'sell_watch') return 'short';
   if (
     payload.verdict === 'bearish_trap' ||
     payload.verdict === 'bearish_smt' ||
@@ -334,6 +531,13 @@ export function inferSignalDirection(payload: DislocationPayload): 'long' | 'sho
 export function createPinnedSignal(payload: DislocationPayload): PinnedDislocationSignal {
   const topSmt = payload.smtSignals[0] ?? null;
   const fallbackAtr = payload.spotPrice > 0 ? payload.spotPrice * 0.004 : 1;
+  const nowIso = new Date().toISOString();
+  const hasOandaSpread =
+    typeof payload.feedInfo?.liveSpreadPct === 'number' &&
+    Number.isFinite(payload.feedInfo.liveSpreadPct) &&
+    payload.feedInfo.liveSpreadPct > 0;
+  const trendAlign: TrendAlignment = payload.htfContext?.alignment ?? 'neutral';
+
   return {
     id: makeWorkspaceId('dis'),
     symbol: payload.symbol,
@@ -345,10 +549,23 @@ export function createPinnedSignal(payload: DislocationPayload): PinnedDislocati
     zScore: payload.zScore,
     rSquared: payload.rSquared,
     atr: payload.atr > 0 ? payload.atr : fallbackAtr,
-    spreadPct: estimateSpreadPct(payload.shortName),
+    spreadPct: hasOandaSpread
+      ? payload.feedInfo!.liveSpreadPct!
+      : estimateSpreadPct(payload.shortName),
+    spreadSource: hasOandaSpread ? 'oanda' : 'est',
+    trendAlign,
+    session: detectSessionFromIso(nowIso),
+    contextTag:
+      trendAlign === 'with_trend'
+        ? 'With Trend'
+        : trendAlign === 'counter_trend'
+          ? 'Counter-Trend'
+          : topSmt
+            ? 'Swept Pool'
+            : null,
     verdictLabel: payload.verdictLabel,
     smtLabel: topSmt ? `${topSmt.levelLabel} vs ${topSmt.peerShortName}` : null,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
     status: 'pending',
     maxFavorableAtr: 0,
     maxAdverseAtr: 0,
@@ -358,11 +575,10 @@ export function createPinnedSignal(payload: DislocationPayload): PinnedDislocati
   };
 }
 
-/** Fixed 8-bar evaluation window (unbiased, no intrabar whipsaw stop bias). */
 function horizonSecondsForTf(tf: DislocationTimeframe): number {
-  if (tf === '15m') return 2 * 3600; // 8 × 15m = 2h
-  if (tf === '4h') return 32 * 3600; // 8 × 4h = 32h
-  return 8 * 3600; // 8 × 1h = 8h
+  if (tf === '15m') return 2 * 3600;
+  if (tf === '4h') return 32 * 3600;
+  return 8 * 3600;
 }
 
 interface BarRow {
@@ -373,10 +589,6 @@ interface BarRow {
   close: number;
 }
 
-/**
- * Resolves tracked setups on a fixed 8-bar horizon AFTER deducting estimated spread,
- * avoiding symmetric high/low whipsaw distortion while also logging max favorable/adverse excursion.
- */
 export async function resolvePendingSignals(
   signals: PinnedDislocationSignal[]
 ): Promise<{ signals: PinnedDislocationSignal[]; updatedCount: number }> {
@@ -502,13 +714,23 @@ function wilsonBounds(wins: number, n: number, z = 1.96): { lo: number; hi: numb
   };
 }
 
-/**
- * Sample-size & spread-aware keep/drop rule:
- * - Minimum 60 decided setups.
- * - Break-even adjusts upward for average round-trip spread cost relative to Avg Move.
- * - KEEP only when 95% confidence lower bound beats spread-adjusted break-even AND avg net move > +0.10.
- *   (False-positive rate for a coin-flip signal is <1% vs ~13-21% for naive >=58% / 40.)
- */
+function summarizeSlice(label: string, subset: PinnedDislocationSignal[]): SliceBreakdownRow {
+  const decided = subset.filter((s) => s.status === 'hit' || s.status === 'miss');
+  const wins = decided.filter((s) => s.status === 'hit').length;
+  const nets = decided
+    .map((s) => s.netReturnAtr)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  return {
+    label,
+    decided: decided.length,
+    winRatePct: decided.length > 0 ? Math.round((wins / decided.length) * 100) : null,
+    avgNetAtr:
+      nets.length > 0
+        ? Number((nets.reduce((a, b) => a + b, 0) / nets.length).toFixed(2))
+        : null
+  };
+}
+
 export function computeScorecardStats(signals: PinnedDislocationSignal[]): ScorecardStats {
   const minSampleSize = 60;
   let hits = 0;
@@ -568,6 +790,29 @@ export function computeScorecardStats(signals: PinnedDislocationSignal[]): Score
     statusLabel = `Collecting (${decided}/${minSampleSize}) · 95% range ${ciLowPct}%–${ciHighPct}% vs ${breakEvenPct}% break-even`;
   }
 
+  const bySession: SliceBreakdownRow[] = (['Asia', 'London', 'New York'] as SetupSession[]).map(
+    (sess) =>
+      summarizeSlice(
+        sess,
+        signals.filter((s) => (s.session ?? detectSessionFromIso(s.createdAt)) === sess)
+      )
+  );
+
+  const byAlign: SliceBreakdownRow[] = [
+    summarizeSlice(
+      'With Trend',
+      signals.filter((s) => s.trendAlign === 'with_trend' || s.contextTag === 'With Trend')
+    ),
+    summarizeSlice(
+      'Counter-Trend',
+      signals.filter((s) => s.trendAlign === 'counter_trend' || s.contextTag === 'Counter-Trend')
+    ),
+    summarizeSlice(
+      'Range / Neutral',
+      signals.filter((s) => (s.trendAlign ?? 'neutral') === 'neutral' && s.contextTag !== 'With Trend' && s.contextTag !== 'Counter-Trend')
+    )
+  ];
+
   return {
     total: signals.length,
     resolved,
@@ -582,7 +827,9 @@ export function computeScorecardStats(signals: PinnedDislocationSignal[]): Score
     avgNetAtr,
     minSampleSize,
     verdict,
-    statusLabel
+    statusLabel,
+    bySession,
+    byAlign
   };
 }
 
@@ -590,15 +837,33 @@ export async function saveDislocationSnapshotToNotes(payload: DislocationPayload
   const notes = await loadNotes();
   const nowIso = new Date().toISOString();
   const fitPct = Math.round(payload.rSquared * 100);
+  const feedLine = payload.feedInfo
+    ? `${payload.feedInfo.label}${payload.feedInfo.liveSpreadPx !== null ? ` · Live spread ${payload.feedInfo.liveSpreadPx} (${payload.feedInfo.liveSpreadPct}%)` : ''}`
+    : 'Live Feed';
+
   const lines: string[] = [
-    `Intermarket Radar Snapshot (${payload.timeframe.toUpperCase()})`,
+    `Intermarket Radar Snapshot (${payload.timeframe.toUpperCase()}) · ${feedLine}`,
     `Verdict: ${payload.verdictLabel} (Strength ${payload.convictionScore}/100)`,
     `Live Price: ${formatRadarPrice(payload.spotPrice, payload.shortName)} | Expected Price: ${formatRadarPrice(payload.fairValuePrice, payload.shortName)}`,
-    `Price Stretch: ${formatStretchPlain(payload.zScore)} (${formatSigned(payload.gapPct, 2)}%) | Driver Fit: ${payload.driverFitLabel} (${fitPct}%)`,
-    '',
-    payload.verdictDetail,
-    `Why: ${payload.verdictReason}`
+    `Price Stretch: ${formatStretchPlain(payload.zScore)} (${formatSigned(payload.gapPct, 2)}%) | Driver Fit: ${payload.driverFitLabel} (${fitPct}%)`
   ];
+
+  if (payload.htfContext) {
+    lines.push(`Higher Trend: ${payload.htfContext.biasLabel} (${payload.htfContext.alignmentLabel})`);
+  }
+  if (payload.driverLink) {
+    lines.push(`Driver Link: ${payload.driverLink.label} (${payload.driverLink.recentFitPct}% recent vs ${payload.driverLink.baselineFitPct}% baseline)`);
+  }
+  if (payload.eventRisk && payload.eventRisk.status !== 'clear') {
+    lines.push(`Macro Risk: ${payload.eventRisk.headline}`);
+  }
+  if (payload.setupLevels?.invalidationLevel) {
+    lines.push(
+      `Reference Extreme (${payload.setupLevels.invalidationLabel ?? 'Swing'}): ${formatRadarPrice(payload.setupLevels.invalidationLevel, payload.shortName)}`
+    );
+  }
+
+  lines.push('', payload.verdictDetail, `Why: ${payload.verdictReason}`);
 
   if (payload.smtSignals.length > 0) {
     lines.push('', 'Peer Divergences (SMT):');
@@ -618,7 +883,7 @@ export async function saveDislocationSnapshotToNotes(payload: DislocationPayload
     lines.push('', 'Key Drivers:');
     for (const d of activeDrivers) {
       lines.push(
-        `• ${d.shortName}: ${formatSigned(d.windowChangePct, 2)}% | Weight ${d.weightPct}% | ${formatCorrPlain(d.correlation)}`
+        `• ${d.shortName}: ${formatSigned(d.windowChangePct, 2)}% | Impact ${d.weightPct}% | ${formatCorrPlain(d.correlation)}`
       );
     }
   }
