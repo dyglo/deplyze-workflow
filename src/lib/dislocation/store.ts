@@ -14,8 +14,10 @@ export type VerdictKind =
   | 'bullish_spring'
   | 'bearish_smt'
   | 'bullish_smt'
+  | 'mixed'
   | 'rich'
   | 'cheap'
+  | 'weak_fit'
   | 'equilibrium';
 
 export interface DriverContribution {
@@ -53,9 +55,10 @@ export interface SmtSignal {
   targetExtreme: number;
   peerLevel: number;
   peerExtreme: number;
+  peerGapAtr: number;
   peerGapPct: number;
   minutesAgo: number;
-  freshness: 'fresh' | 'recent' | 'active';
+  freshness: 'fresh' | 'recent';
   summary: string;
 }
 
@@ -88,6 +91,18 @@ export interface ResidualPoint {
   fair: number;
 }
 
+export interface ScoreBreakdown {
+  stretchPts: number;
+  maxStretchPts: number;
+  fitPts: number;
+  maxFitPts: number;
+  smtPts: number;
+  maxSmtPts: number;
+  conflictPenalty: number;
+  total: number;
+  explanation: string;
+}
+
 export interface DislocationPayload {
   symbol: string;
   shortName: string;
@@ -98,13 +113,18 @@ export interface DislocationPayload {
   gapPct: number;
   zScore: number;
   rSquared: number;
+  driverFitLabel: 'Strong' | 'Moderate' | 'Weak';
   atr: number;
   atrPct: number;
   windowBars: number;
+  horizonBars: number;
+  reversingCandle: boolean;
   verdict: VerdictKind;
   verdictLabel: string;
   verdictDetail: string;
+  verdictReason: string;
   convictionScore: number;
+  scoreBreakdown: ScoreBreakdown;
   drivers: DriverContribution[];
   leadLag: LeadLagReadout | null;
   smtSignals: SmtSignal[];
@@ -121,6 +141,7 @@ export interface DislocationScanRow {
   gapPct: number;
   zScore: number;
   rSquared: number;
+  driverFitLabel: 'Strong' | 'Moderate' | 'Weak';
   atr: number;
   verdict: VerdictKind;
   verdictLabel: string;
@@ -128,6 +149,7 @@ export interface DislocationScanRow {
   topSmtLabel: string | null;
   topSmtDirection: SmDirection | null;
   topSmtMinutesAgo: number | null;
+  smtConflict: boolean;
   topDriverLabel: string | null;
 }
 
@@ -148,9 +170,10 @@ export interface PinnedDislocationSignal {
   zScore: number;
   rSquared: number;
   atr: number;
+  spreadPct: number;
   verdictLabel: string;
   smtLabel: string | null;
-  createdAt: string; // ISO
+  createdAt: string;
   status: 'pending' | 'hit' | 'miss' | 'flat';
   maxFavorableAtr: number;
   maxAdverseAtr: number;
@@ -172,19 +195,47 @@ export interface ScorecardStats {
   misses: number;
   flats: number;
   hitRatePct: number | null;
+  ciLowPct: number | null; // 95% Wilson lower bound
+  ciHighPct: number | null; // 95% Wilson upper bound
+  breakEvenPct: number; // spread-adjusted break-even rate
   avgNetAtr: number | null;
-  targetHitRatePct: number;
-  targetSampleSize: number;
+  minSampleSize: number;
+  verdict: 'collecting' | 'keep' | 'drop' | 'early_warning';
   statusLabel: string;
 }
 
 const STORAGE_KEY = 'dislocation_radar';
-const MAX_SIGNALS = 120;
+const MAX_SIGNALS = 160;
 const SYMBOL_CACHE_TTL_MS = 30_000;
 const SCAN_CACHE_TTL_MS = 60_000;
 
+// Conservative estimated round-trip spread/slippage (% of price)
+const ESTIMATED_SPREAD_PCT: Record<string, number> = {
+  XAUUSD: 0.015,
+  XAGUSD: 0.06,
+  EURUSD: 0.012,
+  GBPUSD: 0.015,
+  USDJPY: 0.015,
+  AUDUSD: 0.02,
+  NZDUSD: 0.025,
+  USDCAD: 0.02,
+  USDCHF: 0.02,
+  NAS100: 0.015,
+  SPX: 0.015,
+  US30: 0.015,
+  USOIL: 0.05,
+  UKOIL: 0.05,
+  BTCUSD: 0.05,
+  ETHUSD: 0.06
+};
+
 const symbolCache = new Map<string, { data: DislocationPayload; fetchedAt: number }>();
 const scanCache = new Map<string, { data: DislocationScanPayload; fetchedAt: number }>();
+
+export function estimateSpreadPct(shortName: string): number {
+  const clean = (shortName || '').trim().toUpperCase();
+  return ESTIMATED_SPREAD_PCT[clean] ?? 0.025;
+}
 
 export async function fetchDislocation(
   symbol: string,
@@ -243,7 +294,15 @@ export async function loadDislocationState(): Promise<DislocationWorkspaceState>
   const loaded = await loadWorkspaceJson<Partial<DislocationWorkspaceState>>(STORAGE_KEY, fallback);
   const tf: DislocationTimeframe =
     loaded?.timeframe === '15m' || loaded?.timeframe === '4h' ? loaded.timeframe : '1h';
-  const signals = Array.isArray(loaded?.signals) ? loaded.signals.slice(0, MAX_SIGNALS) : [];
+  const signals = Array.isArray(loaded?.signals)
+    ? loaded.signals.slice(0, MAX_SIGNALS).map((s) => ({
+        ...s,
+        spreadPct:
+          typeof s.spreadPct === 'number' && Number.isFinite(s.spreadPct)
+            ? s.spreadPct
+            : estimateSpreadPct(s.shortName)
+      }))
+    : [];
   return { timeframe: tf, signals };
 }
 
@@ -286,6 +345,7 @@ export function createPinnedSignal(payload: DislocationPayload): PinnedDislocati
     zScore: payload.zScore,
     rSquared: payload.rSquared,
     atr: payload.atr > 0 ? payload.atr : fallbackAtr,
+    spreadPct: estimateSpreadPct(payload.shortName),
     verdictLabel: payload.verdictLabel,
     smtLabel: topSmt ? `${topSmt.levelLabel} vs ${topSmt.peerShortName}` : null,
     createdAt: new Date().toISOString(),
@@ -298,10 +358,11 @@ export function createPinnedSignal(payload: DislocationPayload): PinnedDislocati
   };
 }
 
+/** Fixed 8-bar evaluation window (unbiased, no intrabar whipsaw stop bias). */
 function horizonSecondsForTf(tf: DislocationTimeframe): number {
-  if (tf === '15m') return 4 * 3600; // 4h resolution horizon
-  if (tf === '4h') return 24 * 3600; // 24h resolution horizon
-  return 8 * 3600; // 8h resolution horizon for 1H
+  if (tf === '15m') return 2 * 3600; // 8 × 15m = 2h
+  if (tf === '4h') return 32 * 3600; // 8 × 4h = 32h
+  return 8 * 3600; // 8 × 1h = 8h
 }
 
 interface BarRow {
@@ -313,8 +374,8 @@ interface BarRow {
 }
 
 /**
- * Resolves pending pinned signals against real market OHLC bars (/api/quotes/bars).
- * Checks whether +1.0 ATR favorable hit before -1.0 ATR adverse, or resolves after horizon.
+ * Resolves tracked setups on a fixed 8-bar horizon AFTER deducting estimated spread,
+ * avoiding symmetric high/low whipsaw distortion while also logging max favorable/adverse excursion.
  */
 export async function resolvePendingSignals(
   signals: PinnedDislocationSignal[]
@@ -325,11 +386,10 @@ export async function resolvePendingSignals(
     return { signals, updatedCount: 0 };
   }
 
-  // Group pending signals by symbol so we make 1 bar request per symbol
   const bySymbol = new Map<string, PinnedDislocationSignal[]>();
   for (const sig of pending) {
     const createdSec = Math.floor(Date.parse(sig.createdAt) / 1000);
-    if (!Number.isFinite(createdSec) || nowSec - createdSec < 300) continue; // wait at least 5m
+    if (!Number.isFinite(createdSec) || nowSec - createdSec < 300) continue;
     const list = bySymbol.get(sig.symbol) ?? [];
     list.push(sig);
     bySymbol.set(sig.symbol, list);
@@ -371,68 +431,42 @@ export async function resolvePendingSignals(
     const horizonSec = horizonSecondsForTf(sig.timeframe);
     const endSec = createdSec + horizonSec;
     const atr = sig.atr > 0 ? sig.atr : Math.max(sig.entryPrice * 0.004, 1e-4);
+    const spreadPx = sig.entryPrice * ((sig.spreadPct ?? estimateSpreadPct(sig.shortName)) / 100);
 
     const postBars = bars.filter((b) => b.ts >= createdSec && b.ts <= endSec + 1800);
     if (postBars.length === 0) return sig;
 
     let maxFav = sig.maxFavorableAtr;
     let maxAdv = sig.maxAdverseAtr;
+    for (const b of postBars) {
+      const favDelta =
+        (sig.direction === 'long' ? b.high - sig.entryPrice : sig.entryPrice - b.low) - spreadPx;
+      const advDelta =
+        (sig.direction === 'long' ? sig.entryPrice - b.low : b.high - sig.entryPrice) + spreadPx;
+      maxFav = Math.max(maxFav, favDelta / atr);
+      maxAdv = Math.max(maxAdv, advDelta / atr);
+    }
+
     let status: PinnedDislocationSignal['status'] = 'pending';
     let resolvedPrice: number | null = null;
     let resolvedAt: string | null = null;
     let netReturnAtr: number | null = null;
 
-    for (const b of postBars) {
-      const favDelta =
-        sig.direction === 'long' ? b.high - sig.entryPrice : sig.entryPrice - b.low;
-      const advDelta =
-        sig.direction === 'long' ? sig.entryPrice - b.low : b.high - sig.entryPrice;
-
-      const favAtr = Math.max(0, favDelta / atr);
-      const advAtr = Math.max(0, advDelta / atr);
-      if (favAtr > maxFav) maxFav = favAtr;
-      if (advAtr > maxAdv) maxAdv = advAtr;
-
-      if (advAtr >= 1.0 && favAtr < 1.0) {
-        status = 'miss';
-        resolvedPrice = sig.direction === 'long' ? sig.entryPrice - atr : sig.entryPrice + atr;
-        resolvedAt = new Date(b.ts * 1000).toISOString();
-        netReturnAtr = -1.0;
-        break;
-      }
-      if (favAtr >= 1.0 && advAtr < 1.0) {
-        status = 'hit';
-        resolvedPrice = sig.direction === 'long' ? sig.entryPrice + atr : sig.entryPrice - atr;
-        resolvedAt = new Date(b.ts * 1000).toISOString();
-        netReturnAtr = 1.0;
-        break;
-      }
-      if (favAtr >= 1.0 && advAtr >= 1.0) {
-        // Both touched inside same bar -> conservatively mark by bar close direction
-        const barNet =
-          sig.direction === 'long' ? (b.close - sig.entryPrice) / atr : (sig.entryPrice - b.close) / atr;
-        status = barNet >= 0 ? 'hit' : 'miss';
-        resolvedPrice = b.close;
-        resolvedAt = new Date(b.ts * 1000).toISOString();
-        netReturnAtr = Number(barNet.toFixed(2));
-        break;
-      }
-    }
-
-    if (status === 'pending' && nowSec >= endSec) {
-      const lastBar = postBars[postBars.length - 1];
-      const finalNet =
+    if (nowSec >= endSec) {
+      const exitBar = postBars.find((b) => b.ts >= endSec) ?? postBars[postBars.length - 1];
+      const rawNet =
         sig.direction === 'long'
-          ? (lastBar.close - sig.entryPrice) / atr
-          : (sig.entryPrice - lastBar.close) / atr;
-      status = finalNet >= 0.25 ? 'hit' : finalNet <= -0.25 ? 'miss' : 'flat';
-      resolvedPrice = lastBar.close;
-      resolvedAt = new Date(lastBar.ts * 1000).toISOString();
-      netReturnAtr = Number(finalNet.toFixed(2));
+          ? exitBar.close - sig.entryPrice
+          : sig.entryPrice - exitBar.close;
+      const netAfterSpread = (rawNet - spreadPx) / atr;
+      status = netAfterSpread > 0.02 ? 'hit' : netAfterSpread < -0.02 ? 'miss' : 'flat';
+      resolvedPrice = exitBar.close;
+      resolvedAt = new Date(exitBar.ts * 1000).toISOString();
+      netReturnAtr = Number(netAfterSpread.toFixed(2));
     }
 
-    const favRounded = Number(maxFav.toFixed(2));
-    const advRounded = Number(maxAdv.toFixed(2));
+    const favRounded = Number(Math.max(0, maxFav).toFixed(2));
+    const advRounded = Number(Math.max(0, maxAdv).toFixed(2));
     if (
       status !== sig.status ||
       favRounded !== sig.maxFavorableAtr ||
@@ -456,15 +490,35 @@ export async function resolvePendingSignals(
   return { signals: nextSignals, updatedCount };
 }
 
+function wilsonBounds(wins: number, n: number, z = 1.96): { lo: number; hi: number } {
+  if (n <= 0) return { lo: 0, hi: 0 };
+  const p = wins / n;
+  const denom = 1 + (z * z) / n;
+  const center = (p + (z * z) / (2 * n)) / denom;
+  const half = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / denom;
+  return {
+    lo: Math.max(0, center - half),
+    hi: Math.min(1, center + half)
+  };
+}
+
+/**
+ * Sample-size & spread-aware keep/drop rule:
+ * - Minimum 60 decided setups.
+ * - Break-even adjusts upward for average round-trip spread cost relative to Avg Move.
+ * - KEEP only when 95% confidence lower bound beats spread-adjusted break-even AND avg net move > +0.10.
+ *   (False-positive rate for a coin-flip signal is <1% vs ~13-21% for naive >=58% / 40.)
+ */
 export function computeScorecardStats(signals: PinnedDislocationSignal[]): ScorecardStats {
-  const targetHitRatePct = 58;
-  const targetSampleSize = 40;
+  const minSampleSize = 60;
   let hits = 0;
   let misses = 0;
   let flats = 0;
   let pending = 0;
   let netSum = 0;
   let netCount = 0;
+  let spreadDragSum = 0;
+  let spreadDragCount = 0;
 
   for (const s of signals) {
     if (s.status === 'hit') hits += 1;
@@ -476,25 +530,42 @@ export function computeScorecardStats(signals: PinnedDislocationSignal[]): Score
       netSum += s.netReturnAtr;
       netCount += 1;
     }
+
+    if (s.entryPrice > 0 && s.atr > 0) {
+      const spPct = s.spreadPct ?? estimateSpreadPct(s.shortName);
+      const spreadInAtr = (s.entryPrice * (spPct / 100)) / s.atr;
+      spreadDragSum += Math.min(0.25, spreadInAtr);
+      spreadDragCount += 1;
+    }
   }
 
   const resolved = hits + misses + flats;
   const decided = hits + misses;
+  const avgSpreadDrag = spreadDragCount > 0 ? spreadDragSum / spreadDragCount : 0.05;
+  const breakEvenPct = Math.round((0.5 + avgSpreadDrag * 0.5) * 100);
+
   const hitRatePct = decided > 0 ? Math.round((hits / decided) * 100) : null;
+  const bounds = decided > 0 ? wilsonBounds(hits, decided, 1.96) : null;
+  const ciLowPct = bounds ? Math.round(bounds.lo * 100) : null;
+  const ciHighPct = bounds ? Math.round(bounds.hi * 100) : null;
   const avgNetAtr = netCount > 0 ? Number((netSum / netCount).toFixed(2)) : null;
 
-  let statusLabel = `Collecting sample (${resolved}/${targetSampleSize})`;
-  if (resolved >= targetSampleSize) {
-    if (hitRatePct !== null && hitRatePct >= targetHitRatePct) {
-      statusLabel = `Validated edge (${hitRatePct}% ≥ ${targetHitRatePct}%)`;
+  let verdict: ScorecardStats['verdict'] = 'collecting';
+  let statusLabel = `Need ${Math.max(0, minSampleSize - decided)} more decided setups for a reliable verdict`;
+
+  if (decided >= minSampleSize && ciLowPct !== null && avgNetAtr !== null) {
+    if (ciLowPct > breakEvenPct && avgNetAtr >= 0.1) {
+      verdict = 'keep';
+      statusLabel = `Confirmed edge: 95% low bound (${ciLowPct}%) clears ${breakEvenPct}% after spread`;
     } else {
-      statusLabel = `Below target (${hitRatePct ?? 0}% < ${targetHitRatePct}% — review/drop)`;
+      verdict = 'drop';
+      statusLabel = `No proven edge after ${decided} setups — lower bound (${ciLowPct}%) below ${breakEvenPct}% break-even`;
     }
-  } else if (hitRatePct !== null) {
-    statusLabel =
-      hitRatePct >= targetHitRatePct
-        ? `Early edge tracking (${hitRatePct}% on ${decided} decided)`
-        : `Early sample below target (${hitRatePct}% on ${decided} decided)`;
+  } else if (decided >= 35 && ciHighPct !== null && ciHighPct < breakEvenPct + 3) {
+    verdict = 'early_warning';
+    statusLabel = `Early warning: even top of 95% range (${ciHighPct}%) is near break-even`;
+  } else if (decided > 0 && ciLowPct !== null && ciHighPct !== null) {
+    statusLabel = `Collecting (${decided}/${minSampleSize}) · 95% range ${ciLowPct}%–${ciHighPct}% vs ${breakEvenPct}% break-even`;
   }
 
   return {
@@ -505,9 +576,12 @@ export function computeScorecardStats(signals: PinnedDislocationSignal[]): Score
     misses,
     flats,
     hitRatePct,
+    ciLowPct,
+    ciHighPct,
+    breakEvenPct,
     avgNetAtr,
-    targetHitRatePct,
-    targetSampleSize,
+    minSampleSize,
+    verdict,
     statusLabel
   };
 }
@@ -515,39 +589,43 @@ export function computeScorecardStats(signals: PinnedDislocationSignal[]): Score
 export async function saveDislocationSnapshotToNotes(payload: DislocationPayload): Promise<Note> {
   const notes = await loadNotes();
   const nowIso = new Date().toISOString();
+  const fitPct = Math.round(payload.rSquared * 100);
   const lines: string[] = [
     `Intermarket Radar Snapshot (${payload.timeframe.toUpperCase()})`,
-    `Verdict: ${payload.verdictLabel} (${payload.convictionScore}/100)`,
-    `Spot: ${formatRadarPrice(payload.spotPrice, payload.shortName)} | Implied Fair Value: ${formatRadarPrice(payload.fairValuePrice, payload.shortName)}`,
-    `Dislocation: ${formatSigned(payload.zScore, 2)}σ (${formatSigned(payload.gapPct, 2)}%) | Model R²: ${payload.rSquared.toFixed(2)} | ATR(14): ${formatRadarPrice(payload.atr, payload.shortName)}`,
+    `Verdict: ${payload.verdictLabel} (Strength ${payload.convictionScore}/100)`,
+    `Live Price: ${formatRadarPrice(payload.spotPrice, payload.shortName)} | Expected Price: ${formatRadarPrice(payload.fairValuePrice, payload.shortName)}`,
+    `Price Stretch: ${formatStretchPlain(payload.zScore)} (${formatSigned(payload.gapPct, 2)}%) | Driver Fit: ${payload.driverFitLabel} (${fitPct}%)`,
     '',
-    payload.verdictDetail
+    payload.verdictDetail,
+    `Why: ${payload.verdictReason}`
   ];
 
   if (payload.smtSignals.length > 0) {
-    lines.push('', 'Active SMT Divergences:');
+    lines.push('', 'Peer Divergences (SMT):');
     for (const s of payload.smtSignals.slice(0, 4)) {
-      lines.push(`• [${s.direction.toUpperCase()}] ${s.summary} (${formatAgeCompact(s.minutesAgo)} ago)`);
+      lines.push(
+        `• [${s.direction === 'bullish' ? 'Bullish' : 'Bearish'}] ${s.summary} (${formatAgeCompact(s.minutesAgo)} ago)`
+      );
     }
   }
 
   if (payload.leadLag) {
-    lines.push('', `Lead-Lag: ${payload.leadLag.summary}`);
+    lines.push('', `Leading Cue: ${payload.leadLag.summary}`);
   }
 
   const activeDrivers = payload.drivers.filter((d) => d.active);
   if (activeDrivers.length > 0) {
-    lines.push('', 'Factor Drivers:');
+    lines.push('', 'Key Drivers:');
     for (const d of activeDrivers) {
       lines.push(
-        `• ${d.shortName}: ${formatSigned(d.windowChangePct, 2)}% | Weight ${d.weightPct}% | r = ${formatSigned(d.correlation, 2)}`
+        `• ${d.shortName}: ${formatSigned(d.windowChangePct, 2)}% | Weight ${d.weightPct}% | ${formatCorrPlain(d.correlation)}`
       );
     }
   }
 
   const note: Note = {
     id: makeNoteId(),
-    title: `Intermarket Radar — ${payload.shortName} (${formatSigned(payload.zScore, 2)}σ)`,
+    title: `Intermarket Radar — ${payload.shortName} (${payload.verdictLabel})`,
     body: lines.join('\n'),
     date: todayNairobiIso(),
     symbol: payload.shortName,
@@ -560,6 +638,20 @@ export async function saveDislocationSnapshotToNotes(payload: DislocationPayload
 
   await saveNotes([note, ...notes]);
   return note;
+}
+
+export function formatStretchPlain(z: number | null | undefined): string {
+  if (typeof z !== 'number' || !Number.isFinite(z)) return '—';
+  const abs = Math.abs(z);
+  if (abs < 0.75) return 'In line';
+  const dir = z > 0 ? 'high' : 'low';
+  return `${abs.toFixed(1)}× ${dir}`;
+}
+
+export function formatCorrPlain(r: number): string {
+  const pct = Math.round(Math.abs(r) * 100);
+  if (pct < 20) return `Weak link (${pct}%)`;
+  return r >= 0 ? `Same dir (${pct}%)` : `Opposite (${pct}%)`;
 }
 
 export function formatRadarPrice(price: number | null | undefined, shortName: string): string {

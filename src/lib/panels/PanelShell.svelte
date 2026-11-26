@@ -24,10 +24,20 @@
   }: Props = $props();
 
   const CHART_MIN_WIDTH = 480;
+  const CHART_TOOLBAR_SAFE_WIDTH = 776; // keeps TradingView left drawing toolbar visible on default open
   const RAIL_AND_GAPS = 56; // 48px rail + two 4px gutters
 
+  function computeInitialWidth(pref: number): number {
+    if (typeof window === 'undefined') return pref;
+    // Preserve TV's left drawing toolbar on initial open when viewport allows it,
+    // while still allowing manual drag wider up to CHART_MIN_WIDTH.
+    const toolbarSafeCap = window.innerWidth - CHART_TOOLBAR_SAFE_WIDTH - RAIL_AND_GAPS;
+    const cap = Math.min(maxWidth, Math.max(minWidth, toolbarSafeCap));
+    return Math.round(Math.min(cap, Math.max(minWidth, pref)));
+  }
+
   // svelte-ignore state_referenced_locally
-  let width = $state(defaultWidth);
+  let width = $state(computeInitialWidth(defaultWidth));
   let dragging = $state(false);
 
   let dragStartX = 0;
