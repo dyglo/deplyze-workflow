@@ -1,6 +1,22 @@
 <script lang="ts">
   import ColorPickerPopover from './ColorPickerPopover.svelte';
   import {
+    defaultCloudPrefs,
+    exportBackupZip,
+    exportWeeklyReview,
+    formatBytes,
+    getWorkspaceStats,
+    importBackupZip,
+    loadCloudPrefs,
+    pickSyncFolder,
+    restoreFromFolder,
+    saveCloudPrefs,
+    syncToFolder,
+    type CloudPrefs,
+    type ReviewRangeId,
+    type WorkspaceStats
+  } from '../cloud/api';
+  import {
     cloneChartSettings,
     toRgba,
     type ChartSettings,
@@ -14,7 +30,8 @@
     | 'canvas'
     | 'trading'
     | 'alerts'
-    | 'events';
+    | 'events'
+    | 'backup';
 
   type CandleColorKey =
     | 'bodyUp'
@@ -54,6 +71,167 @@
   let showEventsBreaks = $state(false);
   let showLatestNews = $state(true);
   let showNewsNotification = $state(false);
+
+  // Local Backup & Export tab state (relocated from retired Cloud rail slot)
+  const REVIEW_RANGES: { id: ReviewRangeId; label: string }[] = [
+    { id: 'this_week', label: 'This Week' },
+    { id: 'last_week', label: 'Last Week' },
+    { id: 'last_30d', label: 'Last 30 Days' }
+  ];
+  let cloudPrefs = $state<CloudPrefs>(defaultCloudPrefs());
+  let backupStats = $state<WorkspaceStats>({
+    notesCount: 0,
+    screenshotsCount: 0,
+    playbookCount: 0,
+    aiChatsCount: 0,
+    alertsCount: 0,
+    watchlistCount: 0,
+    routinesCount: 0,
+    tasksCount: 0,
+    totalFiles: 0,
+    totalBytes: 0
+  });
+  let backupLoaded = $state(false);
+  let reviewRange = $state<ReviewRangeId>('this_week');
+  let backupBusy = $state<string | null>(null);
+  let backupNotice = $state<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  let pendingRestore = $state<'folder' | 'zip' | null>(null);
+
+  async function ensureBackupLoaded() {
+    if (backupLoaded) return;
+    backupLoaded = true;
+    try {
+      const [prefs, stats] = await Promise.all([loadCloudPrefs(), getWorkspaceStats()]);
+      cloudPrefs = prefs;
+      backupStats = stats;
+    } catch {
+      // ignore
+    }
+  }
+
+  async function refreshBackupStats() {
+    try {
+      backupStats = await getWorkspaceStats();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function updateCloudPrefs(next: CloudPrefs) {
+    cloudPrefs = next;
+    await saveCloudPrefs(next);
+  }
+
+  async function handlePickSyncFolder() {
+    if (backupBusy) return;
+    backupBusy = 'pick';
+    try {
+      const picked = await pickSyncFolder();
+      if (picked) {
+        await updateCloudPrefs({ ...cloudPrefs, syncFolder: picked });
+        backupNotice = { kind: 'ok', text: 'Sync folder connected.' };
+      }
+    } catch (err) {
+      backupNotice = { kind: 'err', text: String(err) };
+    }
+    backupBusy = null;
+  }
+
+  async function handleSyncNow() {
+    if (backupBusy || !cloudPrefs.syncFolder.trim()) return;
+    backupBusy = 'sync';
+    backupNotice = null;
+    try {
+      const res = await syncToFolder(cloudPrefs.syncFolder.trim());
+      await updateCloudPrefs({ ...cloudPrefs, lastSyncedAt: res.syncedAt });
+      backupNotice = {
+        kind: 'ok',
+        text:
+          res.copiedFiles > 0
+            ? `Synced ${res.copiedFiles} updated file${res.copiedFiles === 1 ? '' : 's'} (${res.totalFiles} total).`
+            : `Already up to date (${res.totalFiles} files verified).`
+      };
+      await refreshBackupStats();
+    } catch (err) {
+      backupNotice = { kind: 'err', text: String(err) };
+    }
+    backupBusy = null;
+  }
+
+  async function handleExportZip() {
+    if (backupBusy) return;
+    backupBusy = 'export_zip';
+    backupNotice = null;
+    try {
+      const res = await exportBackupZip();
+      if (res) {
+        await updateCloudPrefs({ ...cloudPrefs, lastBackupAt: res.createdAt });
+        backupNotice = {
+          kind: 'ok',
+          text: `Exported ${res.fileCount} files (${formatBytes(res.totalBytes)}).`
+        };
+      }
+    } catch (err) {
+      backupNotice = { kind: 'err', text: String(err) };
+    }
+    backupBusy = null;
+  }
+
+  async function executePendingRestore() {
+    const mode = pendingRestore;
+    pendingRestore = null;
+    if (!mode || backupBusy) return;
+    backupBusy = mode;
+    backupNotice = null;
+    try {
+      const res =
+        mode === 'folder'
+          ? await restoreFromFolder(cloudPrefs.syncFolder.trim())
+          : await importBackupZip();
+      if (res) {
+        backupNotice = {
+          kind: 'ok',
+          text: `Restored ${res.restoredFiles} files (${formatBytes(res.totalBytes)}). Reloading…`
+        };
+        setTimeout(() => window.location.reload(), 700);
+      }
+    } catch (err) {
+      backupNotice = { kind: 'err', text: String(err) };
+    }
+    backupBusy = null;
+  }
+
+  async function handleExportReview(format: 'md' | 'html') {
+    if (backupBusy) return;
+    backupBusy = `review_${format}`;
+    backupNotice = null;
+    try {
+      const res = await exportWeeklyReview(reviewRange, format);
+      if (res.path) {
+        backupNotice = {
+          kind: 'ok',
+          text: `Saved ${format.toUpperCase()} review (${res.entriesCount} setups, ${res.notesCount} notes).`
+        };
+      }
+    } catch (err) {
+      backupNotice = { kind: 'err', text: String(err) };
+    }
+    backupBusy = null;
+  }
+
+  function formatBackupStamp(iso: string | null): string {
+    if (!iso) return 'Never';
+    try {
+      return new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }).format(new Date(iso));
+    } catch {
+      return iso;
+    }
+  }
 
   // Floating modal drag state (centered initially)
   let posX = $state(
@@ -129,7 +307,11 @@
 
   function selectTab(tab: SettingsTab) {
     openPicker = null;
+    pendingRestore = null;
     activeTab = tab;
+    if (tab === 'backup') {
+      void ensureBackupLoaded();
+    }
   }
 
   function toggleColorPicker(key: CandleColorKey, e: MouseEvent) {
@@ -278,6 +460,18 @@
           <path d="M6.75 2.75v2.75M13.25 2.75v2.75M3.25 8h13.5" />
         </svg>
         <span>Events</span>
+      </button>
+
+      <button
+        class="nav-item"
+        class:active={activeTab === 'backup'}
+        type="button"
+        onclick={() => selectTab('backup')}
+      >
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M6.5 15.25h7.75a3 3 0 0 0 .5-5.95 4.25 4.25 0 0 0-8.15-.65 3.35 3.35 0 0 0-.1 6.6Z" />
+        </svg>
+        <span>Data &amp; Backup</span>
       </button>
     </nav>
 
@@ -689,6 +883,159 @@
               </span>
               <span>News notification</span>
             </label>
+          </div>
+        </section>
+      {:else if activeTab === 'backup'}
+        {#if backupNotice}
+          <div class="backup-notice" class:err={backupNotice.kind === 'err'} role="status">
+            <span>{backupNotice.text}</span>
+            <button
+              class="backup-notice-x"
+              type="button"
+              aria-label="Dismiss notice"
+              onclick={() => (backupNotice = null)}
+            >
+              ×
+            </button>
+          </div>
+        {/if}
+
+        <section class="settings-section">
+          <h3 class="section-label">Local Workspace ({formatBytes(backupStats.totalBytes)})</h3>
+          <div class="backup-stats-row">
+            <div class="b-stat">
+              <strong>{backupStats.notesCount} / {backupStats.screenshotsCount}</strong>
+              <span>Notes &amp; shots</span>
+            </div>
+            <div class="b-stat">
+              <strong>{backupStats.playbookCount}</strong>
+              <span>Playbook</span>
+            </div>
+            <div class="b-stat">
+              <strong>{backupStats.aiChatsCount}</strong>
+              <span>AI chats</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="section-label">Auto-Sync Folder · Last: {formatBackupStamp(cloudPrefs.lastSyncedAt)}</h3>
+          <div class="backup-folder-row">
+            <div class="backup-folder-box" title={cloudPrefs.syncFolder || 'No sync folder chosen'}>
+              {cloudPrefs.syncFolder || 'No folder chosen (OneDrive / Drive / Dropbox)'}
+            </div>
+            <button
+              class="backup-btn"
+              type="button"
+              disabled={backupBusy !== null}
+              onclick={() => void handlePickSyncFolder()}
+            >
+              Choose
+            </button>
+          </div>
+
+          <div class="setting-row single">
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                checked={cloudPrefs.autoSyncEnabled}
+                disabled={!cloudPrefs.syncFolder}
+                onchange={() =>
+                  void updateCloudPrefs({ ...cloudPrefs, autoSyncEnabled: !cloudPrefs.autoSyncEnabled })}
+              />
+              <span class="checkbox-box" aria-hidden="true">
+                <svg viewBox="0 0 14 14"><path d="m3 7.2 2.6 2.6L11 4.2" /></svg>
+              </span>
+              <span>Auto-sync on startup &amp; every 10 min</span>
+            </label>
+          </div>
+
+          <div class="backup-btn-row">
+            <button
+              class="backup-btn primary"
+              type="button"
+              disabled={!cloudPrefs.syncFolder || backupBusy !== null}
+              onclick={() => void handleSyncNow()}
+            >
+              {backupBusy === 'sync' ? 'Syncing…' : 'Sync now'}
+            </button>
+            <button
+              class="backup-btn"
+              type="button"
+              disabled={!cloudPrefs.syncFolder || backupBusy !== null}
+              onclick={() => (pendingRestore = 'folder')}
+            >
+              Restore from folder
+            </button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3 class="section-label">Portable Archive (.zip) · Last: {formatBackupStamp(cloudPrefs.lastBackupAt)}</h3>
+          <div class="backup-btn-row">
+            <button
+              class="backup-btn primary"
+              type="button"
+              disabled={backupBusy !== null}
+              onclick={() => void handleExportZip()}
+            >
+              {backupBusy === 'export_zip' ? 'Exporting…' : 'Export Backup (.zip)'}
+            </button>
+            <button
+              class="backup-btn"
+              type="button"
+              disabled={backupBusy !== null}
+              onclick={() => (pendingRestore = 'zip')}
+            >
+              Restore (.zip)
+            </button>
+          </div>
+          {#if pendingRestore}
+            <div class="restore-confirm">
+              <span>Replace local workspace data and reload?</span>
+              <div class="restore-confirm-btns">
+                <button class="backup-btn" type="button" onclick={() => (pendingRestore = null)}>
+                  Cancel
+                </button>
+                <button class="backup-btn primary" type="button" onclick={() => void executePendingRestore()}>
+                  Confirm Restore
+                </button>
+              </div>
+            </div>
+          {/if}
+        </section>
+
+        <section class="settings-section">
+          <h3 class="section-label">Weekly Review Digest</h3>
+          <div class="review-range-row">
+            {#each REVIEW_RANGES as opt (opt.id)}
+              <button
+                class="range-chip"
+                class:active={reviewRange === opt.id}
+                type="button"
+                onclick={() => (reviewRange = opt.id)}
+              >
+                {opt.label}
+              </button>
+            {/each}
+          </div>
+          <div class="backup-btn-row">
+            <button
+              class="backup-btn"
+              type="button"
+              disabled={backupBusy !== null}
+              onclick={() => void handleExportReview('md')}
+            >
+              {backupBusy === 'review_md' ? 'Saving…' : 'Export Markdown (.md)'}
+            </button>
+            <button
+              class="backup-btn primary"
+              type="button"
+              disabled={backupBusy !== null}
+              onclick={() => void handleExportReview('html')}
+            >
+              {backupBusy === 'review_html' ? 'Building…' : 'Printable Report (.html)'}
+            </button>
           </div>
         </section>
       {:else}
@@ -1274,5 +1621,168 @@
 
   .ok-button:hover {
     opacity: 0.9;
+  }
+
+  /* Data & Backup tab */
+  .backup-notice {
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    border-radius: 7px;
+    border: 1px solid rgba(8, 153, 129, 0.35);
+    background: rgba(8, 153, 129, 0.14);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .backup-notice.err {
+    border-color: rgba(242, 54, 69, 0.35);
+    background: rgba(242, 54, 69, 0.14);
+    color: #f23645;
+  }
+
+  .backup-notice-x {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 15px;
+    cursor: pointer;
+    padding: 0 3px;
+  }
+
+  .backup-stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .b-stat {
+    padding: 8px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--sm-divider);
+    background: var(--sm-control-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .b-stat strong {
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .b-stat span {
+    font-size: 11px;
+    color: var(--sm-secondary);
+  }
+
+  .backup-folder-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .backup-folder-box {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--sm-control-border);
+    background: var(--sm-control-bg);
+    font-size: 12px;
+    line-height: 30px;
+    color: var(--sm-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .backup-btn-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .backup-btn {
+    flex: 1;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1px solid var(--sm-control-border);
+    background: transparent;
+    color: var(--sm-text);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .backup-folder-row .backup-btn {
+    flex: 0 0 auto;
+  }
+
+  .backup-btn:hover:not(:disabled) {
+    background: var(--sm-nav-hover);
+  }
+
+  .backup-btn.primary {
+    border-color: transparent;
+    background: var(--sm-ok-bg);
+    color: var(--sm-ok-fg);
+  }
+
+  .backup-btn.primary:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  .backup-btn:disabled {
+    opacity: 0.42;
+    cursor: default;
+  }
+
+  .restore-confirm {
+    margin-top: 10px;
+    padding: 9px 10px;
+    border-radius: 7px;
+    border: 1px solid rgba(242, 54, 69, 0.35);
+    background: rgba(242, 54, 69, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .restore-confirm-btns {
+    display: flex;
+    gap: 8px;
+  }
+
+  .review-range-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+
+  .range-chip {
+    height: 28px;
+    border: 1px solid var(--sm-control-border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--sm-secondary);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .range-chip.active {
+    background: var(--sm-nav-active);
+    color: var(--sm-text);
+    border-color: transparent;
   }
 </style>

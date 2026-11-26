@@ -3,8 +3,8 @@
   import AiPanel from './panels/AiPanel.svelte';
   import AlertsPanel from './panels/AlertsPanel.svelte';
   import CalendarPanel from './panels/CalendarPanel.svelte';
-  import CloudPanel from './panels/CloudPanel.svelte';
   import CreateAlertModal from './panels/CreateAlertModal.svelte';
+  import DislocationPanel from './panels/DislocationPanel.svelte';
   import FavoritesPanel from './panels/FavoritesPanel.svelte';
   import LayoutPopover from './panels/LayoutPopover.svelte';
   import NewsFlowPanel from './panels/NewsFlowPanel.svelte';
@@ -82,7 +82,7 @@
     | 'screener'
     | 'favorites'
     | 'news'
-    | 'cloud';
+    | 'dislocation';
 
   const VALID_RAIL_IDS: readonly RailId[] = [
     'list',
@@ -94,13 +94,14 @@
     'screener',
     'favorites',
     'news',
-    'cloud'
+    'dislocation'
   ];
   const RAIL_STORAGE_KEY = 'deplyzeworkflow-rail';
 
   function parseRailId(raw: unknown): RailId | null {
     if (typeof raw !== 'string') return null;
     if (raw === 'routines') return 'screener';
+    if (raw === 'cloud') return 'dislocation';
     return VALID_RAIL_IDS.includes(raw as RailId) ? (raw as RailId) : null;
   }
 
@@ -301,8 +302,15 @@
     {onOpenOnChart}
     onClose={closePanel}
   />
-{:else if active === 'cloud'}
-  <CloudPanel {theme} onClose={closePanel} />
+{:else if active === 'dislocation'}
+  <DislocationPanel
+    {theme}
+    {activeSymbol}
+    {activeFullSymbol}
+    {onSelectSymbol}
+    onCreateAlertAtPrice={(sym, short, price) => openCreateAlertModal(sym, short, price, null)}
+    onClose={closePanel}
+  />
 {/if}
 
 {#if alertModalState}
@@ -505,15 +513,17 @@
 
   <button
     class="rail-button"
-    class:active={active === 'cloud'}
+    class:active={active === 'dislocation'}
     type="button"
-    aria-label="Cloud"
-    title="Cloud"
-    aria-pressed={active === 'cloud'}
-    onclick={() => select('cloud')}
+    aria-label="Intermarket Radar"
+    title="Intermarket Radar"
+    aria-pressed={active === 'dislocation'}
+    onclick={() => select('dislocation')}
   >
     <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M6.5 15.25h7.75a3 3 0 0 0 .5-5.95 4.25 4.25 0 0 0-8.15-.65 3.35 3.35 0 0 0-.1 6.6Z" />
+      <path d="M2.75 13.5c2.4 0 3.6-4.75 6.25-4.75 2.5 0 3.6-4.25 8.25-4.25" />
+      <path d="M2.75 6.5c2.4 0 3.6 4.75 6.25 4.75 2.5 0 3.6 4.25 8.25 4.25" />
+      <circle cx="9" cy="10" r="1.5" />
     </svg>
   </button>
 

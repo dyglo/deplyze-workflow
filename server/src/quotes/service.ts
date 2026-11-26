@@ -86,6 +86,9 @@ const TV_TICKER_OVERRIDES: Record<string, string> = {
   USDCAD: 'OANDA:USDCAD',
   USDCHF: 'OANDA:USDCHF',
   NZDUSD: 'OANDA:NZDUSD',
+  GBPJPY: 'OANDA:GBPJPY',
+  EURJPY: 'OANDA:EURJPY',
+  EURGBP: 'OANDA:EURGBP',
   NAS100: 'NASDAQ:NDX',
   NDX: 'NASDAQ:NDX',
   VIX: 'TVC:VIX',
@@ -119,6 +122,9 @@ const YAHOO_SYMBOL_MAP: Record<string, { yahoo: string; desc: string; type: stri
   USDCAD: { yahoo: 'CAD=X', desc: 'U.S. Dollar / Canadian Dollar', type: 'forex' },
   USDCHF: { yahoo: 'CHF=X', desc: 'U.S. Dollar / Swiss Franc', type: 'forex' },
   NZDUSD: { yahoo: 'NZDUSD=X', desc: 'New Zealand Dollar / U.S. Dollar', type: 'forex' },
+  GBPJPY: { yahoo: 'GBPJPY=X', desc: 'British Pound / Japanese Yen', type: 'forex' },
+  EURJPY: { yahoo: 'EURJPY=X', desc: 'Euro / Japanese Yen', type: 'forex' },
+  EURGBP: { yahoo: 'EURGBP=X', desc: 'Euro / British Pound', type: 'forex' },
   BTCUSD: { yahoo: 'BTC-USD', desc: 'Bitcoin / U.S. Dollar', type: 'crypto' },
   ETHUSD: { yahoo: 'ETH-USD', desc: 'Ethereum / U.S. Dollar', type: 'crypto' }
 };
