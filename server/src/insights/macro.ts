@@ -1,3 +1,9 @@
+import {
+  fetchOandaSeries,
+  fetchOandaSyntheticDxy,
+  isOandaConfigured,
+  type OandaSeriesResult
+} from '../quotes/oanda.js';
 import { getQuotesPayload, type MarketQuote } from '../quotes/service.js';
 import type {
   AlignmentStatus,
@@ -492,28 +498,103 @@ export async function getMacroSnapshot(force = false): Promise<MacroSnapshot> {
   }
 
   regimeInflight = (async () => {
-    const [quotePayload, dgs10, dgs2, dfii10, t10y2y] = await Promise.all([
-      getQuotesPayload([
-        'TVC:DXY',
-        'TVC:US10Y',
-        'TVC:VIX',
-        'TVC:USOIL',
-        'TVC:SPX',
-        'OANDA:XAUUSD'
-      ]),
-      getFredSeriesStats('DGS10'),
-      getFredSeriesStats('DGS2'),
-      getFredSeriesStats('DFII10'),
-      getFredSeriesStats('T10Y2Y')
-    ]);
+    const useOanda = isOandaConfigured();
+    const [quotePayload, dgs10, dgs2, dfii10, t10y2y, oandaDxy, oandaOil, oandaSpx, oandaXau] =
+      await Promise.all([
+        getQuotesPayload([
+          'TVC:DXY',
+          'TVC:US10Y',
+          'TVC:VIX',
+          'TVC:USOIL',
+          'TVC:SPX',
+          'OANDA:XAUUSD'
+        ]),
+        getFredSeriesStats('DGS10'),
+        getFredSeriesStats('DGS2'),
+        getFredSeriesStats('DFII10'),
+        getFredSeriesStats('T10Y2Y'),
+        useOanda ? fetchOandaSyntheticDxy('D', 25, force) : Promise.resolve(null),
+        useOanda ? fetchOandaSeries('USOIL', 'D', 25, force) : Promise.resolve(null),
+        useOanda ? fetchOandaSeries('SPX', 'D', 25, force) : Promise.resolve(null),
+        useOanda ? fetchOandaSeries('XAUUSD', 'D', 25, force) : Promise.resolve(null)
+      ]);
+
+    const overlayOandaQuote = (
+      base: MarketQuote | null,
+      series: OandaSeriesResult | null,
+      fallbackSymbol: string,
+      fallbackShort: string,
+      fallbackDesc: string,
+      fallbackType: string
+    ): MarketQuote | null => {
+      if (!series || series.bars.length < 2) return base;
+      const last = series.bars[series.bars.length - 1];
+      const prev = series.bars[series.bars.length - 2];
+      if (!last || !prev || prev.close <= 0) return base;
+      const price = last.close;
+      const change = price - prev.close;
+      const changePercent = (change / prev.close) * 100;
+      const w1Bar = series.bars[Math.max(0, series.bars.length - 6)];
+      const w1Pct =
+        w1Bar && w1Bar.close > 0 ? ((price - w1Bar.close) / w1Bar.close) * 100 : (base?.performance.w1 ?? null);
+      return {
+        symbol: base?.symbol ?? fallbackSymbol,
+        shortName: base?.shortName ?? fallbackShort,
+        description: base?.description ?? fallbackDesc,
+        price,
+        change,
+        changePercent,
+        type: base?.type ?? fallbackType,
+        performance: {
+          w1: w1Pct,
+          m1: base?.performance.m1 ?? null,
+          m3: base?.performance.m3 ?? null,
+          m6: base?.performance.m6 ?? null,
+          ytd: base?.performance.ytd ?? null,
+          y1: base?.performance.y1 ?? null
+        },
+        autoBias: base?.autoBias ?? (changePercent > 0.15 ? 'bull' : changePercent < -0.15 ? 'bear' : 'range'),
+        biasScore: base?.biasScore ?? null,
+        source: base?.source ?? 'tv',
+        updatedAt: new Date().toISOString()
+      };
+    };
 
     const q = quotePayload.quotes;
-    const dxy = q['TVC:DXY'] ?? null;
+    const dxy = overlayOandaQuote(
+      q['TVC:DXY'] ?? null,
+      oandaDxy,
+      'TVC:DXY',
+      'DXY',
+      'U.S. Dollar Currency Index',
+      'index'
+    );
     const us10yQuote = q['TVC:US10Y'] ?? null;
     const vix = q['TVC:VIX'] ?? null;
-    const usoil = q['TVC:USOIL'] ?? null;
-    const spx = q['TVC:SPX'] ?? null;
-    const xau = q['OANDA:XAUUSD'] ?? null;
+    const usoil = overlayOandaQuote(
+      q['TVC:USOIL'] ?? null,
+      oandaOil,
+      'TVC:USOIL',
+      'USOIL',
+      'WTI Crude Oil',
+      'commodity'
+    );
+    const spx = overlayOandaQuote(
+      q['TVC:SPX'] ?? null,
+      oandaSpx,
+      'TVC:SPX',
+      'SPX',
+      'S&P 500 Index',
+      'index'
+    );
+    const xau = overlayOandaQuote(
+      q['OANDA:XAUUSD'] ?? null,
+      oandaXau,
+      'OANDA:XAUUSD',
+      'XAUUSD',
+      'Gold Spot / U.S. Dollar',
+      'commodity'
+    );
 
     const live10y = normalizeYieldPrice(us10yQuote);
     const us10yVal = live10y?.value ?? dgs10?.latest ?? null;

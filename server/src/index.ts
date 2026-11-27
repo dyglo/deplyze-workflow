@@ -151,7 +151,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.20',
+        version: '0.1.21',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -167,7 +167,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.20',
+      version: '0.1.21',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',

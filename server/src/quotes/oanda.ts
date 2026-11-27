@@ -24,6 +24,9 @@ const OANDA_INSTRUMENT_MAP: Record<string, string> = {
   GOLD: 'XAU_USD',
   XAGUSD: 'XAG_USD',
   SILVER: 'XAG_USD',
+  COPPER: 'XCU_USD',
+  XCUUSD: 'XCU_USD',
+  NATGAS: 'NATGAS_USD',
   EURUSD: 'EUR_USD',
   GBPUSD: 'GBP_USD',
   USDJPY: 'USD_JPY',
@@ -35,12 +38,21 @@ const OANDA_INSTRUMENT_MAP: Record<string, string> = {
   GBPJPY: 'GBP_JPY',
   EURJPY: 'EUR_JPY',
   EURGBP: 'EUR_GBP',
+  AUDJPY: 'AUD_JPY',
+  CADJPY: 'CAD_JPY',
+  EURAUD: 'EUR_AUD',
+  GBPAUD: 'GBP_AUD',
   NAS100: 'NAS100_USD',
   NDX: 'NAS100_USD',
   SPX: 'SPX500_USD',
   US500: 'SPX500_USD',
   US30: 'US30_USD',
   DJI: 'US30_USD',
+  GER40: 'DE30_EUR',
+  DEU40: 'DE30_EUR',
+  DAX: 'DE30_EUR',
+  JP225: 'JP225_USD',
+  NI225: 'JP225_USD',
   USOIL: 'WTICO_USD',
   WTI: 'WTICO_USD',
   OILUSD: 'WTICO_USD',
@@ -50,14 +62,71 @@ const OANDA_INSTRUMENT_MAP: Record<string, string> = {
   BTCUSD: 'BTC_USD',
   ETHUSD: 'ETH_USD',
   UK100: 'UK100_GBP',
+  UKX: 'UK100_GBP',
   USB10Y: 'USB10Y_USD'
 };
 
+export interface OandaLivePricing {
+  instrument: string;
+  bid: number;
+  ask: number;
+  mid: number;
+  spreadPx: number;
+  spreadPct: number;
+  tradeable: boolean;
+  time: string;
+}
+
+export type OandaCrowdSkew = 'crowded_long' | 'crowded_short' | 'balanced';
+
+export interface OandaPositionBookSummary {
+  instrument: string;
+  price: number;
+  longPct: number;
+  shortPct: number;
+  trappedLongPct: number;
+  trappedShortPct: number;
+  skew: OandaCrowdSkew;
+  updatedAt: string;
+}
+
+const POSITION_BOOK_INSTRUMENTS = new Set<string>([
+  'XAU_USD',
+  'XAG_USD',
+  'EUR_USD',
+  'GBP_USD',
+  'USD_JPY',
+  'AUD_USD',
+  'USD_CAD',
+  'USD_CHF',
+  'NZD_USD',
+  'GBP_JPY',
+  'EUR_JPY',
+  'EUR_GBP',
+  'AUD_JPY',
+  'EUR_AUD'
+]);
+
 const FETCH_TIMEOUT_MS = 10_000;
 const SERIES_CACHE_TTL_MS = 45_000;
+const PRICING_CACHE_TTL_MS = 10_000;
+const ACCOUNT_META_TTL_MS = 30 * 60 * 1000;
+const POSITION_BOOK_TTL_MS = 5 * 60 * 1000;
 
 const seriesCache = new Map<string, { data: OandaSeriesResult; fetchedAt: number }>();
 const seriesInflight = new Map<string, Promise<OandaSeriesResult | null>>();
+
+let accountMetaCache: {
+  accountId: string;
+  pricingInstruments: Set<string>;
+  fetchedAt: number;
+} | null = null;
+let accountMetaInflight: Promise<{ accountId: string; pricingInstruments: Set<string> } | null> | null =
+  null;
+
+const pricingCache = new Map<string, { data: OandaLivePricing; fetchedAt: number }>();
+const positionBookCache = new Map<string, { data: OandaPositionBookSummary; fetchedAt: number }>();
+const positionBookInflight = new Map<string, Promise<OandaPositionBookSummary | null>>();
 
 function cleanEnvValue(raw: string | undefined): string {
   if (!raw) return '';
@@ -339,5 +408,231 @@ export async function fetchOandaSyntheticDxy(
   })();
 
   seriesInflight.set(cacheKey, task);
+  return task;
+}
+
+async function resolveOandaAccountMeta(
+  apiKey: string
+): Promise<{ accountId: string; pricingInstruments: Set<string> } | null> {
+  const now = Date.now();
+  if (accountMetaCache && now - accountMetaCache.fetchedAt < ACCOUNT_META_TTL_MS) {
+    return {
+      accountId: accountMetaCache.accountId,
+      pricingInstruments: accountMetaCache.pricingInstruments
+    };
+  }
+  if (accountMetaInflight) return accountMetaInflight;
+
+  accountMetaInflight = (async () => {
+    try {
+      let accountId = cleanEnvValue(process.env.OANDA_ACCOUNT_ID);
+      if (!accountId) {
+        const accJson = (await fetchJsonWithRetry(`${getOandaBaseUrl()}/v3/accounts`, apiKey)) as {
+          accounts?: { id?: string }[];
+        } | null;
+        accountId = accJson?.accounts?.[0]?.id?.trim() ?? '';
+      }
+      if (!accountId) return null;
+
+      const instJson = (await fetchJsonWithRetry(
+        `${getOandaBaseUrl()}/v3/accounts/${encodeURIComponent(accountId)}/instruments`,
+        apiKey
+      )) as { instruments?: { name?: string }[] } | null;
+
+      const pricingInstruments = new Set<string>();
+      for (const item of instJson?.instruments ?? []) {
+        if (typeof item.name === 'string' && item.name.trim()) {
+          pricingInstruments.add(item.name.trim().toUpperCase());
+        }
+      }
+
+      const meta = { accountId, pricingInstruments };
+      accountMetaCache = { ...meta, fetchedAt: Date.now() };
+      return meta;
+    } catch {
+      return null;
+    } finally {
+      accountMetaInflight = null;
+    }
+  })();
+
+  return accountMetaInflight;
+}
+
+/**
+ * Fetches live institutional Bid/Ask/Mid/Spread quotes in a single batch HTTP call
+ * for all requested symbols permitted on the configured OANDA account.
+ */
+export async function fetchOandaBatchPricing(
+  shortNames: string[],
+  force = false
+): Promise<Map<string, OandaLivePricing>> {
+  const out = new Map<string, OandaLivePricing>();
+  const apiKey = getOandaApiKey();
+  if (!apiKey || shortNames.length === 0) return out;
+
+  const meta = await resolveOandaAccountMeta(apiKey);
+  if (!meta || meta.pricingInstruments.size === 0) return out;
+
+  const now = Date.now();
+  const toFetch: string[] = [];
+
+  for (const raw of shortNames) {
+    const inst = resolveOandaInstrument(raw);
+    if (!inst || !meta.pricingInstruments.has(inst)) continue;
+    const cached = pricingCache.get(inst);
+    if (!force && cached && now - cached.fetchedAt < PRICING_CACHE_TTL_MS) {
+      out.set(inst, cached.data);
+    } else if (!toFetch.includes(inst)) {
+      toFetch.push(inst);
+    }
+  }
+
+  if (toFetch.length === 0) return out;
+
+  try {
+    const url = `${getOandaBaseUrl()}/v3/accounts/${encodeURIComponent(meta.accountId)}/pricing?instruments=${encodeURIComponent(toFetch.join(','))}`;
+    const json = (await fetchJsonWithRetry(url, apiKey)) as {
+      prices?: {
+        instrument?: string;
+        status?: string;
+        time?: string;
+        bids?: { price?: string }[];
+        asks?: { price?: string }[];
+      }[];
+    } | null;
+
+    const fetchedAt = Date.now();
+    for (const p of json?.prices ?? []) {
+      const inst = p.instrument?.toUpperCase();
+      if (!inst) continue;
+      const bid = Number(p.bids?.[0]?.price);
+      const ask = Number(p.asks?.[0]?.price);
+      if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) continue;
+      const mid = (bid + ask) / 2;
+      const spreadPx = Math.max(0, ask - bid);
+      const spreadPct = mid > 0 ? Number(((spreadPx / mid) * 100).toFixed(4)) : 0;
+
+      const entry: OandaLivePricing = {
+        instrument: inst,
+        bid,
+        ask,
+        mid,
+        spreadPx: Number(spreadPx.toFixed(6)),
+        spreadPct,
+        tradeable: p.status === 'tradeable',
+        time: p.time || new Date(fetchedAt).toISOString()
+      };
+      pricingCache.set(inst, { data: entry, fetchedAt });
+      out.set(inst, entry);
+    }
+  } catch (err) {
+    console.warn('[oanda] batch pricing failed:', (err as Error).message);
+  }
+
+  return out;
+}
+
+export function hasOandaPositionBook(shortName: string): boolean {
+  const inst = resolveOandaInstrument(shortName);
+  return inst !== null && POSITION_BOOK_INSTRUMENTS.has(inst);
+}
+
+/**
+ * Fetches OANDA's institutional open client Position Book for supported FX & Metals
+ * instruments (cached 5m) and computes net crowd skew + trapped underwater percentages.
+ */
+export async function fetchOandaPositionBook(
+  shortName: string,
+  force = false
+): Promise<OandaPositionBookSummary | null> {
+  const apiKey = getOandaApiKey();
+  if (!apiKey) return null;
+
+  const inst = resolveOandaInstrument(shortName);
+  if (!inst || !POSITION_BOOK_INSTRUMENTS.has(inst)) return null;
+
+  const now = Date.now();
+  if (!force) {
+    const cached = positionBookCache.get(inst);
+    if (cached && now - cached.fetchedAt < POSITION_BOOK_TTL_MS) {
+      return cached.data;
+    }
+    const existing = positionBookInflight.get(inst);
+    if (existing) return existing;
+  }
+
+  const task = (async (): Promise<OandaPositionBookSummary | null> => {
+    try {
+      const url = `${getOandaBaseUrl()}/v3/instruments/${encodeURIComponent(inst)}/positionBook`;
+      const json = (await fetchJsonWithRetry(url, apiKey)) as {
+        positionBook?: {
+          price?: string;
+          time?: string;
+          buckets?: {
+            price?: string;
+            longCountPercent?: string;
+            shortCountPercent?: string;
+          }[];
+        };
+      } | null;
+
+      const pb = json?.positionBook;
+      const spot = Number(pb?.price);
+      if (!pb || !Number.isFinite(spot) || spot <= 0 || !Array.isArray(pb.buckets) || pb.buckets.length === 0) {
+        return positionBookCache.get(inst)?.data ?? null;
+      }
+
+      let totalLong = 0;
+      let totalShort = 0;
+      let underwaterLong = 0;
+      let underwaterShort = 0;
+
+      for (const b of pb.buckets) {
+        const bp = Number(b.price);
+        const lp = Number(b.longCountPercent);
+        const sp = Number(b.shortCountPercent);
+        if (!Number.isFinite(bp)) continue;
+        if (Number.isFinite(lp) && lp > 0) {
+          totalLong += lp;
+          if (bp > spot) underwaterLong += lp;
+        }
+        if (Number.isFinite(sp) && sp > 0) {
+          totalShort += sp;
+          if (bp < spot) underwaterShort += sp;
+        }
+      }
+
+      const total = totalLong + totalShort;
+      if (total <= 0) return positionBookCache.get(inst)?.data ?? null;
+
+      const longPct = Number(((totalLong / total) * 100).toFixed(1));
+      const shortPct = Number((100 - longPct).toFixed(1));
+      const trappedLongPct = totalLong > 0 ? Number(((underwaterLong / totalLong) * 100).toFixed(0)) : 0;
+      const trappedShortPct = totalShort > 0 ? Number(((underwaterShort / totalShort) * 100).toFixed(0)) : 0;
+      const skew: OandaCrowdSkew =
+        longPct >= 62 ? 'crowded_long' : shortPct >= 62 ? 'crowded_short' : 'balanced';
+
+      const summary: OandaPositionBookSummary = {
+        instrument: inst,
+        price: spot,
+        longPct,
+        shortPct,
+        trappedLongPct,
+        trappedShortPct,
+        skew,
+        updatedAt: pb.time || new Date().toISOString()
+      };
+      positionBookCache.set(inst, { data: summary, fetchedAt: Date.now() });
+      return summary;
+    } catch (err) {
+      console.warn(`[oanda] positionBook ${inst} failed:`, (err as Error).message);
+      return positionBookCache.get(inst)?.data ?? null;
+    } finally {
+      positionBookInflight.delete(inst);
+    }
+  })();
+
+  positionBookInflight.set(inst, task);
   return task;
 }

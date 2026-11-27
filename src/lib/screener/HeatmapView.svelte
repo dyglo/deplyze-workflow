@@ -735,7 +735,15 @@
 
         <div class="tt-col">
           <span class="tt-val">{hoveredRow.rating}</span>
-          <span class="tt-lbl">TECH RATING</span>
+          <span class="tt-lbl">
+            {#if typeof hoveredRow.crowdLongPct === 'number' && Number.isFinite(hoveredRow.crowdLongPct)}
+              CROWD {hoveredRow.crowdLongPct.toFixed(0)}% L
+            {:else if hoveredRow.relVolume !== null}
+              RVOL {hoveredRow.relVolume.toFixed(1)}X
+            {:else}
+              TECH RATING
+            {/if}
+          </span>
         </div>
       </div>
     {/if}

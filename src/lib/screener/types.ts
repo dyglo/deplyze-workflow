@@ -69,8 +69,17 @@ export interface ScreenerRowData {
   rangePosPct: number | null;
   relVolume: number | null;
   volume: number | null;
+  spreadPct?: number | null;
+  spreadAtrPct?: number | null;
+  spreadRatio?: number | null;
+  wideSpread?: boolean;
+  crowdLongPct?: number | null;
+  crowdShortPct?: number | null;
+  trappedLongPct?: number | null;
+  trappedShortPct?: number | null;
+  crowdSkew?: 'crowded_long' | 'crowded_short' | 'balanced' | null;
   type: string;
-  source: 'tv' | 'yahoo';
+  source: 'oanda' | 'tv' | 'yahoo';
   updatedAt: string;
 }
 

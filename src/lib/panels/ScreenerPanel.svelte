@@ -148,11 +148,16 @@
       ) {
         return false;
       }
-      if (quickFilter === 'high_vol' && (r.volatilityD ?? 0) < 1.0 && Math.abs(r.changePercent) < 1.0) {
+      if (
+        quickFilter === 'high_vol' &&
+        (r.volatilityD ?? 0) < 1.0 &&
+        Math.abs(r.changePercent) < 1.0 &&
+        (r.relVolume ?? 0) < 1.5
+      ) {
         return false;
       }
-      if (quickFilter === 'near_high' && (r.rangePosPct ?? 50) < 78) return false;
-      if (quickFilter === 'near_low' && (r.rangePosPct ?? 50) > 22) return false;
+      if (quickFilter === 'near_high' && (r.rangePosPct === null || r.rangePosPct < 78)) return false;
+      if (quickFilter === 'near_low' && (r.rangePosPct === null || r.rangePosPct > 22)) return false;
       if (quickFilter === 'macro_tailwind' && r.macroBias !== 'tailwind') return false;
 
       if (minChg !== null && Number.isFinite(minChg) && r.changePercent < minChg) return false;
@@ -178,9 +183,12 @@
       }
       const va = (a as unknown as Record<string, unknown>)[sortCol];
       const vb = (b as unknown as Record<string, unknown>)[sortCol];
-      const na = typeof va === 'number' && Number.isFinite(va) ? va : -Infinity;
-      const nb = typeof vb === 'number' && Number.isFinite(vb) ? vb : -Infinity;
-      return (na - nb) * dir;
+      const aValid = typeof va === 'number' && Number.isFinite(va);
+      const bValid = typeof vb === 'number' && Number.isFinite(vb);
+      if (!aValid && !bValid) return 0;
+      if (!aValid) return 1;
+      if (!bValid) return -1;
+      return ((va as number) - (vb as number)) * dir;
     });
   });
 
@@ -303,6 +311,45 @@
     if (rating === 'Strong sell') return 'strong-sell';
     if (rating === 'Sell') return 'sell';
     return 'neutral';
+  }
+
+  function buildTechTooltip(row: EnrichedScreenerRow): string {
+    const parts: string[] = [
+      row.source === 'oanda'
+        ? `OANDA MTF (1H/4H/1D): ${row.rating} (MA: ${row.maRating}, Osc: ${row.oscRating})`
+        : `${row.rating} (MA: ${row.maRating}, Osc: ${row.oscRating})`
+    ];
+    if (typeof row.crowdLongPct === 'number' && Number.isFinite(row.crowdLongPct)) {
+      const skewNote =
+        row.crowdSkew === 'crowded_long'
+          ? 'Contrarian Bearish'
+          : row.crowdSkew === 'crowded_short'
+            ? 'Contrarian Bullish'
+            : 'Balanced';
+      const trapped =
+        row.crowdSkew === 'crowded_long' && typeof row.trappedLongPct === 'number'
+          ? ` · ${row.trappedLongPct}% longs trapped`
+          : row.crowdSkew === 'crowded_short' && typeof row.trappedShortPct === 'number'
+            ? ` · ${row.trappedShortPct}% shorts trapped`
+            : '';
+      parts.push(`OANDA Crowd: ${row.crowdLongPct.toFixed(0)}% Long (${skewNote}${trapped})`);
+    }
+    return parts.join('\n');
+  }
+
+  function buildVolTooltip(row: EnrichedScreenerRow): string {
+    const parts: string[] = [];
+    if (row.volatilityD !== null) parts.push(`Daily Range Volatility: ${row.volatilityD.toFixed(2)}%`);
+    if (row.relVolume !== null) parts.push(`Session Tick RVOL: ${row.relVolume.toFixed(2)}x`);
+    if (typeof row.spreadAtrPct === 'number' && Number.isFinite(row.spreadAtrPct)) {
+      const state = row.wideSpread ? 'Wide Spread' : 'Normal Spread';
+      const ratioStr =
+        typeof row.spreadRatio === 'number' && Number.isFinite(row.spreadRatio)
+          ? ` (${row.spreadRatio.toFixed(1)}x median)`
+          : '';
+      parts.push(`OANDA Spread: ${row.spreadAtrPct.toFixed(2)}% of ATR · ${state}${ratioStr}`);
+    }
+    return parts.join('\n');
   }
 
   function onResizeDown(e: PointerEvent) {
@@ -907,13 +954,13 @@
                     <td class="num" class:pos={row.changePercent > 0} class:neg={row.changePercent < 0}>
                       {formatPct(row.changePercent)}
                     </td>
-                    <td>
+                    <td title={buildTechTooltip(row)}>
                       <span class="rating-txt {ratingTone(row.rating)}">
                         {#if row.rating === 'Strong buy'}▲▲{:else if row.rating === 'Buy'}▲{:else if row.rating === 'Strong sell'}▼▼{:else if row.rating === 'Sell'}▼{:else}—{/if}
                         {row.rating}
                       </span>
                     </td>
-                    <td class="num muted">
+                    <td class="num muted" title={buildVolTooltip(row)}>
                       {row.volatilityD !== null ? `${row.volatilityD.toFixed(2)}%` : '—'}
                     </td>
                     <td class="num">
