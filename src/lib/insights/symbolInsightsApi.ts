@@ -68,7 +68,13 @@ export interface SymbolTechnicalsPayload {
   movingAverages: IndicatorRow[];
   pivots: PivotRow[];
   mtfOverview: MtfOverviewRow[];
-  source: 'tv' | 'yahoo-fallback';
+  crowdLongPct?: number | null;
+  crowdShortPct?: number | null;
+  trappedLongPct?: number | null;
+  trappedShortPct?: number | null;
+  crowdSkew?: 'crowded_long' | 'crowded_short' | 'balanced' | null;
+  spreadAtrPct?: number | null;
+  source: 'oanda' | 'tv' | 'yahoo-fallback';
   updatedAt: string;
 }
 

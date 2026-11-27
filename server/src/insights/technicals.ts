@@ -1,3 +1,36 @@
+import {
+  fetchOandaBatchPricing,
+  fetchOandaPositionBook,
+  fetchOandaSeries,
+  fetchOandaSyntheticDxy,
+  hasOandaPositionBook,
+  isOandaConfigured,
+  resolveOandaInstrument,
+  type OandaBar,
+  type OandaCrowdSkew,
+  type OandaGranularity,
+  type OandaPositionBookSummary,
+  type OandaSeriesResult
+} from '../quotes/oanda.js';
+import {
+  aggregateBars,
+  computeAwesomeOscillator,
+  computeBullBearPower,
+  computeCci,
+  computeEmaSeries,
+  computeHullMa,
+  computeIchimokuBaseLine,
+  computeMacd,
+  computeSma,
+  computeStoch,
+  computeVwma,
+  computeWilderAdx,
+  computeWilderAtr,
+  computeWilderRsiSeries,
+  computeWilliamsR,
+  scoreTimeframeTechnicals
+} from '../quotes/ta.js';
+
 const TV_SCANNER_URL = 'https://scanner.tradingview.com/global/scan';
 const FETCH_TIMEOUT_MS = 10_000;
 
@@ -67,7 +100,13 @@ export interface SymbolTechnicalsPayload {
   movingAverages: IndicatorRow[];
   pivots: PivotRow[];
   mtfOverview: MtfOverviewRow[];
-  source: 'tv' | 'yahoo-fallback';
+  crowdLongPct?: number | null;
+  crowdShortPct?: number | null;
+  trappedLongPct?: number | null;
+  trappedShortPct?: number | null;
+  crowdSkew?: OandaCrowdSkew | null;
+  spreadAtrPct?: number | null;
+  source: 'oanda' | 'tv' | 'yahoo-fallback';
   updatedAt: string;
 }
 
@@ -318,6 +357,346 @@ function tallyRows(rows: IndicatorRow[], tvScore: number | null): GaugeSummary {
   };
 }
 
+function computePivotsFromPrevBar(prev: OandaBar): PivotRow[] {
+  const h = prev.high;
+  const l = prev.low;
+  const c = prev.close;
+  const o = prev.open;
+  const rng = Math.max(0, h - l);
+
+  const pClassic = (h + l + c) / 3;
+  const pWoodie = (h + l + 2 * c) / 4;
+  const xDm = c < o ? h + 2 * l + c : c > o ? 2 * h + l + c : h + l + 2 * c;
+
+  return [
+    {
+      method: 'Classic',
+      s3: roundVal(l - 2 * (h - pClassic), 4),
+      s2: roundVal(pClassic - rng, 4),
+      s1: roundVal(2 * pClassic - h, 4),
+      p: roundVal(pClassic, 4),
+      r1: roundVal(2 * pClassic - l, 4),
+      r2: roundVal(pClassic + rng, 4),
+      r3: roundVal(h + 2 * (pClassic - l), 4)
+    },
+    {
+      method: 'Fibonacci',
+      s3: roundVal(pClassic - rng, 4),
+      s2: roundVal(pClassic - 0.618 * rng, 4),
+      s1: roundVal(pClassic - 0.382 * rng, 4),
+      p: roundVal(pClassic, 4),
+      r1: roundVal(pClassic + 0.382 * rng, 4),
+      r2: roundVal(pClassic + 0.618 * rng, 4),
+      r3: roundVal(pClassic + rng, 4)
+    },
+    {
+      method: 'Camarilla',
+      s3: roundVal(c - (rng * 1.1) / 4, 4),
+      s2: roundVal(c - (rng * 1.1) / 6, 4),
+      s1: roundVal(c - (rng * 1.1) / 12, 4),
+      p: roundVal(pClassic, 4),
+      r1: roundVal(c + (rng * 1.1) / 12, 4),
+      r2: roundVal(c + (rng * 1.1) / 6, 4),
+      r3: roundVal(c + (rng * 1.1) / 4, 4)
+    },
+    {
+      method: 'Woodie',
+      s3: roundVal(l - 2 * (h - pWoodie), 4),
+      s2: roundVal(pWoodie - rng, 4),
+      s1: roundVal(2 * pWoodie - h, 4),
+      p: roundVal(pWoodie, 4),
+      r1: roundVal(2 * pWoodie - l, 4),
+      r2: roundVal(pWoodie + rng, 4),
+      r3: roundVal(h + 2 * (pWoodie - l), 4)
+    },
+    {
+      method: 'DM',
+      s3: null,
+      s2: null,
+      s1: roundVal(xDm / 2 - h, 4),
+      p: roundVal(xDm / 4, 4),
+      r1: roundVal(xDm / 2 - l, 4),
+      r2: null,
+      r3: null
+    }
+  ];
+}
+
+function mapIntervalToOanda(interval: TechnicalsInterval): { gran: OandaGranularity; aggSec?: number } {
+  switch (interval) {
+    case '1m':
+    case '5m':
+      return { gran: 'M5' };
+    case '15m':
+      return { gran: 'M15' };
+    case '30m':
+      return { gran: 'M30' };
+    case '1h':
+      return { gran: 'H1' };
+    case '2h':
+      return { gran: 'H1', aggSec: 7200 };
+    case '4h':
+      return { gran: 'H4' };
+    case '1W':
+      return { gran: 'D', aggSec: 7 * 86_400 };
+    case '1M':
+      return { gran: 'D', aggSec: 30 * 86_400 };
+    case '1D':
+    default:
+      return { gran: 'D' };
+  }
+}
+
+async function buildOandaTechnicalsPayload(
+  symbol: string,
+  short: string,
+  interval: TechnicalsInterval,
+  tvFallback: SymbolTechnicalsPayload | null
+): Promise<SymbolTechnicalsPayload | null> {
+  if (!isOandaConfigured()) return null;
+  const isDxy = short === 'DXY';
+  const inst = isDxy ? 'ICE_DXY_OANDA' : resolveOandaInstrument(short);
+  if (!inst) return null;
+
+  const targetSpec = mapIntervalToOanda(interval);
+  const fetchSeries = (gran: OandaGranularity, count: number): Promise<OandaSeriesResult | null> =>
+    isDxy ? fetchOandaSyntheticDxy(gran, count, false) : fetchOandaSeries(short, gran, count, false);
+
+  const [targetRes, dailyRes, h1Res, m15Res, pricingMap, posBook]: [
+    OandaSeriesResult | null,
+    OandaSeriesResult | null,
+    OandaSeriesResult | null,
+    OandaSeriesResult | null,
+    Map<string, { mid: number; spreadPx: number }>,
+    OandaPositionBookSummary | null
+  ] = await Promise.all([
+    fetchSeries(targetSpec.gran, targetSpec.gran === 'D' ? 360 : 260),
+    targetSpec.gran === 'D' ? Promise.resolve(null) : fetchSeries('D', 260),
+    targetSpec.gran === 'H1' ? Promise.resolve(null) : fetchSeries('H1', 140),
+    targetSpec.gran === 'M15' ? Promise.resolve(null) : fetchSeries('M15', 140),
+    isDxy ? Promise.resolve(new Map()) : fetchOandaBatchPricing([short], false),
+    !isDxy && hasOandaPositionBook(short) ? fetchOandaPositionBook(short, false) : Promise.resolve(null)
+  ]);
+
+  const effectiveDaily = targetSpec.gran === 'D' ? targetRes : dailyRes;
+  const effectiveH1 = targetSpec.gran === 'H1' ? targetRes : h1Res;
+  const effectiveM15 = targetSpec.gran === 'M15' ? targetRes : m15Res;
+
+  if (!targetRes || targetRes.bars.length < 22) return null;
+
+  let activeBars = targetSpec.aggSec ? aggregateBars(targetRes.bars, targetSpec.aggSec) : targetRes.bars;
+  if (activeBars.length < 22) return null;
+
+  const livePx = !isDxy ? pricingMap.get(inst) : undefined;
+  const latestClose =
+    livePx?.mid ??
+    effectiveM15?.bars[effectiveM15.bars.length - 1]?.close ??
+    effectiveH1?.bars[effectiveH1.bars.length - 1]?.close ??
+    activeBars[activeBars.length - 1].close;
+
+  if (!Number.isFinite(latestClose) || latestClose <= 0) return null;
+
+  // Sync final bar with live OANDA spot
+  const lastActive = activeBars[activeBars.length - 1];
+  activeBars = [
+    ...activeBars.slice(0, -1),
+    {
+      ...lastActive,
+      high: Math.max(lastActive.high, latestClose),
+      low: Math.min(lastActive.low, latestClose),
+      close: latestClose
+    }
+  ];
+
+  const closes = activeBars.map((b) => b.close);
+  const lastIdx = closes.length - 1;
+  const atr = computeWilderAtr(activeBars, 14);
+
+  const rsiSeries = computeWilderRsiSeries(closes, 14);
+  const rsiCur = rsiSeries.length > 0 && Number.isFinite(rsiSeries[lastIdx]) ? rsiSeries[lastIdx] : null;
+  const rsiPrev =
+    rsiSeries.length > 1 && Number.isFinite(rsiSeries[lastIdx - 1]) ? rsiSeries[lastIdx - 1] : null;
+
+  const stoch = computeStoch(activeBars, 14, 3);
+  const cci = computeCci(activeBars, 20);
+  const adx = computeWilderAdx(activeBars, 14);
+  const ao = computeAwesomeOscillator(activeBars);
+  const momCur = closes.length >= 12 ? closes[lastIdx] - closes[lastIdx - 10] : null;
+  const momPrev = closes.length >= 13 ? closes[lastIdx - 1] - closes[lastIdx - 11] : null;
+  const macd = computeMacd(closes);
+  const willR = computeWilliamsR(activeBars, 14);
+  const bbp = computeBullBearPower(activeBars, 13);
+
+  const oscillators: IndicatorRow[] = [
+    {
+      name: 'Relative Strength Index (14)',
+      value: roundVal(rsiCur, 2),
+      action: computeRsiAction(rsiCur, rsiPrev)
+    },
+    {
+      name: 'Stochastic %K (14, 3, 3)',
+      value: roundVal(stoch?.k ?? null, 2),
+      action: computeStochAction(stoch?.k ?? null, stoch?.d ?? null, stoch?.prevK ?? null, stoch?.prevD ?? null)
+    },
+    {
+      name: 'Commodity Channel Index (20)',
+      value: roundVal(cci?.value ?? null, 2),
+      action: computeCciAction(cci?.value ?? null, cci?.prev ?? null)
+    },
+    {
+      name: 'Average Directional Index (14)',
+      value: roundVal(adx?.adx ?? null, 2),
+      action: computeAdxAction(
+        adx?.adx ?? null,
+        adx?.plusDi ?? null,
+        adx?.minusDi ?? null,
+        adx?.prevPlusDi ?? null,
+        adx?.prevMinusDi ?? null
+      )
+    },
+    {
+      name: 'Awesome Oscillator',
+      value: roundVal(ao?.ao ?? null, 4),
+      action: computeAoAction(ao?.ao ?? null, ao?.ao1 ?? null, ao?.ao2 ?? null)
+    },
+    {
+      name: 'Momentum (10)',
+      value: roundVal(momCur, 4),
+      action: computeMomAction(momCur, momPrev)
+    },
+    {
+      name: 'MACD Level (12, 26)',
+      value: roundVal(macd?.macd ?? null, 4),
+      action: computeMacdAction(macd?.macd ?? null, macd?.signal ?? null)
+    },
+    {
+      name: 'Williams Percent Range (14)',
+      value: roundVal(willR, 2),
+      action: willR == null ? 'Neutral' : willR < -80 ? 'Buy' : willR > -20 ? 'Sell' : 'Neutral'
+    },
+    {
+      name: 'Bull Bear Power',
+      value: roundVal(bbp, 4),
+      action: bbp == null ? 'Neutral' : bbp > 0 ? 'Buy' : bbp < 0 ? 'Sell' : 'Neutral'
+    }
+  ];
+
+  const emaVal = (period: number): number | null => {
+    const arr = computeEmaSeries(closes, period);
+    const v = arr.length > 0 ? arr[arr.length - 1] : NaN;
+    return Number.isFinite(v) ? v : null;
+  };
+  const ichimoku = computeIchimokuBaseLine(activeBars, 26);
+  const vwma20 = computeVwma(activeBars, 20);
+  const hull9 = computeHullMa(closes, 9);
+
+  const movingAverages: IndicatorRow[] = [
+    { name: 'Exponential Moving Average (10)', value: roundVal(emaVal(10), 4), action: computeMaAction(emaVal(10), latestClose) },
+    { name: 'Simple Moving Average (10)', value: roundVal(computeSma(closes, 10), 4), action: computeMaAction(computeSma(closes, 10), latestClose) },
+    { name: 'Exponential Moving Average (20)', value: roundVal(emaVal(20), 4), action: computeMaAction(emaVal(20), latestClose) },
+    { name: 'Simple Moving Average (20)', value: roundVal(computeSma(closes, 20), 4), action: computeMaAction(computeSma(closes, 20), latestClose) },
+    { name: 'Exponential Moving Average (30)', value: roundVal(emaVal(30), 4), action: computeMaAction(emaVal(30), latestClose) },
+    { name: 'Simple Moving Average (30)', value: roundVal(computeSma(closes, 30), 4), action: computeMaAction(computeSma(closes, 30), latestClose) },
+    { name: 'Exponential Moving Average (50)', value: roundVal(emaVal(50), 4), action: computeMaAction(emaVal(50), latestClose) },
+    { name: 'Simple Moving Average (50)', value: roundVal(computeSma(closes, 50), 4), action: computeMaAction(computeSma(closes, 50), latestClose) },
+    { name: 'Exponential Moving Average (100)', value: roundVal(emaVal(100), 4), action: computeMaAction(emaVal(100), latestClose) },
+    { name: 'Simple Moving Average (100)', value: roundVal(computeSma(closes, 100), 4), action: computeMaAction(computeSma(closes, 100), latestClose) },
+    { name: 'Exponential Moving Average (200)', value: roundVal(emaVal(200), 4), action: computeMaAction(emaVal(200), latestClose) },
+    { name: 'Simple Moving Average (200)', value: roundVal(computeSma(closes, 200), 4), action: computeMaAction(computeSma(closes, 200), latestClose) },
+    { name: 'Ichimoku Base Line (9, 26, 52, 26)', value: roundVal(ichimoku, 4), action: computeMaAction(ichimoku, latestClose) },
+    { name: 'Volume Weighted Moving Average (20)', value: roundVal(vwma20, 4), action: computeMaAction(vwma20, latestClose) },
+    { name: 'Hull Moving Average (9)', value: roundVal(hull9, 4), action: computeMaAction(hull9, latestClose) }
+  ];
+
+  const oscillatorsGauge = tallyRows(oscillators, null);
+  const movingAveragesGauge = tallyRows(movingAverages, null);
+  const summary = tallyRows([...oscillators, ...movingAverages], null);
+
+  // Pivots from previous completed daily candle (or previous active candle for weekly/monthly)
+  const pivotBars = effectiveDaily && effectiveDaily.bars.length >= 2 ? effectiveDaily.bars : activeBars;
+  const pivots =
+    pivotBars.length >= 2 ? computePivotsFromPrevBar(pivotBars[pivotBars.length - 2]) : (tvFallback?.pivots ?? []);
+
+  // Build MTF overview: 15m, 1H, 4H, 1D live from OANDA; 1W, 1M from OANDA aggregated or TV fallback
+  const h4Bars = effectiveH1 && effectiveH1.bars.length >= 20 ? aggregateBars(effectiveH1.bars, 14_400) : [];
+  const weeklyBars = effectiveDaily && effectiveDaily.bars.length >= 110 ? aggregateBars(effectiveDaily.bars, 7 * 86_400) : [];
+
+  const oandaScores: Partial<Record<TechnicalsInterval, { maScore: number; oscScore: number; allScore: number } | null>> = {
+    '15m': effectiveM15 ? scoreTimeframeTechnicals(effectiveM15.bars) : null,
+    '1h': effectiveH1 ? scoreTimeframeTechnicals(effectiveH1.bars) : null,
+    '4h': h4Bars.length >= 22 ? scoreTimeframeTechnicals(h4Bars) : null,
+    '1D': effectiveDaily ? scoreTimeframeTechnicals(effectiveDaily.bars) : null,
+    '1W': weeklyBars.length >= 22 ? scoreTimeframeTechnicals(weeklyBars) : null
+  };
+
+  const mtfOverview: MtfOverviewRow[] = MTF_INTERVALS.map((entry) => {
+    const sc = oandaScores[entry.interval];
+    if (sc) {
+      return {
+        interval: entry.interval,
+        label: entry.label,
+        summaryScore: sc.allScore,
+        summaryRating: scoreToRating(sc.allScore),
+        oscillatorsRating: scoreToRating(sc.oscScore),
+        movingAveragesRating: scoreToRating(sc.maScore)
+      };
+    }
+    const tvMatch = tvFallback?.mtfOverview.find((r) => r.interval === entry.interval);
+    return (
+      tvMatch ?? {
+        interval: entry.interval,
+        label: entry.label,
+        summaryScore: null,
+        summaryRating: 'Neutral',
+        oscillatorsRating: 'Neutral',
+        movingAveragesRating: 'Neutral'
+      }
+    );
+  });
+
+  const dBars = effectiveDaily?.bars ?? [];
+  const prevDailyClose = dBars.length >= 2 ? dBars[dBars.length - 2].close : null;
+  const change = prevDailyClose != null ? roundVal(latestClose - prevDailyClose, 5) : (tvFallback?.change ?? null);
+  const changePercent =
+    prevDailyClose != null && prevDailyClose > 0
+      ? roundVal(((latestClose - prevDailyClose) / prevDailyClose) * 100, 2)
+      : (tvFallback?.changePercent ?? null);
+
+  const liveSpreadPx = livePx?.spreadPx ?? targetRes.liveSpreadPx ?? effectiveH1?.liveSpreadPx ?? null;
+  const dailyAtr = effectiveDaily ? computeWilderAtr(effectiveDaily.bars, 14) : atr;
+  const spreadAtrPct =
+    liveSpreadPx != null && dailyAtr != null && dailyAtr > 0
+      ? roundVal((liveSpreadPx / dailyAtr) * 100, 2)
+      : null;
+
+  return {
+    symbol,
+    shortName: short,
+    description: tvFallback?.description || short,
+    resolvedTicker: `OANDA:${inst}`,
+    interval,
+    price: latestClose,
+    change,
+    changePercent,
+    atr: roundVal(atr, 4),
+    summary,
+    oscillatorsGauge,
+    movingAveragesGauge,
+    oscillators,
+    movingAverages,
+    pivots,
+    mtfOverview,
+    crowdLongPct: posBook?.longPct ?? null,
+    crowdShortPct: posBook?.shortPct ?? null,
+    trappedLongPct: posBook?.trappedLongPct ?? null,
+    trappedShortPct: posBook?.trappedShortPct ?? null,
+    crowdSkew: posBook?.skew ?? null,
+    spreadAtrPct,
+    source: 'oanda',
+    updatedAt: new Date().toISOString()
+  };
+}
+
 export async function getSymbolTechnicalsPayload(
   rawSymbol: string,
   rawInterval?: string | null
@@ -326,11 +705,27 @@ export async function getSymbolTechnicalsPayload(
   const short = shortTicker(symbol);
   const interval = parseTechnicalsInterval(rawInterval);
   const cacheKey = `${symbol}|${interval}`;
-  const ttlMs = interval === '1D' || interval === '1W' || interval === '1M' ? 60_000 : 20_000;
+  const ttlMs = interval === '1D' || interval === '1W' || interval === '1M' ? 45_000 : 20_000;
 
   const cached = techCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < ttlMs) {
     return cached.payload;
+  }
+
+  const oandaEligible = isOandaConfigured() && (short === 'DXY' || resolveOandaInstrument(short) !== null);
+
+  // For OANDA-covered intraday/daily timeframes, compute directly from live OANDA candles
+  // (fetching TV only if needed for 1M/1W metadata or description).
+  if (oandaEligible && interval !== '1M') {
+    const oandaPayload = await buildOandaTechnicalsPayload(symbol, short, interval, null);
+    if (oandaPayload) {
+      techCache.set(cacheKey, { payload: oandaPayload, fetchedAt: Date.now() });
+      if (techCache.size > 120) {
+        const oldest = techCache.keys().next().value;
+        if (oldest) techCache.delete(oldest);
+      }
+      return oandaPayload;
+    }
   }
 
   const s = INTERVAL_SUFFIX[interval];

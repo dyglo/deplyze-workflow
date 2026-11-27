@@ -1,5 +1,14 @@
+import {
+  fetchOandaBatchPricing,
+  fetchOandaSeries,
+  fetchOandaSyntheticDxy,
+  isOandaConfigured,
+  resolveOandaInstrument,
+  type OandaBar
+} from '../quotes/oanda.js';
+
 const FETCH_TIMEOUT_MS = 12_000;
-const SEASONALS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours — historical daily series changes once per day
+const SEASONALS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours — historical multi-year seasonal curves
 
 export interface SeasonalDayPoint {
   doy: number; // 0..365 normalized to leap-year calendar (Jan 1 = 0, Dec 31 = 365)
@@ -272,6 +281,76 @@ function computeVolatilityProfile(bars: DailyBar[]): VolatilityProfile | null {
   };
 }
 
+function oandaBarsToDailyBars(oBars: OandaBar[]): DailyBar[] {
+  return oBars.map((b) => {
+    const ts = b.ts * 1000;
+    const dt = new Date(ts);
+    const month = dt.getUTCMonth();
+    const day = dt.getUTCDate();
+    return {
+      ts,
+      year: dt.getUTCFullYear(),
+      month,
+      day,
+      dow: dt.getUTCDay(),
+      doy: normalizedDayOfYear(month, day),
+      open: b.open,
+      high: b.high,
+      low: b.low,
+      close: b.close
+    };
+  });
+}
+
+async function overlayOandaSpotVolatility(
+  short: string,
+  baseVolatility: VolatilityProfile | null
+): Promise<VolatilityProfile | null> {
+  if (!isOandaConfigured()) return baseVolatility;
+  const isDxy = short === 'DXY';
+  const inst = isDxy ? 'ICE_DXY_OANDA' : resolveOandaInstrument(short);
+  if (!inst) return baseVolatility;
+
+  try {
+    const [series, pricingMap] = await Promise.all([
+      isDxy ? fetchOandaSyntheticDxy('D', 260, false) : fetchOandaSeries(short, 'D', 260, false),
+      isDxy ? Promise.resolve(new Map()) : fetchOandaBatchPricing([short], false)
+    ]);
+    if (!series || series.bars.length < 22) return baseVolatility;
+
+    const liveMid = !isDxy ? pricingMap.get(inst)?.mid : undefined;
+    const rawBars = series.bars;
+    const last = rawBars[rawBars.length - 1];
+    const syncedBars =
+      liveMid && Number.isFinite(liveMid) && liveMid > 0
+        ? [
+            ...rawBars.slice(0, -1),
+            {
+              ...last,
+              high: Math.max(last.high, liveMid),
+              low: Math.min(last.low, liveMid),
+              close: liveMid
+            }
+          ]
+        : rawBars;
+
+    const spotProfile = computeVolatilityProfile(oandaBarsToDailyBars(syncedBars));
+    if (!spotProfile) return baseVolatility;
+
+    // Keep Yahoo's 5-year Day-of-Week seasonality stats while using live OANDA spot for
+    // lastPrice, ATR14, ADR20, today's range, 52W high/low, 1Y DOW, and swing levels.
+    return {
+      ...spotProfile,
+      dayOfWeek5Y:
+        baseVolatility && baseVolatility.dayOfWeek5Y.length > 0
+          ? baseVolatility.dayOfWeek5Y
+          : spotProfile.dayOfWeek5Y
+    };
+  } catch {
+    return baseVolatility;
+  }
+}
+
 export async function getSymbolSeasonalsPayload(rawSymbol: string): Promise<SymbolSeasonalsPayload> {
   const symbol = rawSymbol.trim().toUpperCase();
   const short = shortTicker(symbol);
@@ -281,10 +360,13 @@ export async function getSymbolSeasonalsPayload(rawSymbol: string): Promise<Symb
 
   const cached = seasonalsCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < SEASONALS_TTL_MS) {
+    const liveVol = await overlayOandaSpotVolatility(short, cached.payload.volatility);
     return {
       ...cached.payload,
       symbol,
-      shortName: short
+      shortName: short,
+      volatility: liveVol,
+      updatedAt: new Date().toISOString()
     };
   }
 
@@ -456,6 +538,9 @@ export async function getSymbolSeasonalsPayload(rawSymbol: string): Promise<Symb
       short;
     const currency = mapped?.currency ?? meta?.currency ?? 'USD';
 
+    const baseVol = computeVolatilityProfile(bars);
+    const liveVol = await overlayOandaSpotVolatility(short, baseVol);
+
     const payload: SymbolSeasonalsPayload = {
       symbol,
       shortName: short,
@@ -465,11 +550,14 @@ export async function getSymbolSeasonalsPayload(rawSymbol: string): Promise<Symb
       maxYear,
       currentYear: maxYear,
       years,
-      volatility: computeVolatilityProfile(bars),
+      volatility: liveVol,
       updatedAt: new Date().toISOString()
     };
 
-    seasonalsCache.set(cacheKey, { payload, fetchedAt: Date.now() });
+    seasonalsCache.set(cacheKey, {
+      payload: { ...payload, volatility: baseVol },
+      fetchedAt: Date.now()
+    });
     if (seasonalsCache.size > 60) {
       const oldest = seasonalsCache.keys().next().value;
       if (oldest) seasonalsCache.delete(oldest);

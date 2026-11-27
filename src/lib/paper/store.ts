@@ -130,6 +130,23 @@ let draftSeq = 0;
 // In-memory live Bid/Ask quotes keyed by normalized symbol key (e.g. XAUUSD) AND canonical symbol
 const liveQuotesByKey = new Map<string, PaperLiveQuote>();
 const liveQuotesSnapshot: Record<string, PaperLiveQuote> = {};
+// Real live OANDA spreads synced from /api/quotes (2-minute freshness window)
+const LIVE_SPREAD_TTL_MS = 120_000;
+const liveOandaSpreadByKey = new Map<string, { spreadPx: number; updatedAtMs: number }>();
+
+function getFreshLiveSpread(key: string): number | null {
+  const entry = liveOandaSpreadByKey.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.updatedAtMs > LIVE_SPREAD_TTL_MS) return null;
+  return entry.spreadPx;
+}
+
+export function feedPaperLiveSpread(symbol: string, spreadPx: number | null | undefined): void {
+  if (typeof spreadPx !== 'number' || !Number.isFinite(spreadPx) || spreadPx <= 0) return;
+  const key = normalizeSymbolKey(symbol);
+  if (!key) return;
+  liveOandaSpreadByKey.set(key, { spreadPx, updatedAtMs: Date.now() });
+}
 
 const stateListeners = new Set<(s: PaperLedgerState) => void>();
 const quoteListeners = new Set<(q: Record<string, PaperLiveQuote>) => void>();
@@ -481,7 +498,7 @@ export function updatePaperSettings(patch: Partial<PaperAccountSettings>): void 
     if (patch.zeroSpread !== undefined && patch.zeroSpread !== acc.settings.zeroSpread) {
       // Recompute cached Bid/Ask with new spread preference
       for (const [key, q] of liveQuotesByKey.entries()) {
-        const ba = computeBidAsk(q.last, q.symbol, nextSettings.zeroSpread);
+        const ba = computeBidAsk(q.last, q.symbol, nextSettings.zeroSpread, getFreshLiveSpread(key));
         const updatedQ = { ...q, ...ba };
         liveQuotesByKey.set(key, updatedQ);
         liveQuotesSnapshot[key] = updatedQ;
@@ -1739,14 +1756,19 @@ export function feedPaperQuote(
   symbol: string,
   shortName: string,
   price: number,
-  source: 'live' | 'poll' = 'live'
+  source: 'live' | 'poll' = 'live',
+  liveSpreadPx?: number | null
 ): void {
   if (!Number.isFinite(price) || price <= 0) return;
   const key = normalizeSymbolKey(symbol);
   if (!key) return;
 
-  const existing = liveQuotesByKey.get(key);
   const nowMs = Date.now();
+  if (typeof liveSpreadPx === 'number' && Number.isFinite(liveSpreadPx) && liveSpreadPx > 0) {
+    liveOandaSpreadByKey.set(key, { spreadPx: liveSpreadPx, updatedAtMs: nowMs });
+  }
+
+  const existing = liveQuotesByKey.get(key);
   // Never overwrite a fresh live chart tick with a slower poll quote
   if (
     source === 'poll' &&
@@ -1758,7 +1780,11 @@ export function feedPaperQuote(
   }
 
   const acc = getActivePaperAccount(state);
-  const ba = computeBidAsk(price, symbol, acc.settings.zeroSpread);
+  const effectiveLiveSpread =
+    typeof liveSpreadPx === 'number' && Number.isFinite(liveSpreadPx) && liveSpreadPx > 0
+      ? liveSpreadPx
+      : getFreshLiveSpread(key);
+  const ba = computeBidAsk(price, symbol, acc.settings.zeroSpread, effectiveLiveSpread);
   const nextQuote: PaperLiveQuote = {
     symbol,
     shortName: shortName || normalizeShortTicker(symbol),
@@ -1810,13 +1836,22 @@ async function pollRequiredPaperSymbols(): Promise<void> {
   for (const ord of acc.orders) {
     needed.set(normalizeSymbolKey(ord.symbol), { symbol: ord.symbol, shortName: ord.shortName });
   }
+  // Also keep active chart symbols synced with real live OANDA Bid/Ask spreads
+  for (const [k, q] of liveQuotesByKey.entries()) {
+    if (!needed.has(k) && getFreshLiveSpread(k) === null) {
+      needed.set(k, { symbol: q.symbol, shortName: q.shortName });
+    }
+  }
   if (needed.size === 0) return;
 
   const nowMs = Date.now();
   const toFetch: { symbol: string; shortName: string }[] = [];
   for (const [key, item] of needed.entries()) {
     const existing = liveQuotesByKey.get(key);
-    if (!existing || existing.source !== 'live' || nowMs - existing.updatedAtMs >= LIVE_FRESH_MS) {
+    const needsPrice =
+      !existing || existing.source !== 'live' || nowMs - existing.updatedAtMs >= LIVE_FRESH_MS;
+    const needsSpread = getFreshLiveSpread(key) === null;
+    if (needsPrice || needsSpread) {
       toFetch.push(item);
     }
   }
@@ -1828,7 +1863,7 @@ async function pollRequiredPaperSymbols(): Promise<void> {
     for (const item of toFetch) {
       const q = quotes[item.symbol];
       if (q && Number.isFinite(q.price) && q.price > 0) {
-        feedPaperQuote(item.symbol, item.shortName, q.price, 'poll');
+        feedPaperQuote(item.symbol, item.shortName, q.price, 'poll', q.spreadPx);
       }
     }
   } catch {

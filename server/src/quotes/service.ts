@@ -1,4 +1,15 @@
-import { fetchOandaSeries, isOandaConfigured, type OandaGranularity } from './oanda.js';
+import {
+  fetchOandaBatchPricing,
+  fetchOandaSeries,
+  fetchOandaSyntheticDxy,
+  isOandaConfigured,
+  resolveOandaInstrument,
+  type OandaBar,
+  type OandaGranularity,
+  type OandaLivePricing,
+  type OandaSeriesResult
+} from './oanda.js';
+import { computeMtfInstitutionalScore, roundNum } from './ta.js';
 
 export interface QuotePerformance {
   w1: number | null;
@@ -16,13 +27,17 @@ export interface MarketQuote {
   shortName: string; // e.g. XAUUSD
   description: string;
   price: number;
+  bid?: number | null;
+  ask?: number | null;
+  spreadPx?: number | null;
+  spreadPct?: number | null;
   change: number;
   changePercent: number;
   type: string;
   performance: QuotePerformance;
   autoBias: AutoBias;
   biasScore: number | null; // -1 (strong bear) to +1 (strong bull)
-  source: 'tv' | 'yahoo';
+  source: 'oanda' | 'tv' | 'yahoo';
   updatedAt: string;
 }
 
@@ -44,8 +59,8 @@ const yahooPerfCache = new Map<
 
 function classifyBias(score: number | null): AutoBias {
   if (score == null || !Number.isFinite(score)) return 'range';
-  if (score >= 0.15) return 'bull';
-  if (score <= -0.15) return 'bear';
+  if (score >= 0.1) return 'bull';
+  if (score <= -0.1) return 'bear';
   return 'range';
 }
 
@@ -80,6 +95,19 @@ function computeYahooBias(price: number, closes: number[]): { autoBias: AutoBias
 const TV_TICKER_OVERRIDES: Record<string, string> = {
   XAUUSD: 'OANDA:XAUUSD',
   GOLD: 'OANDA:XAUUSD',
+  XAGUSD: 'TVC:SILVER',
+  'OANDA:XAGUSD': 'TVC:SILVER',
+  USOIL: 'FX:USOIL',
+  'TVC:USOIL': 'FX:USOIL',
+  UKOIL: 'FX:UKOIL',
+  'TVC:UKOIL': 'FX:UKOIL',
+  NATGAS: 'NYMEX:NG1!',
+  'FX:NATGAS': 'NYMEX:NG1!',
+  SPX: 'SP:SPX',
+  'TVC:SPX': 'SP:SPX',
+  US30: 'DJ:DJI',
+  DJI: 'DJ:DJI',
+  'TVC:DJI': 'DJ:DJI',
   DXY: 'TVC:DXY',
   EURUSD: 'OANDA:EURUSD',
   GBPUSD: 'OANDA:GBPUSD',
@@ -370,6 +398,142 @@ async function fetchFromYahoo(requested: string): Promise<MarketQuote | null> {
   }
 }
 
+function isOandaQuoteEligible(raw: string): boolean {
+  const short = shortTicker(raw);
+  return short === 'DXY' || resolveOandaInstrument(short) !== null;
+}
+
+function pctFromBarsAgo(bars: OandaBar[], currentPrice: number, offset: number): number | null {
+  if (bars.length <= offset) return null;
+  const ref = bars[bars.length - 1 - offset]?.close;
+  if (!ref || !Number.isFinite(ref) || ref <= 0) return null;
+  return roundNum(((currentPrice - ref) / ref) * 100, 2);
+}
+
+function pctFromYearStart(bars: OandaBar[], currentPrice: number): number | null {
+  if (bars.length < 5) return null;
+  const yearStartSec = Math.floor(Date.UTC(new Date().getUTCFullYear(), 0, 1) / 1000);
+  let refClose: number | null = null;
+  for (let i = bars.length - 1; i >= 0; i--) {
+    if (bars[i].ts <= yearStartSec) {
+      refClose = bars[i].close;
+      break;
+    }
+  }
+  if (!refClose || refClose <= 0) return null;
+  return roundNum(((currentPrice - refClose) / refClose) * 100, 2);
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  async function lane() {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= items.length) break;
+      results[idx] = await worker(items[idx]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => lane()));
+  return results;
+}
+
+async function buildOandaQuoteOverlay(
+  requested: string,
+  base: MarketQuote | undefined,
+  livePricingMap: Map<string, OandaLivePricing>
+): Promise<MarketQuote | null> {
+  const short = shortTicker(requested);
+  const isDxy = short === 'DXY';
+  const inst = isDxy ? 'ICE_DXY_OANDA' : resolveOandaInstrument(short);
+  if (!inst) return null;
+
+  const [dailyRes, h1Res]: [OandaSeriesResult | null, OandaSeriesResult | null] = await Promise.all([
+    isDxy ? fetchOandaSyntheticDxy('D', 260, false) : fetchOandaSeries(short, 'D', 260, false),
+    isDxy ? fetchOandaSyntheticDxy('H1', 140, false) : fetchOandaSeries(short, 'H1', 140, false)
+  ]);
+
+  if (!dailyRes || dailyRes.bars.length < 2) return null;
+
+  const dBars = dailyRes.bars;
+  const h1Bars = h1Res?.bars ?? [];
+  const lastDay = dBars[dBars.length - 1];
+  const prevDay = dBars[dBars.length - 2];
+
+  const livePx = !isDxy ? livePricingMap.get(inst) : undefined;
+  const price =
+    livePx?.mid ?? (h1Bars.length > 0 ? h1Bars[h1Bars.length - 1].close : lastDay.close);
+  if (!Number.isFinite(price) || price <= 0) return null;
+
+  const spreadPx = livePx?.spreadPx ?? h1Res?.liveSpreadPx ?? dailyRes.liveSpreadPx ?? null;
+  const spreadPct =
+    livePx?.spreadPct ??
+    (spreadPx !== null && price > 0 ? roundNum((spreadPx / price) * 100, 4) : null);
+  const bid =
+    livePx?.bid ?? (spreadPx !== null && spreadPx > 0 ? price - spreadPx / 2 : null);
+  const ask =
+    livePx?.ask ?? (spreadPx !== null && spreadPx > 0 ? price + spreadPx / 2 : null);
+
+  const change = price - prevDay.close;
+  const changePercent = prevDay.close > 0 ? roundNum((change / prevDay.close) * 100, 2) : 0;
+
+  const dailyForTa = [
+    ...dBars.slice(0, -1),
+    {
+      ...lastDay,
+      high: Math.max(lastDay.high, price),
+      low: Math.min(lastDay.low, price),
+      close: price
+    }
+  ];
+  const h1ForTa =
+    h1Bars.length > 0
+      ? [
+          ...h1Bars.slice(0, -1),
+          {
+            ...h1Bars[h1Bars.length - 1],
+            high: Math.max(h1Bars[h1Bars.length - 1].high, price),
+            low: Math.min(h1Bars[h1Bars.length - 1].low, price),
+            close: price
+          }
+        ]
+      : [];
+
+  const mtf = computeMtfInstitutionalScore(dailyForTa, h1ForTa);
+  const biasScore = mtf.allScore ?? base?.biasScore ?? null;
+  const mappedYahoo = YAHOO_SYMBOL_MAP[short];
+
+  return {
+    symbol: requested,
+    shortName: short,
+    description: base?.description || mappedYahoo?.desc || short,
+    price,
+    bid,
+    ask,
+    spreadPx,
+    spreadPct,
+    change,
+    changePercent,
+    type: base?.type || mappedYahoo?.type || (short.length === 6 ? 'forex' : 'cfd'),
+    performance: {
+      w1: base?.performance.w1 ?? pctFromBarsAgo(dailyForTa, price, 5),
+      m1: base?.performance.m1 ?? pctFromBarsAgo(dailyForTa, price, 21),
+      m3: base?.performance.m3 ?? pctFromBarsAgo(dailyForTa, price, 63),
+      m6: base?.performance.m6 ?? pctFromBarsAgo(dailyForTa, price, 126),
+      ytd: base?.performance.ytd ?? pctFromYearStart(dailyForTa, price),
+      y1: base?.performance.y1 ?? pctFromBarsAgo(dailyForTa, price, 250)
+    },
+    autoBias: classifyBias(biasScore),
+    biasScore,
+    source: 'oanda',
+    updatedAt: new Date().toISOString()
+  };
+}
+
 export async function getQuotesPayload(rawSymbols: string[]): Promise<{
   quotes: Record<string, MarketQuote>;
   updatedAt: string;
@@ -400,13 +564,36 @@ export async function getQuotesPayload(rawSymbols: string[]): Promise<{
       requested: sym,
       tvTicker: toTvScannerTicker(sym)
     }));
-    const tvResults = await fetchFromTvScanner(tvRequests);
+    const oandaActive = isOandaConfigured();
+    const oandaSymbols = oandaActive ? stale.filter(isOandaQuoteEligible) : [];
+
+    const [tvResults, livePricingMap] = await Promise.all([
+      fetchFromTvScanner(tvRequests),
+      oandaSymbols.length > 0
+        ? fetchOandaBatchPricing(
+            oandaSymbols.map((s) => shortTicker(s)),
+            false
+          )
+        : Promise.resolve(new Map<string, OandaLivePricing>())
+    ]);
+
+    const oandaResults = new Map<string, MarketQuote>();
+    if (oandaSymbols.length > 0) {
+      const built = await runWithConcurrency(oandaSymbols, 6, async (sym) => {
+        const q = await buildOandaQuoteOverlay(sym, tvResults.get(sym), livePricingMap);
+        return { sym, q };
+      });
+      for (const item of built) {
+        if (item.q) oandaResults.set(item.sym, item.q);
+      }
+    }
 
     const missing: string[] = [];
+    const stamp = Date.now();
     for (const sym of stale) {
-      const q = tvResults.get(sym);
+      const q = oandaResults.get(sym) ?? tvResults.get(sym);
       if (q) {
-        quoteCache.set(sym, { quote: q, fetchedAt: nowMs });
+        quoteCache.set(sym, { quote: q, fetchedAt: stamp });
         quotes[sym] = q;
       } else {
         missing.push(sym);
@@ -419,7 +606,7 @@ export async function getQuotesPayload(rawSymbols: string[]): Promise<{
         const sym = missing[i];
         const q = yahooResults[i];
         if (q) {
-          quoteCache.set(sym, { quote: q, fetchedAt: nowMs });
+          quoteCache.set(sym, { quote: q, fetchedAt: stamp });
           quotes[sym] = q;
         } else {
           // Serve slightly stale cache if upstream temporarily failed
@@ -474,6 +661,24 @@ export async function getSparklinePayload(rawSymbol: string): Promise<SymbolSpar
   const [quoteRes, chartPoints] = await Promise.all([
     getQuotesPayload([requested]),
     (async (): Promise<{ points: number[]; periodLabel: string; currency?: string }> => {
+      if (isOandaConfigured() && isOandaQuoteEligible(requested)) {
+        try {
+          const series =
+            short === 'DXY'
+              ? await fetchOandaSyntheticDxy('M15', 48, false)
+              : await fetchOandaSeries(short, 'M15', 48, false);
+          if (series && series.bars.length >= 6) {
+            return {
+              points: series.bars.map((b) => b.close),
+              periodLabel: '1 day',
+              currency: guessCurrency(short)
+            };
+          }
+        } catch {
+          // fall back to Yahoo sparkline below
+        }
+      }
+
       const tryFetch = async (range: string, interval: string): Promise<{ points: number[]; currency?: string } | null> => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);

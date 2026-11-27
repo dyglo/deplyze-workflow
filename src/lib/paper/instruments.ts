@@ -193,7 +193,8 @@ export function roundToTick(price: number, symbol: string): number {
 export function computeBidAsk(
   lastPrice: number,
   symbol: string,
-  zeroSpread: boolean
+  zeroSpread: boolean,
+  liveSpreadPx?: number | null
 ): { bid: number; ask: number; spreadDisplay: string } {
   const spec = getPaperInstrumentSpec(symbol);
   if (!Number.isFinite(lastPrice) || lastPrice <= 0) {
@@ -203,10 +204,14 @@ export function computeBidAsk(
     const p = roundToTick(lastPrice, symbol);
     return { bid: p, ask: p, spreadDisplay: '0.0' };
   }
-  const half = spec.defaultSpreadPrice / 2;
+  const effectiveSpread =
+    typeof liveSpreadPx === 'number' && Number.isFinite(liveSpreadPx) && liveSpreadPx > 0
+      ? liveSpreadPx
+      : spec.defaultSpreadPrice;
+  const half = effectiveSpread / 2;
   const bid = roundToTick(Math.max(spec.tickSize, lastPrice - half), symbol);
   const ask = roundToTick(lastPrice + half, symbol);
-  const spreadVal = (ask - bid) * spec.spreadMultiplier;
+  const spreadVal = Math.max(0, (ask - bid) * spec.spreadMultiplier);
   return {
     bid,
     ask,

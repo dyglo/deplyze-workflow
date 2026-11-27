@@ -21,13 +21,17 @@ export interface MarketQuote {
   shortName: string;
   description: string;
   price: number;
+  bid?: number | null;
+  ask?: number | null;
+  spreadPx?: number | null;
+  spreadPct?: number | null;
   change: number;
   changePercent: number;
   type: string;
   performance: QuotePerformance;
   autoBias?: 'bull' | 'bear' | 'range';
   biasScore?: number | null;
-  source: 'tv' | 'yahoo';
+  source: 'oanda' | 'tv' | 'yahoo';
   updatedAt: string;
 }
 

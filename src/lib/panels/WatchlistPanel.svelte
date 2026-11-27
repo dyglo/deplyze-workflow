@@ -17,6 +17,7 @@
   } from '../insights/api';
   import type { InsightsViewId } from '../insights/symbolInsightsApi';
   import { makeWorkspaceId } from '../workspace/storage';
+  import { feedPaperLiveSpread } from '../paper/store';
   import {
     SYMBOL_CATALOG,
     createDefaultWatchlistState,
@@ -314,6 +315,11 @@
     try {
       const next = await fetchMarketQuotes(syms);
       quotes = { ...quotes, ...next };
+      for (const [sym, q] of Object.entries(next)) {
+        if (q?.spreadPx && q.spreadPx > 0) {
+          feedPaperLiveSpread(sym, q.spreadPx);
+        }
+      }
     } catch {
       // non-fatal
     }
