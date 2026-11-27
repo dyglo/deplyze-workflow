@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { loadNotes, saveImageFromBlob, saveNotes } from '../notes/api';
 import type { Note, NoteAttachment } from '../notes/types';
 import { markdownToCleanText } from './markdown';
+import type { BacktestReport } from '../strategy/types';
 import type {
   AiChartContext,
   AiConversation,
@@ -159,6 +160,7 @@ export interface AiStreamCallbacks {
   onSources?: (sources: AiSourceLink[]) => void;
   onReasoning?: (delta: string) => void;
   onToken?: (delta: string) => void;
+  onStrategyResult?: (report: BacktestReport) => void;
   onDone?: (meta: { model: string; usedWebSearch: boolean; usedVision: boolean }) => void;
   onError?: (message: string) => void;
 }
@@ -227,6 +229,8 @@ export async function streamAiChat(
       callbacks.onReasoning?.(payload.delta);
     } else if (eventName === 'token' && typeof payload.delta === 'string') {
       callbacks.onToken?.(payload.delta);
+    } else if (eventName === 'strategy_result' && payload.report && typeof payload.report === 'object') {
+      callbacks.onStrategyResult?.(payload.report as BacktestReport);
     } else if (eventName === 'done') {
       callbacks.onDone?.({
         model: String(payload.model ?? request.model),

@@ -6,6 +6,7 @@ import {
 } from './context.js';
 import { isTavilyConfigured, runTavilyFinanceSearch } from './tavily.js';
 import type { AiChatRequest, AiEffort, AiModelId, AiSourceLink } from './types.js';
+import { isStrategyPrompt, runAgenticStrategyMode } from '../strategy/agent.js';
 
 function getDeepSeekChatUrl(): string {
   const base = (process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com').trim().replace(/\/+$/, '');
@@ -170,6 +171,33 @@ export async function streamAiChat(
   const latestUserText = history[history.length - 1].content.trim();
   const symbolLabel = body.context?.symbol || body.context?.fullSymbol || 'market';
   const webMode = body.webSearchMode ?? 'auto';
+
+  // Route strategy design / backtesting / refinement requests into the Agentic Strategy Loop
+  if (isStrategyPrompt(latestUserText, history)) {
+    try {
+      await runAgenticStrategyMode({
+        apiKey,
+        model,
+        effort,
+        history,
+        latestUserText,
+        context: body.context,
+        webSearchMode: webMode,
+        res,
+        abortSignal
+      });
+    } catch (err) {
+      if (abortSignal.aborted) {
+        res.end();
+        return;
+      }
+      const msg = err instanceof Error ? err.message : 'Unexpected strategy backtest error';
+      writeSse(res, 'error', { message: msg });
+      res.end();
+    }
+    return;
+  }
+
   const runSearch =
     isTavilyConfigured() &&
     (webMode === 'on' || (webMode === 'auto' && shouldAutoRunWebSearch(latestUserText)));

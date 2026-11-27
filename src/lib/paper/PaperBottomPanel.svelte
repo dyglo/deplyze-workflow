@@ -2,6 +2,20 @@
   import { onMount } from 'svelte';
   import AppLogoIcon from '../AppLogoIcon.svelte';
   import { savePaperTradeToPlaybook } from '../playbook/store';
+  import StrategyTesterView from '../strategy/StrategyTesterView.svelte';
+  import {
+    closeStrategyTab,
+    deleteSavedStrategy,
+    duplicateSavedStrategy,
+    getOpenStrategy,
+    openSavedStrategy,
+    setActiveDockTab,
+    setStrategyDockHeight,
+    setStrategyDockMode,
+    subscribeStrategies,
+    subscribeStrategyRunStatus
+  } from '../strategy/store';
+  import type { StrategyWorkspaceState } from '../strategy/types';
   import SymbolIcon from '../watchlist/SymbolIcon.svelte';
   import {
     computePnlUsd,
@@ -61,10 +75,17 @@
 
   let ledger = $state<PaperLedgerState | null>(null);
   let quotes = $state<Record<string, PaperLiveQuote>>({});
+  let stratState = $state<StrategyWorkspaceState | null>(null);
+  let stratRunStatus = $state<{ running: boolean; error: string | null }>({
+    running: false,
+    error: null
+  });
 
   let brokerMenuOpen = $state(false);
+  let strategyMenuOpen = $state(false);
   let accountMenuOpen = $state(false);
   let columnsMenuOpen = $state(false);
+  let paperChartMode = $state<'performance' | 'drawdown'>('performance');
 
   // Expanded position fill legs (when a position was built from 2+ orders)
   let expandedPosIds = $state<Record<string, boolean>>({});
@@ -94,8 +115,35 @@
   const activeSymKey = $derived(normalizeSymbolKey(activeSymbol || ''));
   const privacy = $derived(Boolean(account?.settings.privacyMask));
 
-  const mode = $derived(ledger?.bottomMode ?? 'collapsed');
+  const openStrategy = $derived(stratState ? getOpenStrategy(stratState) : null);
+  const hasVisibleDock = $derived(Boolean(ledger?.connected || openStrategy));
+  const activeDockTab = $derived<'strategy' | 'paper'>(
+    openStrategy && (!ledger?.connected || stratState?.activeDockTab === 'strategy')
+      ? 'strategy'
+      : 'paper'
+  );
+  const mode = $derived(
+    activeDockTab === 'strategy'
+      ? (stratState?.dockMode ?? 'expanded')
+      : (ledger?.bottomMode ?? 'collapsed')
+  );
   const activeTab = $derived(ledger?.activeBottomTab ?? 'positions');
+  const activeStrategyRunner = $derived(
+    openStrategy && stratState
+      ? (stratState.runners.find((r) => r.strategyId === openStrategy.id) ?? null)
+      : null
+  );
+  const runningBotCount = $derived(
+    stratState ? stratState.runners.filter((r) => r.status === 'running').length : 0
+  );
+  const savedStrategies = $derived(stratState?.strategies ?? []);
+
+  function setDockModeUnified(nextMode: 'collapsed' | 'expanded' | 'fullscreen') {
+    setStrategyDockMode(nextMode);
+    if (ledger?.connected) {
+      setPaperBottomMode(nextMode);
+    }
+  }
 
   interface UnifiedWorkingOrder {
     id: string;
@@ -220,14 +268,24 @@
   onMount(() => {
     const unsub1 = subscribePaper((s) => {
       ledger = s;
-      if (!dragging) localHeight = s.bottomHeight;
+      if (!dragging && activeDockTab === 'paper') localHeight = s.bottomHeight;
     });
     const unsub2 = subscribePaperQuotes((q) => {
       quotes = q;
     });
+    const unsub3 = subscribeStrategies((s) => {
+      stratState = s;
+      if (!dragging && s.openStrategyId && s.activeDockTab === 'strategy') {
+        localHeight = s.dockHeight;
+      }
+    });
+    const unsub4 = subscribeStrategyRunStatus((st) => {
+      stratRunStatus = st;
+    });
     const onDocDown = (e: PointerEvent) => {
       const target = e.target as HTMLElement | null;
       if (brokerMenuOpen && !target?.closest('[data-pl-broker-menu]')) brokerMenuOpen = false;
+      if (strategyMenuOpen && !target?.closest('[data-st-tab-menu]')) strategyMenuOpen = false;
       if (accountMenuOpen && !target?.closest('[data-pl-acct-menu]')) accountMenuOpen = false;
       if (columnsMenuOpen && !target?.closest('[data-pl-cols-menu]')) columnsMenuOpen = false;
     };
@@ -235,6 +293,8 @@
     return () => {
       unsub1();
       unsub2();
+      unsub3();
+      unsub4();
       window.removeEventListener('pointerdown', onDocDown);
     };
   });
@@ -322,7 +382,8 @@
   function onResizeUp(e: PointerEvent) {
     if (!dragging) return;
     dragging = false;
-    setPaperBottomHeight(localHeight);
+    setStrategyDockHeight(localHeight);
+    if (ledger?.connected) setPaperBottomHeight(localHeight);
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
   }
@@ -421,7 +482,7 @@
   );
 </script>
 
-{#if ledger?.connected && account && metrics}
+{#if hasVisibleDock}
   <section
     class="paper-bottom"
     class:light={theme === 'light'}
@@ -430,7 +491,7 @@
     class:fullscreen={mode === 'fullscreen'}
     class:dragging
     style:height={mode === 'expanded' ? `${localHeight}px` : undefined}
-    aria-label="Paper Ledger panel"
+    aria-label="Bottom trading & strategy panel"
   >
     {#if mode === 'expanded'}
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -438,7 +499,7 @@
         class="top-resize-handle"
         role="separator"
         aria-orientation="horizontal"
-        aria-label="Resize Paper Ledger panel"
+        aria-label="Resize bottom panel"
         onpointerdown={onResizeDown}
         onpointermove={onResizeMove}
         onpointerup={onResizeUp}
@@ -446,102 +507,270 @@
       ></div>
     {/if}
 
-    <!-- Top Panel Chrome Bar (36px) -->
-    <div class="pb-bar">
+    <!-- Top Panel Chrome Bar (36px) — Sibling Strategy Tab + Paper Ledger Tab -->
+    <div class="pb-bar" class:has-tabs={Boolean(openStrategy)}>
       <div class="bar-left">
-        <div class="broker-anchor" data-pl-broker-menu>
+        {#if openStrategy}
+          <div class="broker-anchor" data-st-tab-menu>
+            <div class="dock-tab" class:active={activeDockTab === 'strategy'}>
+              <button
+                class="dock-tab-main"
+                type="button"
+                onclick={() => {
+                  if (activeDockTab === 'strategy') {
+                    strategyMenuOpen = !strategyMenuOpen;
+                  } else {
+                    setActiveDockTab('strategy');
+                  }
+                }}
+              >
+                <svg class="st-tab-ico" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2.5 12.5V8.5M6 12.5V6.5M9.5 12.5V8M13 12.5V4.5" />
+                  <path d="M2.5 7 6 4.6 9.5 6.4 13 3" />
+                </svg>
+                <span class="broker-title">{openStrategy.report.spec.name}</span>
+                <svg class="chev" viewBox="0 0 12 12" aria-hidden="true">
+                  <path d="M3 4.5 6 7.5 9 4.5" />
+                </svg>
+              </button>
+              <button
+                class="dock-tab-close"
+                type="button"
+                title="Close Strategy Tester tab"
+                aria-label="Close Strategy Tester tab"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  strategyMenuOpen = false;
+                  closeStrategyTab();
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            {#if strategyMenuOpen}
+              <div class="drop-menu" class:up={mode === 'collapsed'}>
+                <div class="dm-lbl">Saved Strategies ({savedStrategies.length})</div>
+                {#each savedStrategies as item (item.id)}
+                  <button
+                    class="dm-item"
+                    class:active={item.id === openStrategy.id}
+                    type="button"
+                    onclick={() => {
+                      openSavedStrategy(item.id);
+                      strategyMenuOpen = false;
+                    }}
+                  >
+                    <span class="dm-trunc">{item.report.spec.name}</span>
+                    <span class="dm-sub">
+                      {item.report.spec.shortName} · {item.report.spec.interval}
+                    </span>
+                  </button>
+                {/each}
+                <div class="dm-div"></div>
+                <button
+                  class="dm-item"
+                  type="button"
+                  onclick={() => {
+                    duplicateSavedStrategy(openStrategy.id);
+                    strategyMenuOpen = false;
+                  }}
+                >
+                  Duplicate strategy
+                </button>
+                <button
+                  class="dm-item danger"
+                  type="button"
+                  onclick={() => {
+                    deleteSavedStrategy(openStrategy.id);
+                    strategyMenuOpen = false;
+                  }}
+                >
+                  Delete strategy
+                </button>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        {#if ledger?.connected && account && metrics}
+          <div class="broker-anchor" data-pl-broker-menu>
+            <button
+              class="broker-trigger"
+              class:tab-mode={Boolean(openStrategy)}
+              class:tab-active={Boolean(openStrategy) && activeDockTab === 'paper'}
+              type="button"
+              onclick={() => {
+                if (openStrategy && activeDockTab !== 'paper') {
+                  setActiveDockTab('paper');
+                  brokerMenuOpen = false;
+                } else {
+                  brokerMenuOpen = !brokerMenuOpen;
+                }
+              }}
+            >
+              <span class="pl-ico" aria-hidden="true">
+                <AppLogoIcon size={11} />
+                <span class="pl-dot"></span>
+              </span>
+              <span class="broker-title">Paper Ledger</span>
+              <svg class="chev" viewBox="0 0 12 12" aria-hidden="true">
+                <path d="M3 4.5 6 7.5 9 4.5" />
+              </svg>
+            </button>
+
+            {#if brokerMenuOpen}
+              <div class="drop-menu" class:up={mode === 'collapsed'}>
+                <button
+                  class="dm-item"
+                  type="button"
+                  onclick={() => {
+                    brokerMenuOpen = false;
+                    onOpenSettings();
+                  }}
+                >
+                  Account settings & reset
+                </button>
+                <button
+                  class="dm-item"
+                  type="button"
+                  onclick={() => {
+                    brokerMenuOpen = false;
+                    exportPaperTabToCsv(account, activeTab);
+                  }}
+                >
+                  Export active tab CSV
+                </button>
+                {#if savedStrategies.length > 0 && !openStrategy}
+                  <div class="dm-div"></div>
+                  <div class="dm-lbl">Saved Strategies ({savedStrategies.length})</div>
+                  {#each savedStrategies.slice(0, 6) as item (item.id)}
+                    <button
+                      class="dm-item"
+                      type="button"
+                      onclick={() => {
+                        brokerMenuOpen = false;
+                        openSavedStrategy(item.id);
+                      }}
+                    >
+                      <span class="dm-trunc">{item.report.spec.name}</span>
+                      <span class="dm-sub">{item.report.spec.shortName}</span>
+                    </button>
+                  {/each}
+                {/if}
+                <div class="dm-div"></div>
+                <button
+                  class="dm-item danger"
+                  type="button"
+                  onclick={() => {
+                    brokerMenuOpen = false;
+                    disconnectPaperLedger();
+                  }}
+                >
+                  Disconnect Paper Ledger
+                </button>
+              </div>
+            {/if}
+          </div>
+
+          {#if mode === 'collapsed' && activeDockTab === 'paper'}
+            <button
+              class="collapsed-summary"
+              type="button"
+              title="Expand Paper Ledger"
+              onclick={() => setDockModeUnified('expanded')}
+            >
+              <span class="cs-item">
+                <span class="cs-k">Equity</span>
+                <span class="cs-v">{mask(formatUsd(metrics.equity))}</span>
+              </span>
+              <span class="cs-sep">·</span>
+              <span class="cs-item">
+                <span class="cs-k">Open P&L</span>
+                <span
+                  class="cs-v"
+                  class:pos={metrics.unrealizedPnl > 0.004}
+                  class:neg={metrics.unrealizedPnl < -0.004}
+                >
+                  {mask(formatUsd(metrics.unrealizedPnl, true))}
+                </span>
+              </span>
+              {#if account.positions.length > 0}
+                <span class="cs-badge">{account.positions.length} open</span>
+              {/if}
+              {#if unifiedOrders.length > 0}
+                <span class="cs-badge">{unifiedOrders.length} orders</span>
+              {/if}
+            </button>
+          {/if}
+        {:else if openStrategy}
           <button
-            class="broker-trigger"
+            class="broker-trigger tab-mode"
             type="button"
-            onclick={() => (brokerMenuOpen = !brokerMenuOpen)}
+            onclick={onOpenSettings}
+            title="Connect Paper Ledger (SIM)"
           >
             <span class="pl-ico" aria-hidden="true">
               <AppLogoIcon size={11} />
-              <span class="pl-dot"></span>
             </span>
-            <span class="broker-title">Paper Ledger</span>
-            <svg class="chev" viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M3 4.5 6 7.5 9 4.5" />
-            </svg>
+            <span class="broker-title muted">Paper Ledger</span>
           </button>
+        {/if}
 
-          {#if brokerMenuOpen}
-            <div class="drop-menu" class:up={mode === 'collapsed'}>
-              <button
-                class="dm-item"
-                type="button"
-                onclick={() => {
-                  brokerMenuOpen = false;
-                  onOpenSettings();
-                }}
-              >
-                Account settings & reset
-              </button>
-              <button
-                class="dm-item"
-                type="button"
-                onclick={() => {
-                  brokerMenuOpen = false;
-                  exportPaperTabToCsv(account, activeTab);
-                }}
-              >
-                Export active tab CSV
-              </button>
-              <div class="dm-div"></div>
-              <button
-                class="dm-item danger"
-                type="button"
-                onclick={() => {
-                  brokerMenuOpen = false;
-                  disconnectPaperLedger();
-                }}
-              >
-                Disconnect Paper Ledger
-              </button>
-            </div>
-          {/if}
-        </div>
-
-        {#if mode === 'collapsed'}
+        {#if mode === 'collapsed' && activeDockTab === 'strategy' && openStrategy}
           <button
             class="collapsed-summary"
             type="button"
-            title="Expand Paper Ledger"
-            onclick={() => setPaperBottomMode('expanded')}
+            title="Expand Strategy Tester"
+            onclick={() => setDockModeUnified('expanded')}
           >
             <span class="cs-item">
-              <span class="cs-k">Equity</span>
-              <span class="cs-v">{mask(formatUsd(metrics.equity))}</span>
+              <span class="cs-k">PnL</span>
+              <span
+                class="cs-v"
+                class:pos={openStrategy.report.all.totalPnlUsd > 0.004}
+                class:neg={openStrategy.report.all.totalPnlUsd < -0.004}
+              >
+                {formatUsd(openStrategy.report.all.totalPnlUsd, true)} USD
+              </span>
             </span>
             <span class="cs-sep">·</span>
             <span class="cs-item">
-              <span class="cs-k">Open P&L</span>
-              <span
-                class="cs-v"
-                class:pos={metrics.unrealizedPnl > 0.004}
-                class:neg={metrics.unrealizedPnl < -0.004}
-              >
-                {mask(formatUsd(metrics.unrealizedPnl, true))}
+              <span class="cs-k">Trades</span>
+              <span class="cs-v">
+                {openStrategy.report.all.winRatePct.toFixed(1)}% ({openStrategy.report.all.winningTrades}/{openStrategy.report.all.totalTrades})
               </span>
             </span>
-            {#if account.positions.length > 0}
-              <span class="cs-badge">{account.positions.length} open</span>
-            {/if}
-            {#if unifiedOrders.length > 0}
-              <span class="cs-badge">{unifiedOrders.length} orders</span>
-            {/if}
+            <span class="cs-badge">{openStrategy.report.verdict.label}</span>
           </button>
         {/if}
       </div>
 
       <div class="bar-right">
+        {#if runningBotCount > 0}
+          <button
+            class="bot-live-pill"
+            type="button"
+            title="{runningBotCount} strategy forward runner(s) active in Paper Ledger"
+            onclick={() => {
+              const firstRunner = stratState?.runners.find((r) => r.status === 'running');
+              if (firstRunner) {
+                openSavedStrategy(firstRunner.strategyId);
+              }
+            }}
+          >
+            <span class="bot-dot"></span>
+            <span>{runningBotCount} Bot{runningBotCount > 1 ? 's' : ''} SIM</span>
+          </button>
+        {/if}
+
         {#if mode === 'collapsed'}
           <button
             class="bar-icon"
             type="button"
-            title="Expand Paper Ledger"
-            aria-label="Expand Paper Ledger"
-            onclick={() => setPaperBottomMode('expanded')}
+            title="Expand panel"
+            aria-label="Expand panel"
+            onclick={() => setDockModeUnified('expanded')}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M4 10 8 6l4 4" />
@@ -553,7 +782,7 @@
             type="button"
             title="Minimize to bar"
             aria-label="Minimize to bar"
-            onclick={() => setPaperBottomMode('collapsed')}
+            onclick={() => setDockModeUnified('collapsed')}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M3.5 10.5h9" />
@@ -566,7 +795,7 @@
           type="button"
           title={mode === 'fullscreen' ? 'Restore panel height' : 'Maximize to fullscreen'}
           aria-label={mode === 'fullscreen' ? 'Restore panel height' : 'Maximize to fullscreen'}
-          onclick={() => setPaperBottomMode(mode === 'fullscreen' ? 'expanded' : 'fullscreen')}
+          onclick={() => setDockModeUnified(mode === 'fullscreen' ? 'expanded' : 'fullscreen')}
         >
           {#if mode === 'fullscreen'}
             <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -582,6 +811,22 @@
     </div>
 
     {#if mode !== 'collapsed'}
+      {#if activeDockTab === 'strategy' && openStrategy}
+        <StrategyTesterView
+          {theme}
+          record={openStrategy}
+          isRunning={stratRunStatus.running}
+          runError={stratRunStatus.error}
+          runner={activeStrategyRunner}
+          pendingSignals={stratState?.pendingSignals ?? []}
+          paperAccounts={ledger?.accounts ?? []}
+          {onSelectSymbol}
+          onSwitchToPaperAccount={(accountId) => {
+            switchPaperAccount(accountId);
+            setActiveDockTab('paper');
+          }}
+        />
+      {:else if ledger?.connected && account && metrics}
       <!-- Account Summary Pill Bar -->
       <div class="summary-strip-wrap">
         <div class="summary-strip">
@@ -1367,92 +1612,91 @@
             </div>
           {/if}
         {:else if activeTab === 'analytics' && analytics}
-          <div class="analytics-body">
-            <!-- 6 KPI Summary Cards -->
-            <div class="kpi-grid">
-              <div class="kpi-card">
-                <div class="kk-row">
+          <div class="analytics-body flat-analytics">
+            <!-- Key stats — Clean Flat TradingView Row (No Cards) -->
+            <div class="fa-section">
+              <div class="fa-head">
+                <h3 class="fa-title">Key stats</h3>
+                <span class="sim-mini">SIM · {analytics.totalTrades} closed trades</span>
+              </div>
+
+              <div class="kpi-grid flat-kpi-grid">
+                <div class="kpi-flat">
                   <span class="kk">Net Realized Profit</span>
-                  <span class="sim-mini">SIM</span>
+                  <span
+                    class="kv"
+                    class:pos={analytics.netRealizedPnl > 0.004}
+                    class:neg={analytics.netRealizedPnl < -0.004}
+                  >
+                    {mask(formatUsd(analytics.netRealizedPnl, true))} <small>USD</small>
+                    <span class="kv-pct">
+                      {analytics.returnPct >= 0 ? '+' : ''}{analytics.returnPct.toFixed(2)}%
+                    </span>
+                  </span>
                 </div>
-                <span
-                  class="kv"
-                  class:pos={analytics.netRealizedPnl > 0.004}
-                  class:neg={analytics.netRealizedPnl < -0.004}
-                >
-                  {mask(formatUsd(analytics.netRealizedPnl, true))} <small>USD</small>
-                </span>
-                <span class="ks">
-                  Return {analytics.returnPct >= 0 ? '+' : ''}{analytics.returnPct.toFixed(2)}% · {analytics.totalTrades} trades
-                </span>
-              </div>
 
-              <div class="kpi-card">
-                <span class="kk">Win Rate</span>
-                <span class="kv">
-                  {analytics.winRatePct !== null ? `${analytics.winRatePct.toFixed(1)}%` : '—'}
-                </span>
-                {#if analytics.totalTrades > 0}
-                  <div class="wl-bar" aria-hidden="true">
-                    <span class="wl-w" style:width="{(analytics.wins / analytics.totalTrades) * 100}%"></span>
-                    <span class="wl-b" style:width="{(analytics.breakevens / analytics.totalTrades) * 100}%"></span>
-                    <span class="wl-l" style:width="{(analytics.losses / analytics.totalTrades) * 100}%"></span>
-                  </div>
-                {/if}
-                <span class="ks">{analytics.wins}W · {analytics.losses}L · {analytics.breakevens}BE</span>
-              </div>
+                <div class="kpi-flat">
+                  <span class="kk">Max Drawdown</span>
+                  <span class="kv neg">
+                    {analytics.maxDrawdownUsd > 0 ? mask(formatUsd(analytics.maxDrawdownUsd)) : '0.00'} <small>USD</small>
+                    <span class="kv-pct muted">
+                      {analytics.maxDrawdownPct > 0 ? `${analytics.maxDrawdownPct.toFixed(2)}%` : '0.00%'}
+                    </span>
+                  </span>
+                  <span class="ks">Streaks {analytics.longestWinStreak}W / {analytics.longestLossStreak}L</span>
+                </div>
 
-              <div class="kpi-card">
-                <span class="kk">Profit Factor</span>
-                <span class="kv">
-                  {#if analytics.profitFactor === null}
-                    —
-                  {:else if !Number.isFinite(analytics.profitFactor)}
-                    ∞
-                  {:else}
-                    {analytics.profitFactor.toFixed(2)}
-                  {/if}
-                </span>
-                <span class="ks">
-                  Gross +{mask(formatUsd(analytics.grossProfit))} / −{mask(formatUsd(analytics.grossLoss))}
-                </span>
-              </div>
+                <div class="kpi-flat">
+                  <span class="kk">Profitable Trades</span>
+                  <span class="kv">
+                    {analytics.winRatePct !== null ? `${analytics.winRatePct.toFixed(1)}%` : '—'}
+                    <span class="kv-pct muted">{analytics.wins}/{analytics.totalTrades}</span>
+                  </span>
+                  <span class="ks">{analytics.wins}W · {analytics.losses}L · {analytics.breakevens}BE</span>
+                </div>
 
-              <div class="kpi-card">
-                <span class="kk">Expectancy & R</span>
-                <span
-                  class="kv"
-                  class:pos={(analytics.expectancyUsd ?? 0) > 0}
-                  class:neg={(analytics.expectancyUsd ?? 0) < 0}
-                >
-                  {analytics.expectancyUsd !== null ? mask(formatUsd(analytics.expectancyUsd, true)) : '—'}
-                  {#if analytics.expectancyR !== null}
-                    <small>({analytics.expectancyR >= 0 ? '+' : ''}{analytics.expectancyR.toFixed(2)}R)</small>
-                  {/if}
-                </span>
-                <span class="ks">
-                  Total R: {analytics.totalR !== null ? `${analytics.totalR >= 0 ? '+' : ''}${analytics.totalR.toFixed(2)}R` : '—'} · Hold {formatAvgMinutes(analytics.avgHoldMinutes)}
-                </span>
-              </div>
+                <div class="kpi-flat">
+                  <span class="kk">Profit Factor</span>
+                  <span class="kv">
+                    {#if analytics.profitFactor === null}
+                      —
+                    {:else if !Number.isFinite(analytics.profitFactor)}
+                      ∞
+                    {:else}
+                      {analytics.profitFactor.toFixed(2)}
+                    {/if}
+                  </span>
+                  <span class="ks">
+                    Gross +{mask(formatUsd(analytics.grossProfit))} / −{mask(formatUsd(analytics.grossLoss))}
+                  </span>
+                </div>
 
-              <div class="kpi-card">
-                <span class="kk">Avg Win / Avg Loss</span>
-                <span class="kv">
-                  {analytics.payoffRatio !== null ? `${analytics.payoffRatio.toFixed(2)}x` : '—'}
-                </span>
-                <span class="ks">
-                  W {analytics.avgWin !== null ? mask(formatUsd(analytics.avgWin, true)) : '—'} · L {analytics.avgLoss !== null ? mask(formatUsd(analytics.avgLoss, true)) : '—'}
-                </span>
-              </div>
+                <div class="kpi-flat">
+                  <span class="kk">Expectancy & R</span>
+                  <span
+                    class="kv"
+                    class:pos={(analytics.expectancyUsd ?? 0) > 0}
+                    class:neg={(analytics.expectancyUsd ?? 0) < 0}
+                  >
+                    {analytics.expectancyUsd !== null ? mask(formatUsd(analytics.expectancyUsd, true)) : '—'}
+                    {#if analytics.expectancyR !== null}
+                      <small>({analytics.expectancyR >= 0 ? '+' : ''}{analytics.expectancyR.toFixed(2)}R)</small>
+                    {/if}
+                  </span>
+                  <span class="ks">
+                    Total R: {analytics.totalR !== null ? `${analytics.totalR >= 0 ? '+' : ''}${analytics.totalR.toFixed(2)}R` : '—'} · Hold {formatAvgMinutes(analytics.avgHoldMinutes)}
+                  </span>
+                </div>
 
-              <div class="kpi-card">
-                <span class="kk">Max Drawdown</span>
-                <span class="kv neg">
-                  {analytics.maxDrawdownPct > 0 ? `-${analytics.maxDrawdownPct.toFixed(2)}%` : '0.00%'}
-                </span>
-                <span class="ks">
-                  {analytics.maxDrawdownUsd > 0 ? `-${mask(formatUsd(analytics.maxDrawdownUsd))} USD` : 'Peak equity'} · Streaks {analytics.longestWinStreak}W/{analytics.longestLossStreak}L
-                </span>
+                <div class="kpi-flat">
+                  <span class="kk">Avg Win / Avg Loss</span>
+                  <span class="kv">
+                    {analytics.payoffRatio !== null ? `${analytics.payoffRatio.toFixed(2)}x` : '—'}
+                  </span>
+                  <span class="ks">
+                    W {analytics.avgWin !== null ? mask(formatUsd(analytics.avgWin, true)) : '—'} · L {analytics.avgLoss !== null ? mask(formatUsd(analytics.avgLoss, true)) : '—'}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -1461,12 +1705,29 @@
                 Close your first simulated trade (or hit TP/SL) to unlock your equity curve, drawdown profile, per-trade P&L histogram, and symbol/direction breakdowns.
               </div>
             {:else}
-              <div class="analytics-grid">
-                <!-- Left: Equity Curve & Drawdown -->
+              <div class="analytics-grid flat-analytics-grid">
+                <!-- Left: Flat Equity Curve / Drawdown -->
                 {#if eqGeometry}
-                  <div class="charts-card">
+                  <div class="flat-chart-block">
                     <div class="cc-head">
-                      <span class="cc-title">Equity Curve & Underwater Drawdown</span>
+                      <div class="pa-seg-tabs">
+                        <button
+                          class="pa-seg-btn"
+                          class:active={paperChartMode === 'performance'}
+                          type="button"
+                          onclick={() => (paperChartMode = 'performance')}
+                        >
+                          Performance
+                        </button>
+                        <button
+                          class="pa-seg-btn"
+                          class:active={paperChartMode === 'drawdown'}
+                          type="button"
+                          onclick={() => (paperChartMode = 'drawdown')}
+                        >
+                          Drawdown
+                        </button>
+                      </div>
                       {#if hoveredCoord}
                         <span class="cc-hover">
                           {hoveredCoord.point.label} · Equity <strong>{mask(formatUsd(hoveredCoord.point.equity))} USD</strong>
@@ -1484,84 +1745,86 @@
                       {/if}
                     </div>
 
-                    <svg
-                      class="eq-svg"
-                      viewBox="0 0 {EQ_W} {EQ_H}"
-                      preserveAspectRatio="none"
-                      role="img"
-                      aria-label="Simulated equity curve"
-                      onmouseleave={() => (hoverIdx = null)}
-                    >
-                      <line
-                        x1={PAD_L}
-                        x2={EQ_W - PAD_R}
-                        y1={eqGeometry.baselineY}
-                        y2={eqGeometry.baselineY}
-                        class="base-line"
-                      />
-                      <text x={PAD_L - 6} y={PAD_T + 8} class="ax-txt" text-anchor="end">
-                        {privacy ? '•••' : formatUsd(eqGeometry.maxE)}
-                      </text>
-                      <text x={PAD_L - 6} y={EQ_H - PAD_B} class="ax-txt" text-anchor="end">
-                        {privacy ? '•••' : formatUsd(eqGeometry.minE)}
-                      </text>
-                      <path
-                        d={eqGeometry.areaPath}
-                        class="eq-area"
-                        class:up={eqGeometry.isUp}
-                        class:down={!eqGeometry.isUp}
-                      />
-                      <path
-                        d={eqGeometry.linePath}
-                        class="eq-line"
-                        class:up={eqGeometry.isUp}
-                        class:down={!eqGeometry.isUp}
-                      />
-                      {#each eqGeometry.coords as c, i (i)}
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <circle
-                          cx={c.x}
-                          cy={c.y}
-                          r={hoverIdx === i ? 4.5 : eqGeometry.coords.length <= 28 ? 3 : 0.1}
-                          class="eq-dot"
+                    {#if paperChartMode === 'performance'}
+                      <svg
+                        class="eq-svg"
+                        viewBox="0 0 {EQ_W} {EQ_H}"
+                        preserveAspectRatio="none"
+                        role="img"
+                        aria-label="Simulated equity curve"
+                        onmouseleave={() => (hoverIdx = null)}
+                      >
+                        <line
+                          x1={PAD_L}
+                          x2={EQ_W - PAD_R}
+                          y1={eqGeometry.baselineY}
+                          y2={eqGeometry.baselineY}
+                          class="base-line"
+                        />
+                        <text x={PAD_L - 6} y={PAD_T + 8} class="ax-txt" text-anchor="end">
+                          {privacy ? '•••' : formatUsd(eqGeometry.maxE)}
+                        </text>
+                        <text x={PAD_L - 6} y={EQ_H - PAD_B} class="ax-txt" text-anchor="end">
+                          {privacy ? '•••' : formatUsd(eqGeometry.minE)}
+                        </text>
+                        <path
+                          d={eqGeometry.areaPath}
+                          class="eq-area"
                           class:up={eqGeometry.isUp}
                           class:down={!eqGeometry.isUp}
-                          onmouseenter={() => (hoverIdx = i)}
                         />
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <rect
-                          x={c.x - 14}
-                          y={0}
-                          width={28}
-                          height={EQ_H}
-                          fill="transparent"
-                          onmouseenter={() => (hoverIdx = i)}
+                        <path
+                          d={eqGeometry.linePath}
+                          class="eq-line"
+                          class:up={eqGeometry.isUp}
+                          class:down={!eqGeometry.isUp}
                         />
-                      {/each}
-                    </svg>
-
-                    <svg
-                      class="dd-svg"
-                      viewBox="0 0 {EQ_W} {DD_H}"
-                      preserveAspectRatio="none"
-                      role="img"
-                      aria-label="Underwater drawdown chart"
-                      onmouseleave={() => (hoverIdx = null)}
-                    >
-                      <line x1={PAD_L} x2={EQ_W - PAD_R} y1="6" y2="6" class="base-line" />
-                      <text x={PAD_L - 6} y="10" class="ax-txt" text-anchor="end">0%</text>
-                      <text x={PAD_L - 6} y={DD_H - 10} class="ax-txt" text-anchor="end">
-                        -{eqGeometry.maxDd.toFixed(1)}%
-                      </text>
-                      <path d={eqGeometry.ddArea} class="dd-area" />
-                      <path d={eqGeometry.ddLine} class="dd-line" />
-                    </svg>
+                        {#each eqGeometry.coords as c, i (i)}
+                          <!-- svelte-ignore a11y_no_static_element_interactions -->
+                          <circle
+                            cx={c.x}
+                            cy={c.y}
+                            r={hoverIdx === i ? 4.5 : eqGeometry.coords.length <= 28 ? 3 : 0.1}
+                            class="eq-dot"
+                            class:up={eqGeometry.isUp}
+                            class:down={!eqGeometry.isUp}
+                            onmouseenter={() => (hoverIdx = i)}
+                          />
+                          <!-- svelte-ignore a11y_no_static_element_interactions -->
+                          <rect
+                            x={c.x - 14}
+                            y={0}
+                            width={28}
+                            height={EQ_H}
+                            fill="transparent"
+                            onmouseenter={() => (hoverIdx = i)}
+                          />
+                        {/each}
+                      </svg>
+                    {:else}
+                      <svg
+                        class="dd-svg tall"
+                        viewBox="0 0 {EQ_W} {DD_H}"
+                        preserveAspectRatio="none"
+                        role="img"
+                        aria-label="Underwater drawdown chart"
+                        onmouseleave={() => (hoverIdx = null)}
+                      >
+                        <line x1={PAD_L} x2={EQ_W - PAD_R} y1="6" y2="6" class="base-line" />
+                        <text x={PAD_L - 6} y="10" class="ax-txt" text-anchor="end">0%</text>
+                        <text x={PAD_L - 6} y={DD_H - 10} class="ax-txt" text-anchor="end">
+                          -{eqGeometry.maxDd.toFixed(1)}%
+                        </text>
+                        <path d={eqGeometry.ddArea} class="dd-area" />
+                        <path d={eqGeometry.ddLine} class="dd-line" />
+                      </svg>
+                    {/if}
                   </div>
                 {/if}
 
-                <!-- Right: Per-Trade P&L Bars -->
+                <!-- Right: Flat Per-Trade P&L Distribution + Side & Exit Breakdown -->
                 {#if tradeBars}
-                  <div class="charts-card">
+                  <div class="flat-chart-block">
                     <div class="cc-head">
                       <span class="cc-title">Per-Trade P&L Distribution</span>
                       {#if hoveredBar}
@@ -1604,7 +1867,6 @@
                       {/each}
                     </svg>
 
-                    <!-- Long vs Short + Exit Reasons Compact Row -->
                     <div class="split-mini-grid">
                       <div class="mini-panel">
                         <div class="mp-title">Long vs Short</div>
@@ -1638,11 +1900,11 @@
                 {/if}
               </div>
 
-              <!-- Performance by Symbol Table -->
+              <!-- Flat Performance by Symbol Table -->
               {#if analytics.bySymbol.length > 0}
-                <div class="charts-card">
+                <div class="fa-section bordered-top">
                   <div class="cc-head">
-                    <span class="cc-title">Performance by Symbol</span>
+                    <h3 class="fa-title">Performance by Symbol</h3>
                   </div>
                   <div class="sym-breakdown-wrap">
                     <table class="mini-table">
@@ -1689,6 +1951,7 @@
           </div>
         {/if}
       </div>
+      {/if}
     {/if}
   </section>
 {/if}
@@ -2755,68 +3018,240 @@
     color: #131722;
   }
 
-  /* ── Analytics Dashboard ───────────────────────────────────────────────── */
-  .analytics-body {
+  /* ── Sibling Dock Tabs (Strategy Tester + Paper Ledger — Image 3) ──────── */
+  .pb-bar.has-tabs {
+    border-bottom: 1px solid var(--dark-border-subtle);
+  }
+
+  .paper-bottom.light .pb-bar.has-tabs {
+    border-bottom-color: #eceff4;
+  }
+
+  .dock-tab {
+    height: 30px;
+    border-radius: 7px 7px 0 0;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 3px 0 2px;
+    gap: 2px;
+    border: 1px solid transparent;
+    border-bottom: 0;
+  }
+
+  .dock-tab.active {
+    background: var(--dark-bg-surface);
+    border-color: var(--dark-border-subtle);
+  }
+
+  .paper-bottom.light .dock-tab.active {
+    background: #ffffff;
+    border-color: #e0e3eb;
+  }
+
+  .dock-tab-main {
+    height: 28px;
+    padding: 0 6px;
+    border: 0;
+    background: transparent;
+    color: var(--dark-text-secondary);
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    max-width: 240px;
+  }
+
+  .dock-tab.active .dock-tab-main {
+    color: var(--dark-text-strong);
+  }
+
+  .paper-bottom.light .dock-tab.active .dock-tab-main {
+    color: #131722;
+  }
+
+  .dock-tab-main .broker-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .st-tab-ico {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .dock-tab-close {
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--dark-text-secondary);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+  }
+
+  .dock-tab-close:hover {
+    background: var(--dark-hover-strong);
+    color: var(--dark-text-strong);
+  }
+
+  .broker-trigger.tab-mode {
+    height: 30px;
+    border-radius: 7px 7px 0 0;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    color: var(--dark-text-secondary);
+  }
+
+  .broker-trigger.tab-mode.tab-active {
+    background: var(--dark-bg-surface);
+    border-color: var(--dark-border-subtle);
+    color: var(--dark-text-strong);
+  }
+
+  .paper-bottom.light .broker-trigger.tab-mode.tab-active {
+    background: #ffffff;
+    border-color: #e0e3eb;
+    color: #131722;
+  }
+
+  .dm-lbl {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--dark-text-secondary);
+    padding: 5px 9px 3px;
+  }
+
+  .dm-trunc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 150px;
+  }
+
+  .bot-live-pill {
+    height: 23px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid rgba(8, 153, 129, 0.45);
+    background: rgba(8, 153, 129, 0.12);
+    color: #089981;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+
+  .bot-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #089981;
+  }
+
+  /* ── Flat TradingView-Style Analytics Dashboard (Zero Cards) ───────────── */
+  .analytics-body.flat-analytics {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 4px 12px 16px;
+    padding: 14px 20px 26px;
     display: flex;
     flex-direction: column;
+    gap: 22px;
+  }
+
+  .fa-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .fa-section.bordered-top {
+    padding-top: 18px;
+    border-top: 1px solid var(--dark-border-subtle);
+  }
+
+  .paper-bottom.light .fa-section.bordered-top {
+    border-top-color: #eceff4;
+  }
+
+  .fa-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 10px;
   }
 
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 8px;
+  .fa-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
   }
 
-  .kpi-card {
-    padding: 10px 12px;
-    border-radius: 10px;
-    background: var(--dark-bg-surface);
-    border: 1px solid var(--dark-border-subtle);
+  .kpi-grid.flat-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px 20px;
+  }
+
+  .kpi-flat {
+    padding: 0;
+    border: 0;
+    background: transparent;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-  }
-
-  .paper-bottom.light .kpi-card {
-    background: #f5f6f9;
-    border-color: #eceff4;
-  }
-
-  .kk-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    gap: 3px;
   }
 
   .sim-mini {
-    font-size: 9px;
-    font-weight: 700;
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: var(--dark-bg-elevated);
+    font-size: 10.5px;
+    font-weight: 600;
     color: var(--dark-text-secondary);
   }
 
   .kk {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--dark-text-secondary);
   }
 
   .kv {
-    font-size: 15.5px;
-    font-weight: 700;
+    font-size: 15px;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
   }
 
   .kv small {
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 500;
-    opacity: 0.78;
+    opacity: 0.76;
+  }
+
+  .kv-pct {
+    font-size: 13px;
+    font-weight: 500;
   }
 
   .ks {
@@ -2825,51 +3260,68 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .wl-bar {
-    height: 4px;
-    border-radius: 99px;
-    overflow: hidden;
-    display: flex;
-    background: var(--dark-border);
-  }
-
-  .wl-w {
-    background: #089981;
-  }
-
-  .wl-b {
-    background: #8c8c8c;
-  }
-
-  .wl-l {
-    background: #f23645;
-  }
-
-  .analytics-grid {
+  .analytics-grid.flat-analytics-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-    gap: 10px;
+    gap: 26px;
+    padding-top: 18px;
+    border-top: 1px solid var(--dark-border-subtle);
+  }
+
+  .paper-bottom.light .analytics-grid.flat-analytics-grid {
+    border-top-color: #eceff4;
   }
 
   @media (max-width: 980px) {
-    .analytics-grid {
+    .analytics-grid.flat-analytics-grid {
       grid-template-columns: 1fr;
     }
   }
 
-  .charts-card {
-    padding: 11px 12px;
-    border-radius: 10px;
-    background: var(--dark-bg-surface);
-    border: 1px solid var(--dark-border-subtle);
+  .flat-chart-block {
+    padding: 0;
+    border: 0;
+    background: transparent;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
   }
 
-  .paper-bottom.light .charts-card {
-    background: #f8f9fc;
-    border-color: #e6e9ef;
+  .pa-seg-tabs {
+    display: inline-flex;
+    padding: 2px;
+    border-radius: 7px;
+    background: var(--dark-bg-surface-alt);
+    gap: 2px;
+  }
+
+  .paper-bottom.light .pa-seg-tabs {
+    background: #f0f3fa;
+  }
+
+  .pa-seg-btn {
+    height: 24px;
+    padding: 0 11px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--dark-text-secondary);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .pa-seg-btn.active {
+    background: var(--dark-bg-elevated);
+    color: var(--dark-text-strong);
+    font-weight: 600;
+  }
+
+  .paper-bottom.light .pa-seg-btn.active {
+    background: #ffffff;
+    color: #131722;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   }
 
   .cc-head {
@@ -2881,7 +3333,7 @@
   }
 
   .cc-title {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
   }
 
@@ -2892,7 +3344,7 @@
 
   .eq-svg {
     width: 100%;
-    height: 140px;
+    height: 155px;
     display: block;
   }
 
@@ -2902,9 +3354,13 @@
     display: block;
   }
 
+  .dd-svg.tall {
+    height: 155px;
+  }
+
   .bars-svg {
     width: 100%;
-    height: 112px;
+    height: 116px;
     display: block;
   }
 

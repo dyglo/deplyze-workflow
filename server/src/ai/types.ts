@@ -9,6 +9,7 @@ export interface AiChatHistoryMessage {
 export interface AiChartContext {
   symbol?: string;
   fullSymbol?: string;
+  interval?: string;
   price?: number;
   changePercent?: number;
   timezone?: string;

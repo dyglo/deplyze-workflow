@@ -15,6 +15,8 @@
   } from '../ai/api';
   import { renderMarkdown } from '../ai/markdown';
   import { saveAiAnalysisToPlaybook } from '../playbook/store';
+  import { openSavedStrategy, openStrategyFromAi } from '../strategy/store';
+  import type { BacktestReport } from '../strategy/types';
   import {
     AI_EFFORTS,
     AI_MODELS,
@@ -31,6 +33,7 @@
     theme: 'dark' | 'light';
     activeSymbol: string;
     activeFullSymbol: string;
+    activeInterval?: string;
     activePrice?: number;
     activeChangePercent?: number;
     onClose: () => void;
@@ -40,6 +43,7 @@
     theme,
     activeSymbol,
     activeFullSymbol,
+    activeInterval = 'D',
     activePrice,
     activeChangePercent,
     onClose
@@ -88,7 +92,7 @@
   const canSend = $derived(draft.trim().length > 0 && !isStreaming);
 
   const SUGGESTIONS = $derived([
-    'What can you do?',
+    `Build & backtest a strategy on ${activeSymbol || 'XAUUSD'}`,
     'Is this chart bullish or bearish?',
     'Plan entry and exit',
     'Identify key levels',
@@ -465,6 +469,7 @@
           context: {
             symbol: sym,
             fullSymbol: fullSym,
+            interval: activeInterval || 'D',
             price: typeof activePrice === 'number' && Number.isFinite(activePrice) ? activePrice : undefined,
             changePercent:
               typeof activeChangePercent === 'number' && Number.isFinite(activeChangePercent)
@@ -489,6 +494,30 @@
               ...m,
               reasoning: (m.reasoning ?? '') + delta
             }));
+          },
+          onStrategyResult: (report: BacktestReport) => {
+            const saved = openStrategyFromAi(report);
+            updateAssistantMessage(targetChatId!, assistantMsgId, (m) => ({
+              ...m,
+              strategyResult: {
+                id: saved.id,
+                name: report.spec.name,
+                symbol: report.spec.symbol,
+                shortName: report.spec.shortName,
+                interval: report.spec.interval,
+                verdictStatus: report.verdict.status,
+                verdictLabel: report.verdict.label,
+                totalTrades: report.all.totalTrades,
+                winRatePct: report.all.winRatePct,
+                totalPnlUsd: report.all.totalPnlUsd,
+                totalPnlPct: report.all.totalPnlPct,
+                profitFactor: report.all.profitFactor,
+                oosTrades: report.outOfSample.totalTrades,
+                oosProfitFactor: report.outOfSample.profitFactor,
+                oosPnlPct: report.outOfSample.totalPnlPct
+              }
+            }));
+            void scrollToBottom();
           },
           onToken: (delta: string) => {
             updateAssistantMessage(targetChatId!, assistantMsgId, (m) => ({
@@ -720,6 +749,40 @@
                   </div>
                 {/if}
 
+                {#if msg.strategyResult}
+                  {@const sr = msg.strategyResult}
+                  <div class="strat-result-strip">
+                    <div class="srs-top">
+                      <span class="srs-name">{sr.name}</span>
+                      <span
+                        class="srs-verdict"
+                        class:pass={sr.verdictStatus === 'pass'}
+                        class:warn={sr.verdictStatus === 'marginal' || sr.verdictStatus === 'low_sample'}
+                        class:fail={sr.verdictStatus === 'no_edge' || sr.verdictStatus === 'overfit'}
+                      >
+                        {sr.verdictLabel}
+                      </span>
+                    </div>
+                    <div class="srs-metrics">
+                      <span>{sr.shortName} · {sr.interval}</span>
+                      <span>Trades: <strong>{sr.totalTrades}</strong> ({sr.winRatePct.toFixed(0)}% WR)</span>
+                      <span class:pos={sr.totalPnlUsd > 0} class:neg={sr.totalPnlUsd < 0}>
+                        {sr.totalPnlPct >= 0 ? '+' : ''}{sr.totalPnlPct.toFixed(2)}%
+                      </span>
+                      <span>
+                        OOS PF: <strong>{sr.oosProfitFactor !== null ? sr.oosProfitFactor.toFixed(2) : '—'}</strong> ({sr.oosTrades}t)
+                      </span>
+                    </div>
+                    <button
+                      class="srs-open-btn"
+                      type="button"
+                      onclick={() => openSavedStrategy(sr.id)}
+                    >
+                      Open in Strategy Tester →
+                    </button>
+                  </div>
+                {/if}
+
                 {#if msg.content && !(isStreaming && isLastAssistant)}
                   <div class="msg-actions">
                     <button
@@ -781,7 +844,7 @@
             onclick={toggleAutoCapture}
           >
             <span class="live-dot" class:on={autoCapture}></span>
-            <span>Active chart: <strong>{activeSymbol || 'XAUUSD'}</strong></span>
+            <span>Active chart: <strong>{activeSymbol || 'XAUUSD'}</strong> · {activeInterval || 'D'}</span>
           </button>
 
           <button
@@ -2120,5 +2183,90 @@
     padding: 0 2px;
     font-size: 11px;
     color: var(--ai-secondary);
+  }
+
+  .strat-result-strip {
+    margin-top: 8px;
+    padding: 9px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--ai-border);
+    background: var(--ai-chip-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .srs-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .srs-name {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ai-text);
+  }
+
+  .srs-verdict {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(140, 140, 140, 0.16);
+    color: var(--ai-secondary);
+  }
+
+  .srs-verdict.pass {
+    background: rgba(8, 153, 129, 0.18);
+    color: #089981;
+  }
+
+  .srs-verdict.warn {
+    background: rgba(245, 158, 11, 0.18);
+    color: #f59e0b;
+  }
+
+  .srs-verdict.fail {
+    background: rgba(242, 54, 69, 0.18);
+    color: #f23645;
+  }
+
+  .srs-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    font-size: 11px;
+    color: var(--ai-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .srs-metrics .pos {
+    color: #089981;
+    font-weight: 600;
+  }
+
+  .srs-metrics .neg {
+    color: #f23645;
+    font-weight: 600;
+  }
+
+  .srs-open-btn {
+    align-self: flex-start;
+    height: 25px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--ai-border);
+    background: transparent;
+    color: var(--ai-text);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .srs-open-btn:hover {
+    background: var(--ai-option-hover);
   }
 </style>

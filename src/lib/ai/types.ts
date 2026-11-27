@@ -38,6 +38,24 @@ export interface AiSourceLink {
   publishedDate?: string;
 }
 
+export interface AiStrategyMessageSummary {
+  id: string;
+  name: string;
+  symbol: string;
+  shortName: string;
+  interval: string;
+  verdictStatus: string;
+  verdictLabel: string;
+  totalTrades: number;
+  winRatePct: number;
+  totalPnlUsd: number;
+  totalPnlPct: number;
+  profitFactor: number | null;
+  oosTrades: number;
+  oosProfitFactor: number | null;
+  oosPnlPct: number;
+}
+
 export interface AiMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -48,6 +66,7 @@ export interface AiMessage {
   imageCount: number;
   model?: AiModelId;
   sources?: AiSourceLink[];
+  strategyResult?: AiStrategyMessageSummary;
 }
 
 export interface AiConversation {
@@ -63,6 +82,7 @@ export interface AiConversation {
 export interface AiChartContext {
   symbol: string;
   fullSymbol: string;
+  interval?: string;
   price?: number;
   changePercent?: number;
   timezone: string;

@@ -29,6 +29,7 @@
     layoutId: LayoutId;
     activeSymbol: string;
     activeFullSymbol: string;
+    activeInterval?: string;
     activePrice?: number;
     activeChangePercent?: number;
     settingsOpen: boolean;
@@ -58,6 +59,7 @@
     layoutId,
     activeSymbol,
     activeFullSymbol,
+    activeInterval = 'D',
     activePrice = undefined,
     activeChangePercent = undefined,
     settingsOpen,
@@ -302,6 +304,7 @@
     {theme}
     {activeSymbol}
     {activeFullSymbol}
+    {activeInterval}
     {activePrice}
     {activeChangePercent}
     onClose={closePanel}

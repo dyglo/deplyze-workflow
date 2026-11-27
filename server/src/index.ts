@@ -38,6 +38,13 @@ import { getSystemAuditPayload } from './insights/auditLog.js';
 import { getOandaEnv, isOandaConfigured } from './quotes/oanda.js';
 import { getScreenerPayload } from './screener/service.js';
 import type { EdgeAuditEntryInput, TechBiasInput } from './insights/types.js';
+import {
+  evaluateLiveStrategySignal,
+  runStrategyBacktest,
+  validateAndSanitizeStrategySpec
+} from './strategy/engine.js';
+import { fetchStrategyHistory, sliceBarsByDateRange } from './strategy/historyCache.js';
+import { normalizeStrategyTimeframe, type StrategySpec } from './strategy/types.js';
 
 /** Load local .env files (repo root + server dir) without overriding real environment variables. */
 function loadLocalEnv(): void {
@@ -151,7 +158,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.21',
+        version: '0.1.22',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -167,7 +174,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.21',
+      version: '0.1.22',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
@@ -191,7 +198,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         'GET /api/insights/event?title=Consumer%20Price%20Index%20YoY&country=US',
         'POST /api/insights/edge-audit',
         'GET /api/ai/models',
-        'POST /api/ai/chat'
+        'POST /api/ai/chat',
+        'POST /api/strategy/backtest',
+        'POST /api/strategy/evaluate-live'
       ]
     });
     return;
@@ -503,6 +512,111 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     });
 
     await streamAiChat(body, res, CORS_ORIGIN, abortController.signal);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/strategy/backtest') {
+    let body: {
+      spec?: Partial<StrategySpec>;
+      fromTs?: number | null;
+      toTs?: number | null;
+      forceRefresh?: boolean;
+    };
+    try {
+      body = await readJsonBody<typeof body>(req, 256 * 1024);
+    } catch (err) {
+      sendJson(res, 400, { error: (err as Error).message }, 'no-store');
+      return;
+    }
+
+    if (!body.spec) {
+      sendJson(res, 400, { error: 'Missing strategy spec payload' }, 'no-store');
+      return;
+    }
+
+    const cleanSpec = validateAndSanitizeStrategySpec(body.spec, {
+      symbol: body.spec.symbol || 'OANDA:XAUUSD',
+      shortName: body.spec.shortName || 'XAUUSD',
+      interval: body.spec.interval || '1h'
+    });
+
+    const history = await fetchStrategyHistory(cleanSpec.symbol, cleanSpec.interval, {
+      forceRefresh: Boolean(body.forceRefresh)
+    });
+    if (!history || history.bars.length < 60) {
+      sendJson(
+        res,
+        422,
+        { error: `Insufficient historical bars available for ${cleanSpec.symbol} (${cleanSpec.interval}).` },
+        'no-store'
+      );
+      return;
+    }
+
+    const slicedBars = sliceBarsByDateRange(history.bars, body.fromTs, body.toTs);
+    if (slicedBars.length < 60) {
+      sendJson(
+        res,
+        422,
+        { error: 'Selected date range has fewer than 60 bars. Expand the date range and retry.' },
+        'no-store'
+      );
+      return;
+    }
+
+    const report = runStrategyBacktest(cleanSpec, { ...history, bars: slicedBars });
+    sendJson(res, 200, { report }, 'no-store');
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/strategy/evaluate-live') {
+    let body: {
+      spec?: Partial<StrategySpec>;
+      accountEquityUsd?: number;
+      currentPositionSide?: 'long' | 'short' | null;
+    };
+    try {
+      body = await readJsonBody<typeof body>(req, 128 * 1024);
+    } catch (err) {
+      sendJson(res, 400, { error: (err as Error).message }, 'no-store');
+      return;
+    }
+
+    if (!body.spec) {
+      sendJson(res, 400, { error: 'Missing strategy spec payload' }, 'no-store');
+      return;
+    }
+
+    const cleanSpec = validateAndSanitizeStrategySpec(body.spec, {
+      symbol: body.spec.symbol || 'OANDA:XAUUSD',
+      shortName: body.spec.shortName || 'XAUUSD',
+      interval: normalizeStrategyTimeframe(body.spec.interval)
+    });
+
+    const history = await fetchStrategyHistory(cleanSpec.symbol, cleanSpec.interval, {
+      tailOnlyCount: 300
+    });
+    if (!history || history.bars.length < 40) {
+      sendJson(
+        res,
+        422,
+        { error: `Unable to fetch live closed candles for ${cleanSpec.symbol} (${cleanSpec.interval}).` },
+        'no-store'
+      );
+      return;
+    }
+
+    const evaluation = evaluateLiveStrategySignal(
+      cleanSpec,
+      history,
+      typeof body.accountEquityUsd === 'number' && Number.isFinite(body.accountEquityUsd)
+        ? body.accountEquityUsd
+        : cleanSpec.risk.initialCapital,
+      body.currentPositionSide === 'long' || body.currentPositionSide === 'short'
+        ? body.currentPositionSide
+        : null
+    );
+    sendJson(res, 200, { evaluation }, 'no-store');
     return;
   }
 

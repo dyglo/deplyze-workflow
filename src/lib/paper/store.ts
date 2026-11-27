@@ -1802,23 +1802,36 @@ export function feedPaperQuote(
 
   if (!state.connected) return;
 
-  const evalRes = evaluateAccountWithTick(acc, key, nextQuote);
-  if (evalRes.mutated) {
-    const stampedAcc: PaperAccount = {
-      ...evalRes.account,
-      lastEvaluatedAt: Math.floor(nowMs / 1000)
-    };
-    const nextAccounts = state.accounts.map((a) => (a.id === acc.id ? stampedAcc : a));
+  let anyMutated = false;
+  const allToasts: Omit<PaperToast, 'id' | 'createdAt'>[] = [];
+  const nextAccounts = state.accounts.map((candidate) => {
+    if (candidate.positions.length === 0 && candidate.orders.length === 0) return candidate;
+    const evalRes = evaluateAccountWithTick(candidate, key, nextQuote);
+    if (evalRes.mutated) {
+      anyMutated = true;
+      allToasts.push(...evalRes.toasts);
+      return {
+        ...evalRes.account,
+        lastEvaluatedAt: Math.floor(nowMs / 1000)
+      };
+    }
+    return candidate;
+  });
+
+  if (anyMutated) {
     commit({ ...state, accounts: nextAccounts }, true);
     playAlertChime();
-    for (const t of evalRes.toasts) emitToast(t);
+    for (const t of allToasts) emitToast(t);
   } else if (
-    (acc.positions.length > 0 || acc.orders.length > 0) &&
+    state.accounts.some((a) => a.positions.length > 0 || a.orders.length > 0) &&
     nowMs - lastEvalStampSaveMs > 45_000
   ) {
     // Quietly checkpoint lastEvaluatedAt every ~45s for accurate offline bar reconciliation
     lastEvalStampSaveMs = nowMs;
-    acc.lastEvaluatedAt = Math.floor(nowMs / 1000);
+    const nowSec = Math.floor(nowMs / 1000);
+    for (const a of state.accounts) {
+      if (a.positions.length > 0 || a.orders.length > 0) a.lastEvaluatedAt = nowSec;
+    }
     persistState(false);
   }
 }
@@ -1827,14 +1840,15 @@ export function feedPaperQuote(
 
 async function pollRequiredPaperSymbols(): Promise<void> {
   if (pollInFlight || !state.connected) return;
-  const acc = getActivePaperAccount(state);
   const needed = new Map<string, { symbol: string; shortName: string }>();
 
-  for (const pos of acc.positions) {
-    needed.set(normalizeSymbolKey(pos.symbol), { symbol: pos.symbol, shortName: pos.shortName });
-  }
-  for (const ord of acc.orders) {
-    needed.set(normalizeSymbolKey(ord.symbol), { symbol: ord.symbol, shortName: ord.shortName });
+  for (const candidate of state.accounts) {
+    for (const pos of candidate.positions) {
+      needed.set(normalizeSymbolKey(pos.symbol), { symbol: pos.symbol, shortName: pos.shortName });
+    }
+    for (const ord of candidate.orders) {
+      needed.set(normalizeSymbolKey(ord.symbol), { symbol: ord.symbol, shortName: ord.shortName });
+    }
   }
   // Also keep active chart symbols synced with real live OANDA Bid/Ask spreads
   for (const [k, q] of liveQuotesByKey.entries()) {
@@ -2477,4 +2491,219 @@ export function exportPaperTabToCsv(acc: PaperAccount, tab: PaperBottomTab): voi
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ── Strategy Forward-Runner Account Helpers ──────────────────────────────────
+
+export function getPaperAccountById(accountId: string): PaperAccount | null {
+  return state.accounts.find((a) => a.id === accountId) ?? null;
+}
+
+export function getPaperLiveQuotesSnapshot(): Record<string, PaperLiveQuote> {
+  return { ...liveQuotesSnapshot };
+}
+
+/**
+ * Ensures Paper Ledger is connected and returns (or creates) a dedicated isolated
+ * SIM sub-account for a strategy runner without replacing the user's manual account.
+ */
+export function ensureDedicatedStrategyAccount(
+  accountName: string,
+  startingBalance = 10_000,
+  leverage = 100
+): PaperAccount {
+  const existing = state.accounts.find((a) => a.name === accountName);
+  if (existing) {
+    if (!state.connected) {
+      commit({ ...state, connected: true }, true);
+      void pollRequiredPaperSymbols();
+    }
+    return existing;
+  }
+
+  const created = createPaperAccountRecord(accountName, startingBalance, leverage);
+  const nextAccounts = [...state.accounts, created];
+  commit(
+    {
+      ...state,
+      connected: true,
+      accounts: nextAccounts
+    },
+    true
+  );
+  void pollRequiredPaperSymbols();
+  return created;
+}
+
+export function logStrategyActivityOnAccount(
+  accountId: string,
+  symbol: string,
+  message: string
+): void {
+  const exists = state.accounts.some((a) => a.id === accountId);
+  if (!exists) return;
+  const nextAccounts = state.accounts.map((a) =>
+    a.id === accountId ? pushActivity(a, 'order', message, symbol) : a
+  );
+  commit({ ...state, accounts: nextAccounts }, false);
+}
+
+export function executeStrategyOrderOnAccount(
+  accountId: string,
+  params: {
+    symbol: string;
+    shortName: string;
+    side: OrderSide;
+    quantity: number;
+    fillPrice: number;
+    takeProfit: number | null;
+    stopLoss: number | null;
+    strategyName: string;
+  }
+): { ok: boolean; error?: string } {
+  const target = state.accounts.find((a) => a.id === accountId);
+  if (!target) return { ok: false, error: 'Target Paper account not found.' };
+  const qty = Number(params.quantity);
+  const px = roundToTick(params.fillPrice, params.symbol);
+  if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(px) || px <= 0) {
+    return { ok: false, error: 'Invalid strategy order quantity or price.' };
+  }
+
+  const tp =
+    typeof params.takeProfit === 'number' && Number.isFinite(params.takeProfit) && params.takeProfit > 0
+      ? roundToTick(params.takeProfit, params.symbol)
+      : null;
+  const sl =
+    typeof params.stopLoss === 'number' && Number.isFinite(params.stopLoss) && params.stopLoss > 0
+      ? roundToTick(params.stopLoss, params.symbol)
+      : null;
+
+  const nowIso = new Date().toISOString();
+  const filledOrder: PaperOrder = {
+    id: makeWorkspaceId('ord'),
+    symbol: params.symbol,
+    shortName: params.shortName,
+    side: params.side,
+    type: 'market',
+    quantity: qty,
+    orderPrice: null,
+    fillPrice: px,
+    takeProfit: tp,
+    stopLoss: sl,
+    tif: 'GTC',
+    expiresAt: null,
+    status: 'filled',
+    note: `[BOT: ${params.strategyName}]`,
+    placedAt: nowIso,
+    updatedAt: nowIso,
+    filledAt: nowIso
+  };
+
+  const nextAccounts = state.accounts.map((cur) => {
+    if (cur.id !== accountId) return cur;
+    const applied = applyExecutionToAccount(cur, {
+      symbol: params.symbol,
+      shortName: params.shortName,
+      side: params.side,
+      orderType: 'market',
+      quantity: qty,
+      fillPrice: px,
+      takeProfit: tp,
+      stopLoss: sl,
+      ts: nowIso,
+      sourceLabel: `[BOT: ${params.strategyName}] Market entry`
+    });
+    return {
+      ...applied.account,
+      orderHistory: [filledOrder, ...applied.account.orderHistory].slice(0, MAX_HISTORY_ITEMS),
+      lastEvaluatedAt: Math.floor(Date.now() / 1000)
+    };
+  });
+
+  commit({ ...state, connected: true, accounts: nextAccounts }, true);
+  void pollRequiredPaperSymbols();
+  playAlertChime();
+  emitToast({
+    kind: 'executed',
+    title: `[BOT] ${params.strategyName} filled on`,
+    symbol: params.symbol,
+    shortName: params.shortName,
+    side: params.side,
+    quantity: qty,
+    price: px,
+    detail: `${target.name}${sl ? ` · SL ${formatPaperPrice(sl, params.symbol)}` : ''}${tp ? ` · TP ${formatPaperPrice(tp, params.symbol)}` : ''}`
+  });
+  return { ok: true };
+}
+
+export function closeStrategyPositionOnAccount(
+  accountId: string,
+  symbol: string,
+  exitPrice: number,
+  strategyName: string
+): { ok: boolean } {
+  const target = state.accounts.find((a) => a.id === accountId);
+  if (!target) return { ok: false };
+  const symKey = normalizeSymbolKey(symbol);
+  const pos = target.positions.find((p) => normalizeSymbolKey(p.symbol) === symKey);
+  if (!pos) return { ok: false };
+
+  const closeSide: OrderSide = pos.side === 'long' ? 'sell' : 'buy';
+  const fillPx = roundToTick(exitPrice > 0 ? exitPrice : pos.lastKnownPrice, pos.symbol);
+  const nowIso = new Date().toISOString();
+
+  const closeOrder: PaperOrder = {
+    id: makeWorkspaceId('ord'),
+    symbol: pos.symbol,
+    shortName: pos.shortName,
+    side: closeSide,
+    type: 'market',
+    quantity: pos.quantity,
+    orderPrice: null,
+    fillPrice: fillPx,
+    takeProfit: null,
+    stopLoss: null,
+    tif: 'GTC',
+    expiresAt: null,
+    status: 'filled',
+    note: `[BOT: ${strategyName}] Exit signal`,
+    placedAt: nowIso,
+    updatedAt: nowIso,
+    filledAt: nowIso
+  };
+
+  const nextAccounts = state.accounts.map((cur) => {
+    if (cur.id !== accountId) return cur;
+    const applied = applyExecutionToAccount(cur, {
+      symbol: pos.symbol,
+      shortName: pos.shortName,
+      side: closeSide,
+      quantity: pos.quantity,
+      fillPrice: fillPx,
+      takeProfit: null,
+      stopLoss: null,
+      ts: nowIso,
+      closeReason: 'manual',
+      sourceLabel: `[BOT: ${strategyName}] Signal exit`
+    });
+    return {
+      ...applied.account,
+      orderHistory: [closeOrder, ...applied.account.orderHistory].slice(0, MAX_HISTORY_ITEMS),
+      lastEvaluatedAt: Math.floor(Date.now() / 1000)
+    };
+  });
+
+  commit({ ...state, accounts: nextAccounts }, true);
+  playAlertChime();
+  emitToast({
+    kind: 'executed',
+    title: `[BOT] ${strategyName} closed on`,
+    symbol: pos.symbol,
+    shortName: pos.shortName,
+    side: closeSide,
+    quantity: pos.quantity,
+    price: fillPx,
+    detail: target.name
+  });
+  return { ok: true };
 }

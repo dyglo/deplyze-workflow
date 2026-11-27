@@ -18,6 +18,11 @@
     subscribePaper
   } from './lib/paper/store';
   import type { PaperLedgerState, PaperPosition } from './lib/paper/types';
+  import {
+    startStrategyRunnerMonitor,
+    subscribeStrategies
+  } from './lib/strategy/store';
+  import type { StrategyWorkspaceState } from './lib/strategy/types';
   import Rail from './lib/Rail.svelte';
   import TitleBar from './lib/TitleBar.svelte';
   import {
@@ -77,6 +82,7 @@
   let closedTabs: WorkspaceTab[] = [];
   let alertToasts: InAppAlertToast[] = [];
   let paperState: PaperLedgerState | null = null;
+  let strategyState: StrategyWorkspaceState | null = null;
   let paperModalMode: 'connect' | 'settings' | null = null;
   let closingPosition: PaperPosition | null = null;
   let modifyingPosition: { position: PaperPosition; focusField: 'tp' | 'sl' | null } | null = null;
@@ -95,10 +101,21 @@
   ) as ResolvedTheme;
   $: activeGroup = getActiveGroup(tabsState);
   $: activeTab = getActiveTab(tabsState);
+  $: activePaneInterval = getPaneState(activeTab, activeTab.activePane ?? 0).interval || 'D';
+  $: bottomDockVisible = Boolean(paperState?.connected || strategyState?.openStrategyId);
+  $: bottomDockMode =
+    strategyState?.openStrategyId && (!paperState?.connected || strategyState.activeDockTab === 'strategy')
+      ? strategyState.dockMode
+      : (paperState?.bottomMode ?? 'collapsed');
+  $: bottomDockHeight =
+    strategyState?.openStrategyId && (!paperState?.connected || strategyState.activeDockTab === 'strategy')
+      ? strategyState.dockHeight
+      : (paperState?.bottomHeight ?? 300);
 
   onMount(() => {
     const stopAlerts = startAlertMonitor();
     const stopPaper = startPaperMonitor();
+    const stopStrategyRunner = startStrategyRunnerMonitor();
     const stopCloudSync = startCloudAutoSync();
 
     const unsubPaper = subscribePaper((s) => {
@@ -107,6 +124,9 @@
         closingPosition = null;
         modifyingPosition = null;
       }
+    });
+    const unsubStrategy = subscribeStrategies((s) => {
+      strategyState = s;
     });
 
     void hydrateTabsStateFromWorkspace(tabsState).then((restored) => {
@@ -176,8 +196,10 @@
     return () => {
       stopAlerts();
       stopPaper();
+      stopStrategyRunner();
       stopCloudSync();
       unsubPaper();
+      unsubStrategy();
       unsubToasts();
       window.clearInterval(notePurgeTimer);
       window.removeEventListener('keydown', handleGlobalUndoKey);
@@ -657,12 +679,12 @@
         {/if}
       </div>
 
-      {#if paperState?.connected}
+      {#if bottomDockVisible}
         <PaperBottomPanel
           {theme}
           activeSymbol={activeTab.title}
           onSelectSymbol={loadSymbolInActiveTab}
-          onOpenSettings={() => (paperModalMode = 'settings')}
+          onOpenSettings={() => (paperModalMode = paperState?.connected ? 'settings' : 'connect')}
           onRequestClosePosition={(pos) => {
             if (paperState?.connected) closingPosition = pos;
           }}
@@ -688,6 +710,7 @@
       layoutId={activeTab.layoutId}
       activeSymbol={activeTab.title}
       activeFullSymbol={activeTab.symbol}
+      activeInterval={activePaneInterval}
       activePrice={activeTab.quote?.price}
       activeChangePercent={activeTab.quote?.changePercent}
       {settingsOpen}
@@ -734,9 +757,9 @@
 
   <PaperToastStack
     {theme}
-    bottomOffsetPx={paperState?.connected
-      ? paperState.bottomMode === 'expanded'
-        ? paperState.bottomHeight + 12
+    bottomOffsetPx={bottomDockVisible
+      ? bottomDockMode === 'expanded'
+        ? bottomDockHeight + 12
         : 48
       : 16}
   />
