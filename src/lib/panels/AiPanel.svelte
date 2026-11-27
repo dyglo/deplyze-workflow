@@ -90,6 +90,18 @@
     AI_EFFORTS.find((e) => e.id === selectedEffort)?.label ?? 'Medium'
   );
   const canSend = $derived(draft.trim().length > 0 && !isStreaming);
+  const formattedInterval = $derived.by(() => {
+    const raw = (activeInterval || 'D').trim().toUpperCase();
+    if (raw === '1') return '1m';
+    if (raw === '5') return '5m';
+    if (raw === '15') return '15m';
+    if (raw === '30') return '30m';
+    if (raw === '60') return '1h';
+    if (raw === '240') return '4h';
+    if (raw === 'D') return '1D';
+    if (raw === 'W') return '1W';
+    return activeInterval || '1D';
+  });
 
   const SUGGESTIONS = $derived([
     `Build & backtest a strategy on ${activeSymbol || 'XAUUSD'}`,
@@ -844,7 +856,7 @@
             onclick={toggleAutoCapture}
           >
             <span class="live-dot" class:on={autoCapture}></span>
-            <span>Active chart: <strong>{activeSymbol || 'XAUUSD'}</strong> · {activeInterval || 'D'}</span>
+            <span>Active chart: <strong>{activeSymbol || 'XAUUSD'}</strong> · {formattedInterval}</span>
           </button>
 
           <button

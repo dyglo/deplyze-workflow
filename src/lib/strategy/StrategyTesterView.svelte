@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { formatPaperPrice, formatQty, formatUsd } from '../paper/instruments';
-  import type { PaperAccount } from '../paper/types';
+  import { computeAccountMetrics, computePositionMetrics } from '../paper/store';
+  import type { PaperAccount, PaperLiveQuote } from '../paper/types';
   import {
+    checkForwardRunnerNow,
     confirmPendingSignal,
     deployStrategyToPaper,
     dismissPendingSignal,
@@ -9,6 +12,7 @@
     pauseForwardRunner,
     rerunStrategyBacktest,
     resumeForwardRunner,
+    setPreferredStrategyView,
     setRunnerExecutionMode,
     stopForwardRunner
   } from './store';
@@ -30,8 +34,10 @@
     isRunning: boolean;
     runError: string | null;
     runner: ForwardRunnerConfig | null;
+    preferredViewMode?: 'report' | 'trades' | 'live';
     pendingSignals: PendingStrategySignal[];
     paperAccounts: PaperAccount[];
+    paperQuotes: Record<string, PaperLiveQuote>;
     onSelectSymbol: (symbol: string, shortName: string) => void;
     onSwitchToPaperAccount?: (accountId: string) => void;
   }
@@ -42,28 +48,110 @@
     isRunning,
     runError,
     runner,
+    preferredViewMode = 'report',
     pendingSignals,
     paperAccounts,
+    paperQuotes,
     onSelectSymbol,
     onSwitchToPaperAccount
   }: Props = $props();
 
   const report = $derived<BacktestReport>(record.report);
   const spec = $derived<StrategySpec>(report.spec);
+  const executedRules = $derived<string[]>(
+    report.executedRules && report.executedRules.length > 0
+      ? report.executedRules
+      : spec.ruleSummary
+  );
 
   // View & section states
-  let viewMode = $state<'report' | 'trades'>('report');
+  let viewMode = $state<'report' | 'trades' | 'live'>('report');
   let scope = $state<'all' | 'inSample' | 'outOfSample'>('all');
   let chartMode = $state<'performance' | 'drawdown'>('performance');
   let showBuyAndHold = $state(true);
-  let perfSubTab = $state<'breakdown' | 'periodical' | 'benchmarking' | 'runup' | 'iterations'>(
-    'breakdown'
-  );
+  let independentBhScale = $state(true);
+  let perfSubTab = $state<
+    'breakdown' | 'walkforward' | 'periodical' | 'benchmarking' | 'runup' | 'iterations'
+  >('breakdown');
   let pnlBarMode = $state<'signals' | 'side'>('side');
   let tradesSubTab = $state<'distribution' | 'streaks' | 'time' | 'excursions'>('distribution');
   let tradesSortDesc = $state(true);
   let showColSegment = $state(true);
   let showColR = $state(true);
+
+  // Live bot monitor ticking clock & manual check busy flag
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  let checkingBotNow = $state(false);
+
+  onMount(() => {
+    const t = setInterval(() => {
+      nowSec = Math.floor(Date.now() / 1000);
+    }, 1000);
+    return () => clearInterval(t);
+  });
+
+  $effect(() => {
+    if (preferredViewMode === 'live' && runner) {
+      viewMode = 'live';
+    } else if (preferredViewMode === 'trades') {
+      viewMode = 'trades';
+    } else if (viewMode === 'live' && !runner) {
+      viewMode = 'report';
+    }
+  });
+
+  function switchViewMode(next: 'report' | 'trades' | 'live') {
+    viewMode = next;
+    setPreferredStrategyView(next);
+  }
+
+  const botAccount = $derived(
+    runner ? (paperAccounts.find((a) => a.id === runner.accountId) ?? null) : null
+  );
+  const botMetrics = $derived(
+    botAccount ? computeAccountMetrics(botAccount, paperQuotes) : null
+  );
+  const botDailyLossPct = $derived.by(() => {
+    if (!runner || !botMetrics || runner.dayStartEquityUsd <= 0) return 0;
+    return Math.max(
+      0,
+      ((runner.dayStartEquityUsd - botMetrics.equity) / runner.dayStartEquityUsd) * 100
+    );
+  });
+  const nextCandleCountdown = $derived.by(() => {
+    if (!runner) return '—';
+    const tfSecMap: Record<StrategyTimeframe, number> = {
+      '1m': 60,
+      '5m': 300,
+      '15m': 900,
+      '30m': 1800,
+      '1h': 3600,
+      '4h': 14400,
+      '1D': 86400,
+      '1W': 604800
+    };
+    const tfSec = tfSecMap[runner.interval] ?? 3600;
+    const target =
+      runner.lastEvaluation?.nextBarCloseTs && runner.lastEvaluation.nextBarCloseTs > nowSec
+        ? runner.lastEvaluation.nextBarCloseTs
+        : (Math.floor(nowSec / tfSec) + 1) * tfSec;
+    const rem = Math.max(0, target - nowSec);
+    const hrs = Math.floor(rem / 3600);
+    const mins = Math.floor((rem % 3600) / 60);
+    const secs = rem % 60;
+    if (hrs > 0) return `${hrs}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+    return `${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+  });
+
+  async function handleCheckBotNow() {
+    if (!runner || checkingBotNow) return;
+    checkingBotNow = true;
+    try {
+      await checkForwardRunnerNow(runner.id);
+    } finally {
+      checkingBotNow = false;
+    }
+  }
 
   // Popovers & Properties drawer
   let dateMenuOpen = $state(false);
@@ -318,17 +406,31 @@
       chartMode === 'performance' && showBuyAndHold
         ? pts.map((p) => p.buyAndHoldPnlUsd)
         : [];
-    const allV = [...vals, ...bhVals, 0];
-    const rawMin = Math.min(...allV);
-    const rawMax = Math.max(...allV);
+    // When independentBhScale is true, fit the main Y-axis strictly to Strategy PnL so huge Buy&Hold moves never flatten it
+    const mainAllV =
+      chartMode === 'performance' && showBuyAndHold && !independentBhScale
+        ? [...vals, ...bhVals, 0]
+        : [...vals, 0];
+    const rawMin = Math.min(...mainAllV);
+    const rawMax = Math.max(...mainAllV);
     const span = Math.max(10, rawMax - rawMin);
     const minY = rawMin - span * 0.08;
     const maxY = rawMax + span * 0.1;
     const ySpan = Math.max(1, maxY - minY);
 
+    // Independent normalized scale for Buy & Hold overlay when Fit Strategy mode is active
+    const bhMinRaw = bhVals.length > 0 ? Math.min(0, ...bhVals) : minY;
+    const bhMaxRaw = bhVals.length > 0 ? Math.max(0, ...bhVals) : maxY;
+    const bhSpan = Math.max(10, bhMaxRaw - bhMinRaw);
+    const bhMinY = bhMinRaw - bhSpan * 0.08;
+    const bhMaxY = bhMaxRaw + bhSpan * 0.1;
+    const bhYSpan = Math.max(1, bhMaxY - bhMinY);
+
     const toX = (idx: number) =>
       PAD_L + (pts.length <= 1 ? 0 : (idx / (pts.length - 1)) * plotW);
     const toY = (v: number) => PAD_T + ((maxY - v) / ySpan) * plotH;
+    const toBhY = (v: number) =>
+      independentBhScale ? PAD_T + ((bhMaxY - v) / bhYSpan) * plotH : toY(v);
     const zeroY = toY(0);
 
     const coords = pts.map((p, i) => {
@@ -336,7 +438,7 @@
       return {
         x: toX(i),
         y: toY(val),
-        bhY: toY(p.buyAndHoldPnlUsd),
+        bhY: toBhY(p.buyAndHoldPnlUsd),
         val,
         point: p
       };
@@ -535,7 +637,7 @@
   <!-- ── TradingView-Style Flat Sub-Toolbar ────────────────────────────────── -->
   <div class="st-toolbar">
     <div class="tb-left">
-      <!-- Report vs List of trades icon switch -->
+      <!-- Report vs List of trades (+ Live SIM Monitor when bot deployed) -->
       <div class="view-switch" role="tablist" aria-label="Strategy Tester view">
         <button
           class="vs-btn"
@@ -543,7 +645,7 @@
           type="button"
           title="Strategy Report"
           aria-label="Strategy Report"
-          onclick={() => (viewMode = 'report')}
+          onclick={() => switchViewMode('report')}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2 11.2 5.4 7.8l2.7 2.5L13.8 4.6" />
@@ -555,13 +657,25 @@
           type="button"
           title="List of trades"
           aria-label="List of trades"
-          onclick={() => (viewMode = 'trades')}
+          onclick={() => switchViewMode('trades')}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <rect x="2.2" y="3" width="11.6" height="10" rx="1.2" />
             <path d="M2.2 6.4h11.6M2.2 9.7h11.6M5.8 3v10" />
           </svg>
         </button>
+        {#if runner}
+          <button
+            class="vs-btn wide"
+            class:active={viewMode === 'live'}
+            type="button"
+            title="Live SIM Bot Monitor"
+            onclick={() => switchViewMode('live')}
+          >
+            <span class="vs-live-dot" class:paused={runner.status === 'paused'}></span>
+            <span>Live SIM</span>
+          </button>
+        {/if}
       </div>
 
       <!-- Date Range Pill -->
@@ -961,11 +1075,14 @@
         <button class="props-close" type="button" onclick={() => (propsOpen = false)}>×</button>
       </div>
 
-      {#if spec.ruleSummary.length > 0}
-        <div class="rules-list">
-          {#each spec.ruleSummary as rule, i (i)}
-            <div class="rule-item">• {rule}</div>
-          {/each}
+      {#if executedRules.length > 0}
+        <div class="rules-block">
+          <div class="rules-k">Executed AST Rules (Exact)</div>
+          <div class="rules-list">
+            {#each executedRules as rule, i (i)}
+              <div class="rule-item">• {rule}</div>
+            {/each}
+          </div>
         </div>
       {/if}
 
@@ -1218,6 +1335,16 @@
               <span>Buy and hold</span>
               <span>{formatUsd(activeMetrics.buyAndHoldPnlUsd, true)}</span>
             </button>
+            {#if showBuyAndHold}
+              <button
+                class="scale-pill"
+                type="button"
+                title="Switch between fitting the Y-axis to Strategy PnL (independent B&H overlay) or shared USD scale"
+                onclick={() => (independentBhScale = !independentBhScale)}
+              >
+                {independentBhScale ? 'Scale: Fit Strategy' : 'Scale: Shared USD'}
+              </button>
+            {/if}
           {/if}
 
           {#if scope === 'all' && chartGeom?.oosSplitX}
@@ -1361,6 +1488,14 @@
         <div class="pill-bar">
           {#each [
             { id: 'breakdown', label: 'Breakdown' },
+            ...(report.walkForward
+              ? [
+                  {
+                    id: 'walkforward',
+                    label: `Walk-Forward (${report.walkForward.passingFolds}/${report.walkForward.totalFolds})`
+                  }
+                ]
+              : []),
             { id: 'periodical', label: 'Periodical' },
             { id: 'benchmarking', label: 'Benchmarking' },
             { id: 'runup', label: 'Runup & Drawdown' },
@@ -1452,6 +1587,76 @@
                 </span>
               </div>
             {/each}
+          </div>
+        {:else if perfSubTab === 'walkforward' && report.walkForward}
+          {@const wf = report.walkForward}
+          <div class="flat-metrics-4">
+            <div class="fm-col">
+              <span class="fm-lbl">Regime Consistency</span>
+              <span
+                class="fm-val"
+                class:pos={wf.passingFolds >= 2}
+                class:neg={wf.passingFolds === 0}
+              >
+                {wf.passingFolds}/{wf.totalFolds} folds ({wf.consistencyPct.toFixed(0)}%)
+              </span>
+            </div>
+            <div class="fm-col">
+              <span class="fm-lbl">Walk-Forward Verdict</span>
+              <span class="fm-val">{wf.label}</span>
+            </div>
+            <div class="fm-col">
+              <span class="fm-lbl">Avg Fold Profit Factor</span>
+              <span class="fm-val">
+                {wf.avgProfitFactor !== null ? wf.avgProfitFactor.toFixed(2) : '—'}
+              </span>
+            </div>
+            <div class="fm-col">
+              <span class="fm-lbl">Combined Net PnL</span>
+              <span class="fm-val" class:pos={wf.combinedPnlUsd > 0} class:neg={wf.combinedPnlUsd < 0}>
+                {formatUsd(wf.combinedPnlUsd, true)}<small>USD</small>
+                <span class="fm-sub">{fmtSignedPct(wf.combinedPnlPct)}</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="iter-wrap">
+            <table class="flat-table">
+              <thead>
+                <tr>
+                  <th>Regime Fold</th>
+                  <th>Date Window</th>
+                  <th class="num">Trades</th>
+                  <th class="num">Win Rate</th>
+                  <th class="num">Net PnL</th>
+                  <th class="num">PF</th>
+                  <th class="num">Max DD</th>
+                  <th class="num">Buy & Hold</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each wf.folds as f (f.fold)}
+                  <tr>
+                    <td class="bold">{f.label}</td>
+                    <td class="muted">{fmtDateShort(f.fromTs)} — {fmtDateShort(f.toTs)}</td>
+                    <td class="num">{f.trades} ({f.wins}W)</td>
+                    <td class="num">{f.winRatePct.toFixed(1)}%</td>
+                    <td class="num bold" class:pos={f.netPnlUsd > 0} class:neg={f.netPnlUsd < 0}>
+                      {formatUsd(f.netPnlUsd, true)} ({fmtSignedPct(f.netPnlPct)})
+                    </td>
+                    <td class="num">{f.profitFactor !== null ? f.profitFactor.toFixed(2) : '—'}</td>
+                    <td class="num">{f.maxDrawdownPct.toFixed(2)}%</td>
+                    <td class="num muted">{fmtSignedPct(f.buyAndHoldPct)}</td>
+                    <td>
+                      <span class="iter-badge" class:kept={f.passed} class:bad={!f.passed}>
+                        {f.passed ? 'Pass' : 'Fail'}
+                      </span>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         {:else if perfSubTab === 'periodical'}
           {#if activeMetrics.monthlyReturns.length === 0}
@@ -1640,6 +1845,14 @@
                 </tr>
               </tbody>
             </table>
+          </div>
+        {/if}
+        {#if perfSubTab === 'iterations' && executedRules.length > 0}
+          <div class="ast-audit-note">
+            <span class="rules-k">Exact Executed AST Rules:</span>
+            {#each executedRules as r, i (i)}
+              <div class="rule-item">• {r}</div>
+            {/each}
           </div>
         {/if}
       </div>
@@ -1933,6 +2146,280 @@
               {/each}
             </div>
           {/if}
+        {/if}
+      </div>
+    {:else if viewMode === 'live' && runner}
+      <!-- ── LIVE BOT MONITOR VIEW (100% Flat Institutional Telemetry) ──────── -->
+      {@const ev = runner.lastEvaluation}
+      <div class="flat-section">
+        <div class="live-head-row">
+          <div class="live-title-group">
+            <span class="live-state-pill" class:paused={runner.status === 'paused'}>
+              <span class="ls-dot"></span>
+              {runner.status === 'running' ? 'Running Live (SIM)' : 'Paused (SIM)'}
+            </span>
+            <h3 class="sec-title">{runner.strategyName}</h3>
+            <span class="sec-meta">{runner.symbol} · {runner.interval} closed bars</span>
+          </div>
+
+          <div class="live-head-acts">
+            <button
+              class="pf-btn"
+              type="button"
+              disabled={checkingBotNow}
+              onclick={() => void handleCheckBotNow()}
+            >
+              {checkingBotNow ? 'Checking...' : 'Check Now'}
+            </button>
+            <button
+              class="pf-btn"
+              type="button"
+              onclick={() => onSwitchToPaperAccount?.(runner.accountId)}
+            >
+              Open Bot Account →
+            </button>
+            {#if runner.status === 'running'}
+              <button
+                class="pf-btn"
+                type="button"
+                onclick={() => pauseForwardRunner(runner.id, 'Paused manually')}
+              >
+                Pause
+              </button>
+            {:else}
+              <button
+                class="pf-btn primary"
+                type="button"
+                onclick={() => resumeForwardRunner(runner.id)}
+              >
+                Resume
+              </button>
+            {/if}
+            <button
+              class="pf-btn danger"
+              type="button"
+              onclick={() => {
+                stopForwardRunner(runner.id);
+                switchViewMode('report');
+              }}
+            >
+              Stop
+            </button>
+          </div>
+        </div>
+
+        {#if runner.pauseReason}
+          <div class="fs-warn">{runner.pauseReason}</div>
+        {/if}
+
+        <!-- Live Bot Heartbeat + Sub-Account Key Stats (Flat) -->
+        <div class="key-stats-row">
+          <div class="ks-col">
+            <span class="ks-lbl">Next {runner.interval} candle close</span>
+            <div class="ks-val">
+              <span>{nextCandleCountdown}</span>
+              <span class="ks-count">
+                {runner.lastCheckedAt
+                  ? `checked ${new Date(runner.lastCheckedAt).toISOString().slice(11, 19)} UTC`
+                  : 'initializing'}
+              </span>
+            </div>
+          </div>
+
+          <div class="ks-col">
+            <span class="ks-lbl">Bot Account ({runner.accountName})</span>
+            <div class="ks-val">
+              <span>{botMetrics ? formatUsd(botMetrics.equity) : '—'}<small>USD</small></span>
+              {#if botMetrics}
+                <span
+                  class="ks-pct"
+                  class:pos={botMetrics.unrealizedPnl + botMetrics.realizedPnl > 0.004}
+                  class:neg={botMetrics.unrealizedPnl + botMetrics.realizedPnl < -0.004}
+                >
+                  {formatUsd(botMetrics.unrealizedPnl + botMetrics.realizedPnl, true)} PnL
+                </span>
+              {/if}
+            </div>
+          </div>
+
+          <div class="ks-col">
+            <span class="ks-lbl">Execution & Daily Circuit Breaker</span>
+            <div class="ks-val">
+              <span>{runner.executionMode === 'auto' ? 'Auto SIM' : 'Signal Confirm'}</span>
+              <span class="ks-count">
+                DD {botDailyLossPct.toFixed(2)}% / {runner.maxDailyLossPct}%
+              </span>
+            </div>
+          </div>
+
+          <div class="ks-col">
+            <span class="ks-lbl">Bot Output</span>
+            <div class="ks-val">
+              <span>{botAccount?.positions.length ?? 0} open</span>
+              <span class="ks-count">
+                {botAccount?.tradeHistory.length ?? 0} closed · {runner.signalsFired} signals
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Rule-by-Rule Evaluation Checklist on Latest Closed Candle -->
+      <div class="flat-section bordered-top">
+        <div class="sec-head-row">
+          <h3 class="sec-title">Live Rule Checklist (Latest Closed {runner.interval} Candle)</h3>
+          {#if ev}
+            <span class="sec-meta">
+              {fmtTradeTs(ev.barTs)} UTC · Close {formatPaperPrice(ev.closePrice, runner.symbol)} · Spread {ev.spreadPx.toFixed(spec.symbol.includes('JPY') || spec.symbol.includes('XAU') ? 3 : 5)}
+            </span>
+          {/if}
+        </div>
+
+        {#if ev}
+          <div class="checklist-grid">
+            {#if ev.longRules && ev.longRules.length > 0}
+              <div class="chk-col">
+                <div class="chk-head">
+                  <span class="sub-sec-title">Long Entry Rules</span>
+                  <span
+                    class="chk-count"
+                    class:ready={(ev.longMetCount ?? 0) === (ev.longTotalCount ?? 0)}
+                  >
+                    {ev.longMetCount ?? 0} / {ev.longTotalCount ?? ev.longRules.length} met
+                  </span>
+                </div>
+                <div class="chk-list">
+                  {#each ev.longRules as item, i (i)}
+                    <div class="chk-row" class:met={item.passed}>
+                      <span class="chk-mark">{item.passed ? '✓' : '○'}</span>
+                      <span class="chk-lbl">{item.label}</span>
+                      <span class="chk-det">{item.detail}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            {#if ev.shortRules && ev.shortRules.length > 0}
+              <div class="chk-col">
+                <div class="chk-head">
+                  <span class="sub-sec-title">Short Entry Rules</span>
+                  <span
+                    class="chk-count"
+                    class:ready={(ev.shortMetCount ?? 0) === (ev.shortTotalCount ?? 0)}
+                  >
+                    {ev.shortMetCount ?? 0} / {ev.shortTotalCount ?? ev.shortRules.length} met
+                  </span>
+                </div>
+                <div class="chk-list">
+                  {#each ev.shortRules as item, i (i)}
+                    <div class="chk-row" class:met={item.passed}>
+                      <span class="chk-mark">{item.passed ? '✓' : '○'}</span>
+                      <span class="chk-lbl">{item.label}</span>
+                      <span class="chk-det">{item.detail}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="empty-flat">
+            Fetching latest closed OANDA candle... click <strong>Check Now</strong> if needed.
+          </div>
+        {/if}
+      </div>
+
+      <!-- Active Bot Open Position (if any) -->
+      <div class="flat-section bordered-top">
+        <h3 class="sec-title">Live Bot Position & Recent Evaluations</h3>
+        {#if botAccount && botAccount.positions.length > 0}
+          <div class="iter-wrap">
+            <table class="flat-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th class="num">Qty</th>
+                  <th class="num">Entry</th>
+                  <th class="num">SL</th>
+                  <th class="num">TP</th>
+                  <th class="num">Last</th>
+                  <th class="num">Unrealized PnL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each botAccount.positions as pos (pos.id)}
+                  {@const pm = computePositionMetrics(
+                    pos,
+                    paperQuotes,
+                    botAccount.settings.leverage,
+                    botAccount.settings.zeroSpread
+                  )}
+                  <tr>
+                    <td class="bold">{pos.symbol}</td>
+                    <td class:pos={pos.side === 'long'} class:neg={pos.side === 'short'}>
+                      {pos.side === 'long' ? 'Long' : 'Short'}
+                    </td>
+                    <td class="num">{formatQty(pos.quantity)}</td>
+                    <td class="num">{formatPaperPrice(pos.avgFillPrice, pos.symbol)}</td>
+                    <td class="num muted">{pos.stopLoss ? formatPaperPrice(pos.stopLoss, pos.symbol) : '—'}</td>
+                    <td class="num muted">{pos.takeProfit ? formatPaperPrice(pos.takeProfit, pos.symbol) : '—'}</td>
+                    <td class="num">{formatPaperPrice(pm.lastPrice, pos.symbol)}</td>
+                    <td class="num bold" class:pos={pm.unrealizedPnl > 0} class:neg={pm.unrealizedPnl < 0}>
+                      {formatUsd(pm.unrealizedPnl, true)} USD
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <div class="empty-flat">
+            Currently flat in <strong>{runner.accountName}</strong>. Orders execute automatically on closed {runner.interval} bars when all rules align.
+          </div>
+        {/if}
+
+        <!-- Evaluation & Activity Log -->
+        {#if (runner.evalLog && runner.evalLog.length > 0) || (botAccount && botAccount.activityLog.length > 0)}
+          <div class="iter-wrap">
+            <table class="flat-table">
+              <thead>
+                <tr>
+                  <th>Time (UTC)</th>
+                  <th>Candle / Source</th>
+                  <th class="num">Price</th>
+                  <th>Status / Bot Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each (runner.evalLog ?? []).slice(0, 8) as entry, idx (idx)}
+                  <tr>
+                    <td class="muted ts-cell">{new Date(entry.ts).toISOString().slice(11, 19)} UTC</td>
+                    <td class="ts-cell">{fmtTradeTs(entry.barTs)}</td>
+                    <td class="num">{formatPaperPrice(entry.closePrice, runner.symbol)}</td>
+                    <td>
+                      <span
+                        class="iter-badge"
+                        class:kept={entry.signal !== 'none'}
+                      >
+                        {entry.signal === 'none' ? 'Check' : entry.signal.replace('_', ' ')}
+                      </span>
+                      <span style="margin-left:8px">{entry.summary}</span>
+                    </td>
+                  </tr>
+                {/each}
+                {#each (botAccount?.activityLog ?? []).filter((a) => a.message.includes('[BOT:')).slice(0, 6) as act (act.id)}
+                  <tr>
+                    <td class="muted ts-cell">{new Date(act.ts).toISOString().slice(11, 19)} UTC</td>
+                    <td class="muted">Paper Ledger</td>
+                    <td class="num muted">—</td>
+                    <td>{act.message}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
       </div>
     {:else}
@@ -3964,5 +4451,186 @@
     padding: 5px 8px;
     font-size: 12px;
     cursor: pointer;
+  }
+
+  /* ── Live Bot Monitor & Polish Styles ──────────────────────────────────── */
+  .vs-btn.wide {
+    width: auto;
+    padding: 0 9px;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .vs-live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #089981;
+  }
+
+  .vs-live-dot.paused {
+    background: #f59e0b;
+  }
+
+  .rules-block,
+  .ast-audit-note {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11.5px;
+    color: var(--dark-text-secondary);
+  }
+
+  .ast-audit-note {
+    padding-top: 8px;
+    border-top: 1px solid var(--dark-border-subtle);
+  }
+
+  .rules-k {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--dark-text-secondary);
+  }
+
+  .scale-pill {
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 4px;
+    border: 1px solid var(--dark-border-control);
+    background: transparent;
+    color: var(--dark-text-secondary);
+    font-family: inherit;
+    font-size: 10.5px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .scale-pill:hover {
+    color: var(--dark-text-strong);
+    background: var(--dark-hover);
+  }
+
+  .live-head-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .live-title-group,
+  .live-head-acts {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .live-state-pill {
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    background: rgba(8, 153, 129, 0.16);
+    color: #089981;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .live-state-pill.paused {
+    background: rgba(245, 158, 11, 0.16);
+    color: #f59e0b;
+  }
+
+  .ls-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .pf-btn.danger {
+    border-color: rgba(242, 54, 69, 0.45);
+    color: #f23645;
+  }
+
+  .checklist-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+    gap: 24px;
+  }
+
+  .chk-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .chk-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .chk-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--dark-text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chk-count.ready {
+    color: #089981;
+  }
+
+  .chk-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .chk-row {
+    display: grid;
+    grid-template-columns: 16px 1fr auto;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--dark-border-subtle);
+    font-size: 12px;
+    color: var(--dark-text-secondary);
+  }
+
+  .st-root.light .chk-row {
+    border-bottom-color: #eceff4;
+  }
+
+  .chk-row.met {
+    color: var(--dark-text-strong);
+  }
+
+  .st-root.light .chk-row.met {
+    color: #131722;
+  }
+
+  .chk-mark {
+    font-weight: 700;
+    color: var(--dark-text-secondary);
+  }
+
+  .chk-row.met .chk-mark {
+    color: #089981;
+  }
+
+  .chk-det {
+    font-size: 11px;
+    color: var(--dark-text-secondary);
+    font-variant-numeric: tabular-nums;
   }
 </style>

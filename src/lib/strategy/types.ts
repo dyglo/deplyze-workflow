@@ -312,8 +312,36 @@ export interface StrategyVerdict {
   reasons: string[];
 }
 
+export interface WalkForwardFold {
+  fold: number;
+  label: string;
+  fromTs: number;
+  toTs: number;
+  trades: number;
+  wins: number;
+  winRatePct: number;
+  netPnlUsd: number;
+  netPnlPct: number;
+  profitFactor: number | null;
+  maxDrawdownPct: number;
+  buyAndHoldPct: number;
+  passed: boolean;
+}
+
+export interface WalkForwardSummary {
+  folds: WalkForwardFold[];
+  passingFolds: number;
+  totalFolds: number;
+  avgProfitFactor: number | null;
+  combinedPnlUsd: number;
+  combinedPnlPct: number;
+  consistencyPct: number;
+  label: string;
+}
+
 export interface BacktestReport {
   spec: StrategySpec;
+  executedRules?: string[];
   dataSource: 'oanda_mba' | 'yahoo_indicative';
   dataQualityNote: string;
   barsTotal: number;
@@ -325,6 +353,7 @@ export interface BacktestReport {
   all: SegmentMetrics;
   inSample: SegmentMetrics;
   outOfSample: SegmentMetrics;
+  walkForward?: WalkForwardSummary;
   trades: BacktestTrade[];
   verdict: StrategyVerdict;
   iterations: StrategyIterationStep[];
@@ -340,6 +369,21 @@ export interface SavedStrategyRecord {
 }
 
 export type ForwardExecutionMode = 'auto' | 'confirm';
+
+export interface RuleCheckItem {
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface BotEvalLogEntry {
+  ts: string;
+  barTs: number;
+  closePrice: number;
+  spreadPx: number;
+  signal: string;
+  summary: string;
+}
 
 export interface ForwardRunnerConfig {
   id: string;
@@ -360,6 +404,8 @@ export interface ForwardRunnerConfig {
   lastCheckedAt: string | null;
   signalsFired: number;
   createdAt: string;
+  lastEvaluation?: LiveStrategyEvaluation;
+  evalLog?: BotEvalLogEntry[];
 }
 
 export interface PendingStrategySignal {
@@ -388,6 +434,7 @@ export interface LiveStrategyEvaluation {
   interval: StrategyTimeframe;
   barTs: number;
   barCloseTs: number;
+  nextBarCloseTs?: number;
   closePrice: number;
   bidPrice: number;
   askPrice: number;
@@ -397,6 +444,12 @@ export interface LiveStrategyEvaluation {
   suggestedTakeProfit: number | null;
   suggestedQty: number | null;
   reason: string;
+  longRules?: RuleCheckItem[];
+  shortRules?: RuleCheckItem[];
+  longMetCount?: number;
+  longTotalCount?: number;
+  shortMetCount?: number;
+  shortTotalCount?: number;
   dataSource: 'oanda_mba' | 'yahoo_indicative';
 }
 
@@ -406,6 +459,7 @@ export interface StrategyWorkspaceState {
   activeDockTab: 'strategy' | 'paper';
   dockMode: 'collapsed' | 'expanded' | 'fullscreen';
   dockHeight: number;
+  preferredViewMode?: 'report' | 'trades' | 'live';
   runners: ForwardRunnerConfig[];
   pendingSignals: PendingStrategySignal[];
 }

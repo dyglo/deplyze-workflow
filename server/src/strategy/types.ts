@@ -356,8 +356,36 @@ export interface StrategyVerdict {
   reasons: string[];
 }
 
+export interface WalkForwardFold {
+  fold: number;
+  label: string;
+  fromTs: number;
+  toTs: number;
+  trades: number;
+  wins: number;
+  winRatePct: number;
+  netPnlUsd: number;
+  netPnlPct: number;
+  profitFactor: number | null;
+  maxDrawdownPct: number;
+  buyAndHoldPct: number;
+  passed: boolean;
+}
+
+export interface WalkForwardSummary {
+  folds: WalkForwardFold[];
+  passingFolds: number;
+  totalFolds: number;
+  avgProfitFactor: number | null;
+  combinedPnlUsd: number;
+  combinedPnlPct: number;
+  consistencyPct: number;
+  label: string;
+}
+
 export interface BacktestReport {
   spec: StrategySpec;
+  executedRules: string[];
   dataSource: 'oanda_mba' | 'yahoo_indicative';
   dataQualityNote: string;
   barsTotal: number;
@@ -369,10 +397,17 @@ export interface BacktestReport {
   all: SegmentMetrics;
   inSample: SegmentMetrics;
   outOfSample: SegmentMetrics;
+  walkForward?: WalkForwardSummary;
   trades: BacktestTrade[];
   verdict: StrategyVerdict;
   iterations: StrategyIterationStep[];
   computedAt: string;
+}
+
+export interface RuleCheckItem {
+  label: string;
+  passed: boolean;
+  detail: string;
 }
 
 export interface LiveStrategyEvaluation {
@@ -381,6 +416,7 @@ export interface LiveStrategyEvaluation {
   interval: StrategyTimeframe;
   barTs: number;
   barCloseTs: number;
+  nextBarCloseTs: number;
   closePrice: number;
   bidPrice: number;
   askPrice: number;
@@ -390,6 +426,12 @@ export interface LiveStrategyEvaluation {
   suggestedTakeProfit: number | null;
   suggestedQty: number | null;
   reason: string;
+  longRules: RuleCheckItem[];
+  shortRules: RuleCheckItem[];
+  longMetCount: number;
+  longTotalCount: number;
+  shortMetCount: number;
+  shortTotalCount: number;
   dataSource: 'oanda_mba' | 'yahoo_indicative';
 }
 

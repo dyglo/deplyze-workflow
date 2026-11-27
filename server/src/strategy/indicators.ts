@@ -3,7 +3,9 @@ import {
   type ConditionNode,
   type IndicatorDef,
   type PriceSource,
+  type RuleCheckItem,
   type StrategyCandle,
+  type StrategySpec,
   type StrategyTimeframe,
   type ValueRef
 } from './types.js';
@@ -831,4 +833,227 @@ export function countLeafConditions(node: ConditionNode | null | undefined): num
     return countLeafConditions(node.arg);
   }
   return 1;
+}
+
+const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function fmtIndicatorDef(ind: IndicatorDef): string {
+  const tfPrefix = ind.tf ? `${ind.tf} ` : '';
+  switch (ind.fn) {
+    case 'macd':
+      return `${tfPrefix}MACD(${ind.fast ?? 12},${ind.slow ?? 26},${ind.signal ?? 9})`;
+    case 'stoch':
+      return `${tfPrefix}Stoch(${ind.kPeriod ?? ind.period ?? 14},${ind.dPeriod ?? 3})`;
+    case 'bbands':
+      return `${tfPrefix}BB(${ind.period ?? 20},${ind.stdDev ?? ind.mult ?? 2})`;
+    case 'keltner':
+      return `${tfPrefix}Keltner(${ind.period ?? 20},${ind.mult ?? 1.5})`;
+    case 'session_vwap':
+      return `${tfPrefix}Session VWAP`;
+    case 'prev_day_high':
+      return 'Prev Day High';
+    case 'prev_day_low':
+      return 'Prev Day Low';
+    case 'prev_day_close':
+      return 'Prev Day Close';
+    default:
+      return `${tfPrefix}${ind.fn.toUpperCase()}(${ind.period ?? 14})`;
+  }
+}
+
+function fmtValueRef(ref: ValueRef, indLabels: Map<string, string>): string {
+  if (typeof ref === 'number') return String(ref);
+  const trimmed = String(ref).trim();
+  const lagMatch = trimmed.match(/^([a-zA-Z0-9_.-]+)\[(\d+)\]$/);
+  const base = lagMatch ? lagMatch[1] : trimmed;
+  const lagSuffix = lagMatch ? `[-${lagMatch[2]}]` : '';
+  const dotIdx = base.indexOf('.');
+  if (dotIdx > 0) {
+    const id = base.slice(0, dotIdx);
+    const sub = base.slice(dotIdx + 1);
+    const lbl = indLabels.get(id) ?? id;
+    return `${lbl}.${sub}${lagSuffix}`;
+  }
+  return `${indLabels.get(base) ?? base}${lagSuffix}`;
+}
+
+export function formatConditionNode(
+  node: ConditionNode | null | undefined,
+  indLabels: Map<string, string>
+): string {
+  if (!node) return 'None';
+  switch (node.op) {
+    case 'and':
+      return (node.args ?? []).map((a) => formatConditionNode(a, indLabels)).join(' AND ');
+    case 'or':
+      return `(${(node.args ?? []).map((a) => formatConditionNode(a, indLabels)).join(' OR ')})`;
+    case 'not':
+      return `NOT (${formatConditionNode(node.arg, indLabels)})`;
+    case 'gt':
+      return `${fmtValueRef(node.left, indLabels)} > ${fmtValueRef(node.right, indLabels)}`;
+    case 'gte':
+      return `${fmtValueRef(node.left, indLabels)} >= ${fmtValueRef(node.right, indLabels)}`;
+    case 'lt':
+      return `${fmtValueRef(node.left, indLabels)} < ${fmtValueRef(node.right, indLabels)}`;
+    case 'lte':
+      return `${fmtValueRef(node.left, indLabels)} <= ${fmtValueRef(node.right, indLabels)}`;
+    case 'crosses_above':
+      return `${fmtValueRef(node.left, indLabels)} crosses above ${fmtValueRef(node.right, indLabels)}`;
+    case 'crosses_below':
+      return `${fmtValueRef(node.left, indLabels)} crosses below ${fmtValueRef(node.right, indLabels)}`;
+    case 'between':
+      return `${fmtValueRef(node.value, indLabels)} between ${node.min} and ${node.max}`;
+    case 'rising':
+      return `${fmtValueRef(node.value, indLabels)} rising (${node.bars ?? 1}b)`;
+    case 'falling':
+      return `${fmtValueRef(node.value, indLabels)} falling (${node.bars ?? 1}b)`;
+    case 'session_utc':
+      return `UTC session ${String(node.startHour).padStart(2, '0')}:00–${String(node.endHour).padStart(2, '0')}:00`;
+    case 'day_of_week':
+      return `Days: ${(node.days ?? []).map((d) => DOW_SHORT[d] ?? d).join(', ')}`;
+    case 'spread_below_atr':
+      return `Spread <= ${(node.maxRatio ?? 0.25) * 100}% of ${fmtValueRef(node.atrId || '__atr14', indLabels)}`;
+    default:
+      return 'Rule';
+  }
+}
+
+/**
+ * Deterministically renders human-readable rules strictly from the actual executed StrategySpec AST.
+ * Prevents any drift between what the simulator ran and what the UI/AI claims ran.
+ */
+export function formatExecutedRulesFromSpec(spec: StrategySpec): string[] {
+  const indLabels = new Map<string, string>();
+  for (const ind of spec.indicators) {
+    indLabels.set(ind.id, fmtIndicatorDef(ind));
+  }
+
+  const rules: string[] = [];
+  rules.push(
+    `Instrument & Execution: ${spec.symbol} (${spec.interval}) · Direction: ${
+      spec.direction === 'both' ? 'Long & Short' : spec.direction === 'long' ? 'Long Only' : 'Short Only'
+    } · Next-bar open fill`
+  );
+
+  if (spec.direction !== 'short' && spec.entryLong) {
+    rules.push(`Long Entry: ${formatConditionNode(spec.entryLong, indLabels)}`);
+  }
+  if (spec.direction !== 'long' && spec.entryShort) {
+    rules.push(`Short Entry: ${formatConditionNode(spec.entryShort, indLabels)}`);
+  }
+  if (spec.exitLong) {
+    rules.push(`Long Signal Exit: ${formatConditionNode(spec.exitLong, indLabels)}`);
+  }
+  if (spec.exitShort) {
+    rules.push(`Short Signal Exit: ${formatConditionNode(spec.exitShort, indLabels)}`);
+  }
+
+  const sl = spec.risk.stopLoss;
+  const slTxt =
+    sl.type === 'atr_mult'
+      ? `${sl.mult ?? 1.5}x ${indLabels.get(sl.atrId || '') ?? 'ATR(14)'}`
+      : sl.type === 'pct'
+        ? `${sl.pct ?? 0.75}%`
+        : sl.type === 'pips'
+          ? `${sl.pips ?? 30} pips`
+          : `${sl.lookback ?? 10}-bar swing`;
+
+  const tp = spec.risk.takeProfit;
+  const tpTxt =
+    tp.type === 'rr_multiple'
+      ? `${tp.rr ?? 2.0}R`
+      : tp.type === 'atr_mult'
+        ? `${tp.mult ?? 3.0}x ${indLabels.get(tp.atrId || '') ?? 'ATR(14)'}`
+        : tp.type === 'pct'
+          ? `${tp.pct ?? 1.5}%`
+          : tp.type === 'pips'
+            ? `${tp.pips ?? 60} pips`
+            : 'None (signal/time exit)';
+
+  const trail = spec.risk.trailingStop;
+  const trailTxt =
+    trail && trail.type === 'breakeven_at_r'
+      ? ` · Breakeven @ +${trail.triggerR ?? 1.0}R`
+      : trail && trail.type === 'atr_mult'
+        ? ` · Trailing ${trail.mult ?? 2.0}x ATR`
+        : '';
+
+  const timeStopTxt = spec.risk.maxBarsInTrade ? ` · Time stop ${spec.risk.maxBarsInTrade} bars` : '';
+  rules.push(
+    `Risk & Brackets: ${spec.risk.riskPct}% equity risk · SL ${slTxt} · TP ${tpTxt}${trailTxt}${timeStopTxt}`
+  );
+
+  return rules;
+}
+
+function fmtNumBrief(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 1000) return v.toFixed(2);
+  if (abs >= 10) return v.toFixed(2);
+  if (abs >= 1) return v.toFixed(4);
+  return v.toFixed(5);
+}
+
+/**
+ * Evaluates each individual leaf condition of an AST on barIndex and returns
+ * a live rule-by-rule checklist with exact numeric values for the Live Bot Monitor.
+ */
+export function evaluateConditionChecklistAt(
+  node: ConditionNode | null | undefined,
+  barIndex: number,
+  bars: StrategyCandle[],
+  env: IndicatorEnv,
+  indicators: IndicatorDef[]
+): RuleCheckItem[] {
+  if (!node) return [];
+  const indLabels = new Map<string, string>();
+  for (const ind of indicators) indLabels.set(ind.id, fmtIndicatorDef(ind));
+
+  const items: RuleCheckItem[] = [];
+  const visit = (n: ConditionNode) => {
+    if (n.op === 'and') {
+      for (const a of n.args ?? []) visit(a);
+      return;
+    }
+    const label = formatConditionNode(n, indLabels);
+    const passed = evaluateConditionAt(n, barIndex, bars, env);
+    let detail = passed ? 'Condition met' : 'Not met';
+
+    if (
+      n.op === 'gt' ||
+      n.op === 'gte' ||
+      n.op === 'lt' ||
+      n.op === 'lte' ||
+      n.op === 'crosses_above' ||
+      n.op === 'crosses_below'
+    ) {
+      const l = resolveValueAt(n.left, barIndex, bars, env);
+      const r = resolveValueAt(n.right, barIndex, bars, env);
+      detail = `${fmtNumBrief(l)} vs ${fmtNumBrief(r)}`;
+    } else if (n.op === 'between') {
+      const v = resolveValueAt(n.value, barIndex, bars, env);
+      detail = `Now ${fmtNumBrief(v)} (target ${n.min}–${n.max})`;
+    } else if (n.op === 'rising' || n.op === 'falling') {
+      const lb = Math.max(1, Math.min(20, Math.round(n.bars ?? 1)));
+      const nowV = resolveValueAt(n.value, barIndex, bars, env);
+      const prevV = resolveValueAt(n.value, barIndex - lb, bars, env);
+      detail = `${fmtNumBrief(prevV)} → ${fmtNumBrief(nowV)}`;
+    } else if (n.op === 'session_utc') {
+      const hr = new Date(bars[barIndex].ts * 1000).getUTCHours();
+      detail = `Candle hour ${String(hr).padStart(2, '0')}:00 UTC`;
+    } else if (n.op === 'day_of_week') {
+      const dow = new Date(bars[barIndex].ts * 1000).getUTCDay();
+      detail = `Candle day ${DOW_SHORT[dow] ?? dow}`;
+    } else if (n.op === 'spread_below_atr') {
+      const atr = resolveValueAt(n.atrId || '__atr14', barIndex, bars, env);
+      const ratio = Number.isFinite(atr) && atr > 0 ? (bars[barIndex].spread / atr) * 100 : 0;
+      detail = `Spread is ${ratio.toFixed(1)}% of ATR`;
+    }
+
+    items.push({ label, passed, detail });
+  };
+
+  visit(node);
+  return items;
 }

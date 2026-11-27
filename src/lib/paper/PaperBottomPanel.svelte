@@ -507,18 +507,22 @@
       ></div>
     {/if}
 
-    <!-- Top Panel Chrome Bar (36px) — Sibling Strategy Tab + Paper Ledger Tab -->
+    <!-- Top Panel Chrome Bar (38px) — TradingView Flat Spaced Header -->
     <div class="pb-bar" class:has-tabs={Boolean(openStrategy)}>
       <div class="bar-left">
         {#if openStrategy}
           <div class="broker-anchor" data-st-tab-menu>
-            <div class="dock-tab" class:active={activeDockTab === 'strategy'}>
+            <div class="dock-item" class:active={activeDockTab === 'strategy'} class:expanded-mode={mode !== 'collapsed'}>
               <button
-                class="dock-tab-main"
+                class="dock-item-main"
                 type="button"
                 onclick={() => {
                   if (activeDockTab === 'strategy') {
-                    strategyMenuOpen = !strategyMenuOpen;
+                    if (mode === 'collapsed') {
+                      setDockModeUnified('expanded');
+                    } else {
+                      strategyMenuOpen = !strategyMenuOpen;
+                    }
                   } else {
                     setActiveDockTab('strategy');
                   }
@@ -579,6 +583,16 @@
                   Duplicate strategy
                 </button>
                 <button
+                  class="dm-item"
+                  type="button"
+                  onclick={() => {
+                    closeStrategyTab();
+                    strategyMenuOpen = false;
+                  }}
+                >
+                  Hide Strategy tab
+                </button>
+                <button
                   class="dm-item danger"
                   type="button"
                   onclick={() => {
@@ -591,6 +605,8 @@
               </div>
             {/if}
           </div>
+
+          <span class="pb-vsep" aria-hidden="true"></span>
         {/if}
 
         {#if ledger?.connected && account && metrics}
@@ -599,6 +615,7 @@
               class="broker-trigger"
               class:tab-mode={Boolean(openStrategy)}
               class:tab-active={Boolean(openStrategy) && activeDockTab === 'paper'}
+              class:expanded-mode={mode !== 'collapsed'}
               type="button"
               onclick={() => {
                 if (openStrategy && activeDockTab !== 'paper') {
@@ -751,11 +768,11 @@
           <button
             class="bot-live-pill"
             type="button"
-            title="{runningBotCount} strategy forward runner(s) active in Paper Ledger"
+            title="Open Live SIM Bot Monitor ({runningBotCount} running)"
             onclick={() => {
               const firstRunner = stratState?.runners.find((r) => r.status === 'running');
               if (firstRunner) {
-                openSavedStrategy(firstRunner.strategyId);
+                openSavedStrategy(firstRunner.strategyId, 'live');
               }
             }}
           >
@@ -818,8 +835,10 @@
           isRunning={stratRunStatus.running}
           runError={stratRunStatus.error}
           runner={activeStrategyRunner}
+          preferredViewMode={stratState?.preferredViewMode ?? 'report'}
           pendingSignals={stratState?.pendingSignals ?? []}
           paperAccounts={ledger?.accounts ?? []}
+          paperQuotes={quotes}
           {onSelectSymbol}
           onSwitchToPaperAccount={(accountId) => {
             switchPaperAccount(accountId);
@@ -1977,7 +1996,7 @@
   }
 
   .paper-bottom.collapsed {
-    height: 36px;
+    height: 38px;
   }
 
   .paper-bottom.fullscreen {
@@ -2008,13 +2027,13 @@
   }
 
   .pb-bar {
-    height: 36px;
-    flex: 0 0 36px;
-    padding: 0 10px 0 12px;
+    height: 38px;
+    flex: 0 0 38px;
+    padding: 0 14px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: 12px;
   }
 
   .bar-left,
@@ -3018,61 +3037,92 @@
     color: #131722;
   }
 
-  /* ── Sibling Dock Tabs (Strategy Tester + Paper Ledger — Image 3) ──────── */
+  /* ── Clean TradingView-Style Flat Bottom Bar Items (Zero Tab Boxes) ─────── */
   .pb-bar.has-tabs {
     border-bottom: 1px solid var(--dark-border-subtle);
+  }
+
+  .paper-bottom.collapsed .pb-bar.has-tabs {
+    border-bottom: 0;
   }
 
   .paper-bottom.light .pb-bar.has-tabs {
     border-bottom-color: #eceff4;
   }
 
-  .dock-tab {
-    height: 30px;
-    border-radius: 7px 7px 0 0;
+  .pb-vsep {
+    width: 1px;
+    height: 16px;
+    background: var(--dark-border);
+    margin: 0 2px;
+    flex: 0 0 1px;
+  }
+
+  .paper-bottom.light .pb-vsep {
+    background: #e0e3eb;
+  }
+
+  .dock-item {
+    position: relative;
+    height: 38px;
     display: inline-flex;
     align-items: center;
-    padding: 0 3px 0 2px;
     gap: 2px;
-    border: 1px solid transparent;
-    border-bottom: 0;
   }
 
-  .dock-tab.active {
-    background: var(--dark-bg-surface);
-    border-color: var(--dark-border-subtle);
+  .dock-item.active.expanded-mode::after {
+    content: '';
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 0;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--dark-text-strong);
   }
 
-  .paper-bottom.light .dock-tab.active {
-    background: #ffffff;
-    border-color: #e0e3eb;
+  .paper-bottom.light .dock-item.active.expanded-mode::after {
+    background: #131722;
   }
 
-  .dock-tab-main {
+  .dock-item-main {
     height: 28px;
-    padding: 0 6px;
+    padding: 0 8px;
     border: 0;
+    border-radius: 6px;
     background: transparent;
     color: var(--dark-text-secondary);
     font-family: inherit;
-    font-size: 12.5px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 500;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     cursor: pointer;
-    max-width: 240px;
+    max-width: 250px;
+    transition: background-color 120ms ease, color 120ms ease;
   }
 
-  .dock-tab.active .dock-tab-main {
+  .dock-item-main:hover {
+    background: var(--dark-hover-strong);
     color: var(--dark-text-strong);
   }
 
-  .paper-bottom.light .dock-tab.active .dock-tab-main {
+  .paper-bottom.light .dock-item-main:hover {
+    background: #f0f2f6;
     color: #131722;
   }
 
-  .dock-tab-main .broker-title {
+  .dock-item.active .dock-item-main {
+    color: var(--dark-text-strong);
+    font-weight: 600;
+  }
+
+  .paper-bottom.light .dock-item.active .dock-item-main {
+    color: #131722;
+  }
+
+  .dock-item-main .broker-title {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3093,7 +3143,7 @@
     width: 20px;
     height: 20px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 5px;
     background: transparent;
     color: var(--dark-text-secondary);
     font-size: 14px;
@@ -3101,31 +3151,56 @@
     cursor: pointer;
     display: grid;
     place-items: center;
+    opacity: 0;
+    transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+  }
+
+  .dock-item:hover .dock-tab-close,
+  .dock-tab-close:focus-visible {
+    opacity: 0.8;
   }
 
   .dock-tab-close:hover {
+    opacity: 1;
     background: var(--dark-hover-strong);
     color: var(--dark-text-strong);
   }
 
   .broker-trigger.tab-mode {
-    height: 30px;
-    border-radius: 7px 7px 0 0;
-    border: 1px solid transparent;
-    border-bottom: 0;
+    position: relative;
+    height: 38px;
+    padding: 0 8px;
+    border-radius: 6px;
     color: var(--dark-text-secondary);
+    font-weight: 500;
   }
 
-  .broker-trigger.tab-mode.tab-active {
-    background: var(--dark-bg-surface);
-    border-color: var(--dark-border-subtle);
+  .broker-trigger.tab-mode:hover {
     color: var(--dark-text-strong);
   }
 
+  .broker-trigger.tab-mode.tab-active {
+    color: var(--dark-text-strong);
+    font-weight: 600;
+  }
+
+  .broker-trigger.tab-mode.tab-active.expanded-mode::after {
+    content: '';
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 0;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--dark-text-strong);
+  }
+
   .paper-bottom.light .broker-trigger.tab-mode.tab-active {
-    background: #ffffff;
-    border-color: #e0e3eb;
     color: #131722;
+  }
+
+  .paper-bottom.light .broker-trigger.tab-mode.tab-active.expanded-mode::after {
+    background: #131722;
   }
 
   .dm-lbl {

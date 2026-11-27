@@ -2,6 +2,8 @@ import {
   computeIndicatorEnv,
   countLeafConditions,
   evaluateConditionAt,
+  evaluateConditionChecklistAt,
+  formatExecutedRulesFromSpec,
   resolveValueAt,
   type IndicatorEnv
 } from './indicators.js';
@@ -16,6 +18,7 @@ import {
 } from './instruments.js';
 import {
   normalizeStrategyTimeframe,
+  timeframeToSeconds,
   type BacktestReport,
   type BacktestTrade,
   type ConditionNode,
@@ -35,7 +38,9 @@ import {
   type StrategyVerdict,
   type StreakDistRow,
   type TimePatternRow,
-  type TradeExitReason
+  type TradeExitReason,
+  type WalkForwardFold,
+  type WalkForwardSummary
 } from './types.js';
 
 const VALID_INDICATOR_FNS = new Set<IndicatorFn>([
@@ -842,9 +847,13 @@ function buildReturnsHistogram(returnsPct: number[]): ReturnBucketRow[] {
 export function classifyStrategyVerdict(
   all: SegmentMetrics,
   isSeg: SegmentMetrics,
-  oosSeg: SegmentMetrics
+  oosSeg: SegmentMetrics,
+  walkForward?: WalkForwardSummary
 ): StrategyVerdict {
   const reasons: string[] = [];
+  if (walkForward) {
+    reasons.push(`3-Fold Regime Stability: ${walkForward.label}.`);
+  }
 
   if (all.totalTrades === 0) {
     return {
@@ -1288,6 +1297,13 @@ export function runStrategyBacktest(
   const allMetrics = buildSegmentMetrics(trades, tradableBars, spec.risk.initialCapital);
   const isMetrics = buildSegmentMetrics(isTrades, isBars, spec.risk.initialCapital);
   const oosMetrics = buildSegmentMetrics(oosTrades, oosBars, spec.risk.initialCapital);
+  const executedRules = formatExecutedRulesFromSpec(spec);
+  const specWithExactRules: StrategySpec = { ...spec, ruleSummary: executedRules };
+
+  // 3-Fold Chronological Regime / Walk-Forward Robustness Check
+  const walkForward = opts.inSampleOnly
+    ? undefined
+    : computeThreeFoldWalkForward(trades, tradableBars, spec.risk.initialCapital);
 
   const verdict = opts.inSampleOnly
     ? {
@@ -1296,10 +1312,11 @@ export function runStrategyBacktest(
         summary: 'In-Sample evaluation only (Out-of-Sample vault untouched).',
         reasons: []
       }
-    : classifyStrategyVerdict(allMetrics, isMetrics, oosMetrics);
+    : classifyStrategyVerdict(allMetrics, isMetrics, oosMetrics, walkForward);
 
   return {
-    spec,
+    spec: specWithExactRules,
+    executedRules,
     dataSource: history.dataSource,
     dataQualityNote: history.dataQualityNote,
     barsTotal: n,
@@ -1311,10 +1328,86 @@ export function runStrategyBacktest(
     all: allMetrics,
     inSample: isMetrics,
     outOfSample: oosMetrics,
+    walkForward,
     trades,
     verdict,
     iterations: opts.iterations ?? [],
     computedAt: new Date().toISOString()
+  };
+}
+
+function computeThreeFoldWalkForward(
+  trades: BacktestTrade[],
+  tradableBars: StrategyCandle[],
+  initialCapital: number
+): WalkForwardSummary | undefined {
+  if (tradableBars.length < 90) return undefined;
+  const total = tradableBars.length;
+  const cut1 = Math.floor(total / 3);
+  const cut2 = Math.floor((total * 2) / 3);
+  const slices = [
+    { fold: 1, label: 'Fold 1 (Early Regime)', bars: tradableBars.slice(0, cut1) },
+    { fold: 2, label: 'Fold 2 (Mid Regime)', bars: tradableBars.slice(cut1, cut2) },
+    { fold: 3, label: 'Fold 3 (Recent OOS Regime)', bars: tradableBars.slice(cut2) }
+  ];
+
+  const folds: WalkForwardFold[] = [];
+  let passingFolds = 0;
+  let pfSum = 0;
+  let pfCount = 0;
+  let combinedPnlUsd = 0;
+
+  for (const sl of slices) {
+    if (sl.bars.length < 2) continue;
+    const fStart = sl.bars[0].ts;
+    const fEnd = sl.bars[sl.bars.length - 1].closeTs;
+    const foldTrades = trades.filter((t) => t.entryTs >= fStart && t.entryTs < fEnd);
+    const seg = buildSegmentMetrics(foldTrades, sl.bars, initialCapital);
+    const passed = seg.totalTrades >= 5 && seg.totalPnlUsd > 0 && (seg.profitFactor ?? 0) >= 1.05;
+    if (passed) passingFolds++;
+    if (seg.profitFactor !== null && seg.totalTrades > 0) {
+      pfSum += Math.min(5, seg.profitFactor);
+      pfCount++;
+    }
+    combinedPnlUsd += seg.totalPnlUsd;
+
+    folds.push({
+      fold: sl.fold,
+      label: sl.label,
+      fromTs: fStart,
+      toTs: fEnd,
+      trades: seg.totalTrades,
+      wins: seg.winningTrades,
+      winRatePct: seg.winRatePct,
+      netPnlUsd: seg.totalPnlUsd,
+      netPnlPct: seg.totalPnlPct,
+      profitFactor: seg.profitFactor,
+      maxDrawdownPct: seg.maxDrawdownPct,
+      buyAndHoldPct: seg.buyAndHoldPct,
+      passed
+    });
+  }
+
+  const totalFolds = folds.length;
+  const consistencyPct = totalFolds > 0 ? round2((passingFolds / totalFolds) * 100) : 0;
+  const label =
+    passingFolds === 3
+      ? 'Robust (3/3 Regimes Passed)'
+      : passingFolds === 2
+        ? 'Moderate (2/3 Regimes Passed)'
+        : passingFolds === 1
+          ? 'Regime-Dependent (1/3 Passed)'
+          : 'Failed All Regimes (0/3)';
+
+  return {
+    folds,
+    passingFolds,
+    totalFolds,
+    avgProfitFactor: pfCount > 0 ? round2(pfSum / pfCount) : null,
+    combinedPnlUsd: round2(combinedPnlUsd),
+    combinedPnlPct: round2((combinedPnlUsd / Math.max(100, initialCapital)) * 100),
+    consistencyPct,
+    label
   };
 }
 
@@ -1383,12 +1476,30 @@ export function evaluateLiveStrategySignal(
     }
   }
 
+  const longRules =
+    spec.direction !== 'short'
+      ? evaluateConditionChecklistAt(spec.entryLong, idx, bars, env, spec.indicators)
+      : [];
+  const shortRules =
+    spec.direction !== 'long'
+      ? evaluateConditionChecklistAt(spec.entryShort, idx, bars, env, spec.indicators)
+      : [];
+  const longMetCount = longRules.filter((r) => r.passed).length;
+  const shortMetCount = shortRules.filter((r) => r.passed).length;
+  const barSec = timeframeToSeconds(spec.interval);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const nextBarCloseTs =
+    bar.closeTs + barSec > nowSec
+      ? bar.closeTs + barSec
+      : (Math.floor(nowSec / barSec) + 1) * barSec;
+
   return {
     symbol: spec.symbol,
     shortName: spec.shortName,
     interval: spec.interval,
     barTs: bar.ts,
     barCloseTs: bar.closeTs,
+    nextBarCloseTs,
     closePrice: bar.close,
     bidPrice: bar.bidC,
     askPrice: bar.askC,
@@ -1398,6 +1509,12 @@ export function evaluateLiveStrategySignal(
     suggestedTakeProfit,
     suggestedQty,
     reason,
+    longRules,
+    shortRules,
+    longMetCount,
+    longTotalCount: longRules.length,
+    shortMetCount,
+    shortTotalCount: shortRules.length,
     dataSource: history.dataSource
   };
 }

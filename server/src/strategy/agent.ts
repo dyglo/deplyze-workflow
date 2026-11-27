@@ -619,14 +619,15 @@ MANDATORY HONESTY RULES:
 1. NEVER sugarcoat losing, overfit, or low-sample results. Concluding "This strategy does NOT have a reliable edge" is a FIRST-CLASS, HIGH-VALUE answer when warranted.
 2. ALWAYS show the exact trade count alongside every performance metric (both In-Sample and Out-of-Sample).
 3. ALWAYS present a compact Markdown comparison table: \`| Segment | Trades | Win Rate | Net PnL | Profit Factor | Max DD | Spread+Slippage |\`.
-4. Highlight:
+4. STRICT RULE ACCURACY: Describe ONLY the exact rules listed in \`strategy.executedRules\` (auto-generated from the executed JSON AST). NEVER mention a filter (such as session hours or an indicator) that is NOT present in \`strategy.executedRules\`.
+5. Highlight:
    - **Verdict** (matching the engine verdict honestly: Viable Candidate / Marginal / Low Sample / Overfit / No Viable Edge)
-   - **Strategy Rules** (concise plain-English summary of entry, exit, SL/TP, timeframe, symbol)
-   - **In-Sample vs Out-of-Sample Breakdown** (explicitly call out whether OOS held up or degraded)
+   - **Executed Rules** (strictly matching \`strategy.executedRules\`)
+   - **In-Sample vs Out-of-Sample & 3-Fold Walk-Forward Breakdown** (explicitly call out whether OOS held up across regimes or degraded)
    - **Cost & Realism Audit** (exact real OANDA Bid/Ask spread + slippage drag and whether it crushed gross alpha)
    - **Iteration Trail** (if v1 -> v2/v3 happened, briefly note what changed on IS and whether it helped)
    - **Next Step** (if viable, suggest testing live in Paper Ledger via the "Forward in Paper" button; if rejected/overfit, clearly advise NOT trading it and explain why).
-5. Keep it crisp, scannable, and institutional — no filler intros.`;
+6. Keep it crisp, scannable, and institutional — no filler intros.`;
 
   const reportPayload = {
     verdict: finalReport.verdict,
@@ -639,8 +640,9 @@ MANDATORY HONESTY RULES:
       riskPct: finalReport.spec.risk.riskPct,
       stopLoss: finalReport.spec.risk.stopLoss,
       takeProfit: finalReport.spec.risk.takeProfit,
-      ruleSummary: finalReport.spec.ruleSummary
+      executedRules: finalReport.executedRules
     },
+    walkForward: finalReport.walkForward,
     data: {
       source: finalReport.dataSource,
       note: finalReport.dataQualityNote,

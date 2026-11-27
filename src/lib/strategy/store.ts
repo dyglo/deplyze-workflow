@@ -19,6 +19,7 @@ import {
 } from '../workspace/storage';
 import type {
   BacktestReport,
+  BotEvalLogEntry,
   ForwardExecutionMode,
   ForwardRunnerConfig,
   LiveStrategyEvaluation,
@@ -201,7 +202,10 @@ export function openStrategyFromAi(report: BacktestReport): SavedStrategyRecord 
   return record;
 }
 
-export function openSavedStrategy(strategyId: string): void {
+export function openSavedStrategy(
+  strategyId: string,
+  viewMode: 'report' | 'trades' | 'live' = 'report'
+): void {
   if (!state.strategies.some((s) => s.id === strategyId)) return;
   const nextHeight = Math.max(360, state.dockHeight);
   commit(
@@ -209,6 +213,7 @@ export function openSavedStrategy(strategyId: string): void {
       ...state,
       openStrategyId: strategyId,
       activeDockTab: 'strategy',
+      preferredViewMode: viewMode,
       dockMode: state.dockMode === 'fullscreen' ? 'fullscreen' : 'expanded',
       dockHeight: nextHeight
     },
@@ -217,6 +222,10 @@ export function openSavedStrategy(strategyId: string): void {
   if (getPaperSnapshot().connected && getPaperSnapshot().bottomMode === 'collapsed') {
     setPaperBottomMode('expanded');
   }
+}
+
+export function setPreferredStrategyView(viewMode: 'report' | 'trades' | 'live'): void {
+  commit({ ...state, preferredViewMode: viewMode });
 }
 
 export function closeStrategyTab(): void {
@@ -469,10 +478,14 @@ export function deployStrategyToPaper(
   commit(
     {
       ...state,
+      preferredViewMode: 'live',
       runners: [runner, ...state.runners.filter((r) => r.id !== runner.id)]
     },
     true
   );
+
+  // Immediately run an evaluation snapshot so Live Bot Monitor populates with real candle telemetry within ~1s
+  void checkForwardRunnerNow(runner.id);
 
   return { ok: true, runner };
 }
@@ -592,6 +605,204 @@ export function dismissPendingSignal(signalId: string): void {
   );
 }
 
+function buildEvalSummaryText(ev: LiveStrategyEvaluation): string {
+  if (ev.signal !== 'none') return ev.reason;
+  const parts: string[] = [];
+  if ((ev.longTotalCount ?? 0) > 0) {
+    parts.push(`Long ${ev.longMetCount ?? 0}/${ev.longTotalCount}`);
+  }
+  if ((ev.shortTotalCount ?? 0) > 0) {
+    parts.push(`Short ${ev.shortMetCount ?? 0}/${ev.shortTotalCount}`);
+  }
+  return parts.length > 0 ? `Waiting (${parts.join(' · ')} rules met)` : 'Waiting for signal';
+}
+
+async function evaluateSingleRunner(runner: ForwardRunnerConfig, allowExecution: boolean): Promise<void> {
+  const strat = state.strategies.find((s) => s.id === runner.strategyId);
+  const acc = getPaperAccountById(runner.accountId);
+  if (!strat || !acc) return;
+
+  const today = todayUtcDate();
+  const metrics = computeAccountMetrics(acc, getPaperLiveQuotesSnapshot());
+  let dayStartEq = runner.dayStartEquityUsd;
+  let dayAnchor = runner.dayAnchorDate;
+  if (dayAnchor !== today) {
+    dayAnchor = today;
+    dayStartEq = metrics.equity;
+  }
+
+  // Hard Daily Loss Circuit Breaker
+  if (allowExecution) {
+    const dailyLossPct =
+      dayStartEq > 0 ? Math.max(0, ((dayStartEq - metrics.equity) / dayStartEq) * 100) : 0;
+    if (dailyLossPct >= runner.maxDailyLossPct) {
+      pauseForwardRunner(
+        runner.id,
+        `Daily loss limit reached (-${dailyLossPct.toFixed(2)}% >= ${runner.maxDailyLossPct}%)`
+      );
+      return;
+    }
+  }
+
+  const openPos = acc.positions.find(
+    (p) => normalizeSymbolKey(p.symbol) === normalizeSymbolKey(runner.symbol)
+  );
+
+  let evalRes: LiveStrategyEvaluation | null = null;
+  try {
+    const resp = await fetch(`${getApiBaseUrl()}/api/strategy/evaluate-live`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        spec: strat.report.spec,
+        accountEquityUsd: metrics.equity,
+        currentPositionSide: openPos ? openPos.side : null
+      })
+    });
+    if (!resp.ok) return;
+    const json = (await resp.json()) as { evaluation?: LiveStrategyEvaluation };
+    evalRes = json.evaluation ?? null;
+  } catch {
+    return;
+  }
+
+  if (!evalRes) return;
+  const nowIso = new Date().toISOString();
+  const isNewBar = evalRes.barTs > runner.lastEvaluatedBarTs;
+  const evalSummary = buildEvalSummaryText(evalRes);
+
+  const prevLog = runner.evalLog ?? [];
+  const shouldAppendLog =
+    isNewBar || prevLog.length === 0 || prevLog[0].barTs !== evalRes.barTs;
+  const nextLog: BotEvalLogEntry[] = shouldAppendLog
+    ? [
+        {
+          ts: nowIso,
+          barTs: evalRes.barTs,
+          closePrice: evalRes.closePrice,
+          spreadPx: evalRes.spreadPx,
+          signal: evalRes.signal,
+          summary: evalSummary
+        },
+        ...prevLog
+      ].slice(0, 18)
+    : prevLog;
+
+  // Strictly evaluate execution AT MOST ONCE per closed bar
+  if (!isNewBar || !allowExecution) {
+    commit({
+      ...state,
+      runners: state.runners.map((x) =>
+        x.id === runner.id
+          ? {
+              ...x,
+              dayAnchorDate: dayAnchor,
+              dayStartEquityUsd: dayStartEq,
+              lastCheckedAt: nowIso,
+              lastEvaluation: evalRes!,
+              evalLog: nextLog
+            }
+          : x
+      )
+    });
+    return;
+  }
+
+  // Guard against stale offline signals (> 1.5 bars late)
+  const nowSec = Math.floor(Date.now() / 1000);
+  const tfSec = timeframeSeconds(runner.interval);
+  const isStale = nowSec - evalRes.barCloseTs > Math.max(300, tfSec * 1.5);
+
+  let firedIncrement = 0;
+  let nextPending = state.pendingSignals;
+
+  if (evalRes.signal !== 'none') {
+    if (isStale) {
+      logStrategyActivityOnAccount(
+        runner.accountId,
+        runner.symbol,
+        `[BOT: ${runner.strategyName}] Skipped stale offline ${evalRes.signal} signal from closed candle.`
+      );
+    } else if (runner.executionMode === 'auto') {
+      firedIncrement = 1;
+      if (evalRes.signal === 'enter_long' || evalRes.signal === 'enter_short') {
+        if (!openPos && evalRes.suggestedQty && evalRes.suggestedQty > 0) {
+          executeStrategyOrderOnAccount(runner.accountId, {
+            symbol: runner.symbol,
+            shortName: runner.shortName,
+            side: evalRes.signal === 'enter_long' ? 'buy' : 'sell',
+            quantity: evalRes.suggestedQty,
+            fillPrice: evalRes.signal === 'enter_long' ? evalRes.askPrice : evalRes.bidPrice,
+            takeProfit: evalRes.suggestedTakeProfit,
+            stopLoss: evalRes.suggestedStopLoss,
+            strategyName: runner.strategyName
+          });
+        }
+      } else if (openPos) {
+        closeStrategyPositionOnAccount(
+          runner.accountId,
+          runner.symbol,
+          openPos.side === 'long' ? evalRes.bidPrice : evalRes.askPrice,
+          runner.strategyName
+        );
+      }
+    } else {
+      firedIncrement = 1;
+      const pending: PendingStrategySignal = {
+        id: makeWorkspaceId('sig'),
+        runnerId: runner.id,
+        strategyId: runner.strategyId,
+        strategyName: runner.strategyName,
+        accountId: runner.accountId,
+        accountName: runner.accountName,
+        symbol: runner.symbol,
+        shortName: runner.shortName,
+        interval: runner.interval,
+        barTs: evalRes.barTs,
+        signal: evalRes.signal,
+        price:
+          evalRes.signal === 'enter_long' || evalRes.signal === 'exit_short'
+            ? evalRes.askPrice
+            : evalRes.bidPrice,
+        stopLoss: evalRes.suggestedStopLoss,
+        takeProfit: evalRes.suggestedTakeProfit,
+        quantity: evalRes.suggestedQty ?? openPos?.quantity ?? 1,
+        reason: evalRes.reason,
+        createdAt: nowIso
+      };
+      nextPending = [pending, ...nextPending].slice(0, 12);
+    }
+  }
+
+  commit(
+    {
+      ...state,
+      pendingSignals: nextPending,
+      runners: state.runners.map((x) =>
+        x.id === runner.id
+          ? {
+              ...x,
+              dayAnchorDate: dayAnchor,
+              dayStartEquityUsd: dayStartEq,
+              lastEvaluatedBarTs: evalRes!.barTs,
+              lastCheckedAt: nowIso,
+              signalsFired: x.signalsFired + firedIncrement,
+              lastEvaluation: evalRes!,
+              evalLog: nextLog
+            }
+          : x
+      )
+    },
+    true
+  );
+}
+
+export async function checkForwardRunnerNow(runnerId: string): Promise<void> {
+  const runner = state.runners.find((r) => r.id === runnerId);
+  if (!runner) return;
+  await evaluateSingleRunner(runner, runner.status === 'running');
+}
+
 async function tickForwardRunners(): Promise<void> {
   if (runnerInFlight) return;
   const activeRunners = state.runners.filter((r) => r.status === 'running');
@@ -599,155 +810,8 @@ async function tickForwardRunners(): Promise<void> {
 
   runnerInFlight = true;
   try {
-    const today = todayUtcDate();
     for (const runner of activeRunners) {
-      const strat = state.strategies.find((s) => s.id === runner.strategyId);
-      const acc = getPaperAccountById(runner.accountId);
-      if (!strat || !acc) continue;
-
-      const metrics = computeAccountMetrics(acc, getPaperLiveQuotesSnapshot());
-      let dayStartEq = runner.dayStartEquityUsd;
-      let dayAnchor = runner.dayAnchorDate;
-      if (dayAnchor !== today) {
-        dayAnchor = today;
-        dayStartEq = metrics.equity;
-      }
-
-      // Hard Daily Loss Circuit Breaker
-      const dailyLossPct =
-        dayStartEq > 0 ? Math.max(0, ((dayStartEq - metrics.equity) / dayStartEq) * 100) : 0;
-      if (dailyLossPct >= runner.maxDailyLossPct) {
-        pauseForwardRunner(
-          runner.id,
-          `Daily loss limit reached (-${dailyLossPct.toFixed(2)}% >= ${runner.maxDailyLossPct}%)`
-        );
-        continue;
-      }
-
-      const openPos = acc.positions.find(
-        (p) => normalizeSymbolKey(p.symbol) === normalizeSymbolKey(runner.symbol)
-      );
-
-      let evalRes: LiveStrategyEvaluation | null = null;
-      try {
-        const resp = await fetch(`${getApiBaseUrl()}/api/strategy/evaluate-live`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            spec: strat.report.spec,
-            accountEquityUsd: metrics.equity,
-            currentPositionSide: openPos ? openPos.side : null
-          })
-        });
-        if (!resp.ok) continue;
-        const json = (await resp.json()) as { evaluation?: LiveStrategyEvaluation };
-        evalRes = json.evaluation ?? null;
-      } catch {
-        continue;
-      }
-
-      if (!evalRes) continue;
-      const nowIso = new Date().toISOString();
-
-      // Strictly evaluate each closed bar AT MOST ONCE
-      if (evalRes.barTs <= runner.lastEvaluatedBarTs) {
-        commit({
-          ...state,
-          runners: state.runners.map((x) =>
-            x.id === runner.id
-              ? { ...x, dayAnchorDate: dayAnchor, dayStartEquityUsd: dayStartEq, lastCheckedAt: nowIso }
-              : x
-          )
-        });
-        continue;
-      }
-
-      // Guard against stale offline signals (> 1.5 bars late)
-      const nowSec = Math.floor(Date.now() / 1000);
-      const tfSec = timeframeSeconds(runner.interval);
-      const isStale = nowSec - evalRes.barCloseTs > Math.max(300, tfSec * 1.5);
-
-      let firedIncrement = 0;
-      let nextPending = state.pendingSignals;
-
-      if (evalRes.signal !== 'none') {
-        if (isStale) {
-          logStrategyActivityOnAccount(
-            runner.accountId,
-            runner.symbol,
-            `[BOT: ${runner.strategyName}] Skipped stale offline ${evalRes.signal} signal from closed candle.`
-          );
-        } else if (runner.executionMode === 'auto') {
-          firedIncrement = 1;
-          if (evalRes.signal === 'enter_long' || evalRes.signal === 'enter_short') {
-            if (!openPos && evalRes.suggestedQty && evalRes.suggestedQty > 0) {
-              executeStrategyOrderOnAccount(runner.accountId, {
-                symbol: runner.symbol,
-                shortName: runner.shortName,
-                side: evalRes.signal === 'enter_long' ? 'buy' : 'sell',
-                quantity: evalRes.suggestedQty,
-                fillPrice: evalRes.signal === 'enter_long' ? evalRes.askPrice : evalRes.bidPrice,
-                takeProfit: evalRes.suggestedTakeProfit,
-                stopLoss: evalRes.suggestedStopLoss,
-                strategyName: runner.strategyName
-              });
-            }
-          } else if (openPos) {
-            closeStrategyPositionOnAccount(
-              runner.accountId,
-              runner.symbol,
-              openPos.side === 'long' ? evalRes.bidPrice : evalRes.askPrice,
-              runner.strategyName
-            );
-          }
-        } else {
-          // Signal Confirm mode -> queue actionable confirmation banner
-          firedIncrement = 1;
-          const pending: PendingStrategySignal = {
-            id: makeWorkspaceId('sig'),
-            runnerId: runner.id,
-            strategyId: runner.strategyId,
-            strategyName: runner.strategyName,
-            accountId: runner.accountId,
-            accountName: runner.accountName,
-            symbol: runner.symbol,
-            shortName: runner.shortName,
-            interval: runner.interval,
-            barTs: evalRes.barTs,
-            signal: evalRes.signal,
-            price:
-              evalRes.signal === 'enter_long' || evalRes.signal === 'exit_short'
-                ? evalRes.askPrice
-                : evalRes.bidPrice,
-            stopLoss: evalRes.suggestedStopLoss,
-            takeProfit: evalRes.suggestedTakeProfit,
-            quantity: evalRes.suggestedQty ?? openPos?.quantity ?? 1,
-            reason: evalRes.reason,
-            createdAt: nowIso
-          };
-          nextPending = [pending, ...nextPending].slice(0, 12);
-        }
-      }
-
-      commit(
-        {
-          ...state,
-          pendingSignals: nextPending,
-          runners: state.runners.map((x) =>
-            x.id === runner.id
-              ? {
-                  ...x,
-                  dayAnchorDate: dayAnchor,
-                  dayStartEquityUsd: dayStartEq,
-                  lastEvaluatedBarTs: evalRes!.barTs,
-                  lastCheckedAt: nowIso,
-                  signalsFired: x.signalsFired + firedIncrement
-                }
-              : x
-          )
-        },
-        true
-      );
+      await evaluateSingleRunner(runner, true);
     }
   } finally {
     runnerInFlight = false;
