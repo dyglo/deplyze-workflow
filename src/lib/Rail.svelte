@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { PendingRangeAnalysisRequest } from './ai/types';
   import AiPanel from './panels/AiPanel.svelte';
   import AlertsPanel from './panels/AlertsPanel.svelte';
   import CalendarPanel from './panels/CalendarPanel.svelte';
@@ -51,6 +52,8 @@
     screenerFullscreen?: boolean;
     onToggleScreenerFullscreen?: () => void;
     onCloseScreenerFullscreen?: () => void;
+    pendingRangeAnalysis?: PendingRangeAnalysisRequest | null;
+    onConsumePendingRangeAnalysis?: () => void;
   }
 
   let {
@@ -75,7 +78,9 @@
     onSelectInsightsSymbol,
     screenerFullscreen = false,
     onToggleScreenerFullscreen,
-    onCloseScreenerFullscreen
+    onCloseScreenerFullscreen,
+    pendingRangeAnalysis = null,
+    onConsumePendingRangeAnalysis
   }: Props = $props();
 
   type RailId =
@@ -137,6 +142,18 @@
   let radarTopSetupLabel = $state<string | null>(null);
 
   const activeLayoutDef = $derived(getLayoutById(layoutId));
+
+  // Auto-open AI Copilot side-by-side whenever a chart range analysis request arrives
+  $effect(() => {
+    if (pendingRangeAnalysis) {
+      layoutAnchor = null;
+      onCloseScreenerFullscreen?.();
+      if (active !== 'ai') {
+        active = 'ai';
+        persistRail('ai');
+      }
+    }
+  });
 
   function persistRail(next: RailId | null) {
     if (typeof localStorage !== 'undefined') {
@@ -307,6 +324,8 @@
     {activeInterval}
     {activePrice}
     {activeChangePercent}
+    {pendingRangeAnalysis}
+    {onConsumePendingRangeAnalysis}
     onClose={closePanel}
   />
 {:else if active === 'alerts'}

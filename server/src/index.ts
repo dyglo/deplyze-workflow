@@ -4,7 +4,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AI_MODELS,
+  calibrateChartTimeAxis,
   checkRateLimit,
+  getRangeBarsPreviewPayload,
   isDeepSeekConfigured,
   isTavilyConfigured,
   streamAiChat,
@@ -158,7 +160,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       {
         status: 'ok',
         service: 'deplyzeworkflow-api',
-        version: '0.1.22',
+        version: '0.1.23',
         fredConfigured: Boolean(process.env.FRED_API_KEY),
         deepseekConfigured: isDeepSeekConfigured(),
         tavilyConfigured: isTavilyConfigured(),
@@ -174,7 +176,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'DeplyzeWorkflow API',
-      version: '0.1.22',
+      version: '0.1.23',
       endpoints: [
         'GET /health',
         'GET /api/calendar/week?start=YYYY-MM-DD&tz=Africa/Nairobi',
@@ -198,6 +200,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         'GET /api/insights/event?title=Consumer%20Price%20Index%20YoY&country=US',
         'POST /api/insights/edge-audit',
         'GET /api/ai/models',
+        'GET /api/ai/range-bars?symbol=OANDA:XAUUSD&interval=15m&count=1200',
+        'POST /api/ai/calibrate-axis',
         'POST /api/ai/chat',
         'POST /api/strategy/backtest',
         'POST /api/strategy/evaluate-live'
@@ -481,6 +485,53 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       },
       'no-store'
     );
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/ai/range-bars') {
+    const rawSym = (url.searchParams.get('symbol') ?? '').trim();
+    if (!rawSym) {
+      sendJson(res, 400, { error: 'Missing symbol query parameter' }, 'no-store');
+      return;
+    }
+    const interval = url.searchParams.get('interval');
+    const rawCount = url.searchParams.get('count');
+    const parsedCount = rawCount ? Number(rawCount) : null;
+    const payload = await getRangeBarsPreviewPayload(
+      rawSym,
+      interval,
+      parsedCount != null && Number.isFinite(parsedCount) ? parsedCount : null
+    );
+    sendJson(res, 200, payload, 'public, max-age=20');
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/ai/calibrate-axis') {
+    let body: {
+      image?: string;
+      symbol?: string;
+      interval?: string;
+      timezone?: string;
+      referenceIso?: string;
+    };
+    try {
+      body = await readJsonBody<typeof body>(req, 2 * 1024 * 1024);
+    } catch (err) {
+      sendJson(res, 400, { error: (err as Error).message }, 'no-store');
+      return;
+    }
+    if (!body.image) {
+      sendJson(res, 400, { error: 'Missing image payload' }, 'no-store');
+      return;
+    }
+    const result = await calibrateChartTimeAxis({
+      image: body.image,
+      symbol: body.symbol,
+      interval: body.interval,
+      timezone: body.timezone,
+      referenceIso: body.referenceIso
+    });
+    sendJson(res, 200, result, 'no-store');
     return;
   }
 

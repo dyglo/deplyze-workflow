@@ -127,22 +127,105 @@ export async function captureActiveChart(): Promise<CapturedChart | null> {
     document.querySelector<HTMLElement>('.chart-slot');
 
   if (!target) return null;
+  return captureElementRegion(target);
+}
+
+export async function captureElementRegion(
+  target: HTMLElement,
+  subRect?: { x: number; y: number; width: number; height: number }
+): Promise<CapturedChart | null> {
+  if (!isTauriRuntime()) return null;
   const rect = target.getBoundingClientRect();
   if (rect.width < 40 || rect.height < 40) return null;
+
+  const x = subRect ? rect.left + subRect.x : rect.left;
+  const y = subRect ? rect.top + subRect.y : rect.top;
+  const width = subRect ? subRect.width : rect.width;
+  const height = subRect ? subRect.height : rect.height;
+  if (width < 20 || height < 20) return null;
 
   try {
     return await invoke<CapturedChart>('capture_chart_region', {
       region: {
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
+        x,
+        y,
+        width,
+        height,
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight
       }
     });
   } catch {
     return null;
+  }
+}
+
+export interface RangeBarPreviewItem {
+  ts: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+}
+
+export interface RangeBarsPreviewPayload {
+  symbol: string;
+  shortName: string;
+  interval: string;
+  barSec: number;
+  source: 'oanda' | 'yahoo';
+  bars: RangeBarPreviewItem[];
+  updatedAt: string;
+}
+
+export async function fetchRangeBarsPreview(
+  symbol: string,
+  interval: string,
+  count = 1200,
+  signal?: AbortSignal
+): Promise<RangeBarsPreviewPayload | null> {
+  try {
+    const url = `${getApiBaseUrl()}/api/ai/range-bars?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&count=${encodeURIComponent(String(count))}`;
+    const res = await fetch(url, { signal });
+    if (!res.ok) return null;
+    const data = (await res.json()) as RangeBarsPreviewPayload;
+    return Array.isArray(data?.bars) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface CalibratedAxisAnchor {
+  xRatio: number;
+  ts: number;
+  label: string;
+}
+
+export async function calibrateRangeTimeAxis(
+  params: {
+    image: string;
+    symbol: string;
+    interval: string;
+    timezone: string;
+  },
+  signal?: AbortSignal
+): Promise<CalibratedAxisAnchor[]> {
+  try {
+    const url = `${getApiBaseUrl()}/api/ai/calibrate-axis`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...params,
+        referenceIso: new Date().toISOString()
+      }),
+      signal
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { ok?: boolean; anchors?: CalibratedAxisAnchor[] };
+    return data?.ok && Array.isArray(data.anchors) ? data.anchors : [];
+  } catch {
+    return [];
   }
 }
 

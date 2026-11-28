@@ -1,5 +1,17 @@
 export type AiModelId = 'deepseek-flash' | 'deepseek-v4-pro';
 export type AiEffort = 'low' | 'medium' | 'high';
+export type AiRangeMode = 'explain' | 'events' | 'technicals' | 'custom';
+
+export interface AiRangeSelectionContext {
+  startTs: number; // Unix seconds UTC
+  endTs: number; // Unix seconds UTC
+  startLabel?: string;
+  endLabel?: string;
+  barCount?: number;
+  interval?: string;
+  mode?: AiRangeMode;
+  calibrated?: boolean;
+}
 
 export interface AiChatHistoryMessage {
   role: 'user' | 'assistant';
@@ -13,6 +25,7 @@ export interface AiChartContext {
   price?: number;
   changePercent?: number;
   timezone?: string;
+  range?: AiRangeSelectionContext;
 }
 
 export interface AiChatRequest {

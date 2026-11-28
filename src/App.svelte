@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { PendingRangeAnalysisRequest } from './lib/ai/types';
   import type { ThemeMode } from './lib/AppMenu.svelte';
   import type { ChartQuote } from './lib/Chart.svelte';
   import ChartGrid from './lib/ChartGrid.svelte';
@@ -87,6 +88,7 @@
   let closingPosition: PaperPosition | null = null;
   let modifyingPosition: { position: PaperPosition; focusField: 'tp' | 'sl' | null } | null = null;
   let screenerFullscreen = false;
+  let pendingRangeAnalysis: PendingRangeAnalysisRequest | null = null;
   let symbolInsights: {
     symbol: string;
     shortName: string;
@@ -637,6 +639,9 @@
               onRequestModifyPosition={(pos, focusField = null) => {
                 if (paperState?.connected) modifyingPosition = { position: pos, focusField };
               }}
+              onAnalyzeRange={(req) => {
+                pendingRangeAnalysis = req;
+              }}
             />
           </div>
         {/each}
@@ -727,6 +732,8 @@
       {screenerFullscreen}
       onToggleScreenerFullscreen={() => (screenerFullscreen = !screenerFullscreen)}
       onCloseScreenerFullscreen={() => (screenerFullscreen = false)}
+      {pendingRangeAnalysis}
+      onConsumePendingRangeAnalysis={() => (pendingRangeAnalysis = null)}
     />
   </div>
 

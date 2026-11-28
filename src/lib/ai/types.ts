@@ -1,6 +1,29 @@
 export type AiModelId = 'deepseek-flash' | 'deepseek-v4-pro';
 export type AiEffort = 'low' | 'medium' | 'high';
 export type AiWebSearchMode = 'auto' | 'on' | 'off';
+export type AiRangeMode = 'explain' | 'events' | 'technicals' | 'custom';
+
+export interface AiRangeSelectionContext {
+  startTs: number;
+  endTs: number;
+  startLabel: string;
+  endLabel: string;
+  barCount?: number;
+  netChangePct?: number | null;
+  interval: string;
+  mode: AiRangeMode;
+  calibrated: boolean;
+}
+
+export interface PendingRangeAnalysisRequest {
+  id: string;
+  symbol: string;
+  fullSymbol: string;
+  interval: string;
+  prompt: string;
+  range: AiRangeSelectionContext;
+  chartDataUrl: string | null;
+}
 
 export interface AiModelOption {
   id: AiModelId;
@@ -67,6 +90,7 @@ export interface AiMessage {
   model?: AiModelId;
   sources?: AiSourceLink[];
   strategyResult?: AiStrategyMessageSummary;
+  rangeContext?: AiRangeSelectionContext;
 }
 
 export interface AiConversation {
@@ -75,6 +99,7 @@ export interface AiConversation {
   symbol: string;
   fullSymbol: string;
   messages: AiMessage[];
+  rangeContext?: AiRangeSelectionContext;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +111,7 @@ export interface AiChartContext {
   price?: number;
   changePercent?: number;
   timezone: string;
+  range?: AiRangeSelectionContext;
 }
 
 export interface CapturedChart {

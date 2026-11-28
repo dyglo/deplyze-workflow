@@ -8,6 +8,7 @@ import type {
   CalendarDaySummary,
   CalendarEventsPayload,
   CalendarWeekPayload,
+  CountryCode,
   EconomicEvent,
   EventImpact,
   EventSource,
@@ -274,5 +275,72 @@ export async function getCalendarEventsPayload(
     sources,
     fallbackActive,
     events: eventsByDate[date] ?? []
+  };
+}
+
+/**
+ * Resolves all economic calendar events (past archived ShowMyTrades + FRED + Fed FOMC + live)
+ * falling within [startTs - padBeforeSec, endTs + padAfterSec] in the requested timezone.
+ */
+export async function getCalendarEventsInWindow(
+  startTs: number,
+  endTs: number,
+  tzParam: string | null | undefined,
+  options?: {
+    padBeforeSec?: number;
+    padAfterSec?: number;
+    countries?: CountryCode[];
+  }
+): Promise<{
+  timezone: string;
+  events: EconomicEvent[];
+  sources: EventSource[];
+}> {
+  const tz = resolveTimeZone(tzParam);
+  const lo = Math.min(startTs, endTs);
+  const hi = Math.max(startTs, endTs);
+  const padBefore = options?.padBeforeSec ?? 7_200; // 2 hours prior
+  const padAfter = options?.padAfterSec ?? 3_600; // 1 hour after
+  const winStart = lo - padBefore;
+  const winEnd = hi + padAfter;
+
+  const startDateIso = formatPartsInTz(new Date(winStart * 1000), tz).date;
+  const endDateIso = formatPartsInTz(new Date(winEnd * 1000), tz).date;
+
+  // Build unique list of local dates spanning the window (capped at 14 days for wide HTF ranges)
+  const targetDates: string[] = [];
+  let cursor = startDateIso;
+  let guard = 0;
+  while (cursor <= endDateIso && guard < 14) {
+    targetDates.push(cursor);
+    cursor = addDays(cursor, 1);
+    guard += 1;
+  }
+  // If range exceeded 14 days, ensure the end date and day prior are also covered
+  if (endDateIso > (targetDates[targetDates.length - 1] ?? '')) {
+    const prevEnd = addDays(endDateIso, -1);
+    if (!targetDates.includes(prevEnd)) targetDates.push(prevEnd);
+    if (!targetDates.includes(endDateIso)) targetDates.push(endDateIso);
+  }
+
+  const { eventsByDate, sources } = await resolveEconomicEventsForDates(targetDates, tz);
+  const countrySet = options?.countries && options.countries.length > 0 ? new Set(options.countries) : null;
+
+  const seen = new Set<string>();
+  const matched: EconomicEvent[] = [];
+  for (const day of targetDates) {
+    for (const ev of eventsByDate[day] ?? []) {
+      if (seen.has(ev.id)) continue;
+      if (ev.ts < winStart || ev.ts > winEnd) continue;
+      if (countrySet && !countrySet.has(ev.country)) continue;
+      seen.add(ev.id);
+      matched.push(ev);
+    }
+  }
+
+  return {
+    timezone: tz,
+    events: sortEvents(matched),
+    sources
   };
 }

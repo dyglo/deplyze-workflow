@@ -28,13 +28,41 @@ export function isTavilyConfigured(): boolean {
 
 export async function runTavilyFinanceSearch(
   query: string,
-  options?: { topic?: 'finance' | 'news' | 'general'; maxResults?: number; days?: number }
+  options?: {
+    topic?: 'finance' | 'news' | 'general';
+    maxResults?: number;
+    days?: number;
+    startDate?: string; // YYYY-MM-DD
+    endDate?: string; // YYYY-MM-DD
+    includeDomains?: string[];
+  }
 ): Promise<TavilySearchResult | null> {
   const apiKey = (process.env.TAVILY_API_KEY ?? '').trim();
   if (!apiKey) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  const hasDateBounds = Boolean(options?.startDate || options?.endDate);
+  const payload: Record<string, unknown> = {
+    query,
+    topic: options?.topic ?? 'news',
+    search_depth: 'basic',
+    max_results: options?.maxResults ?? 5,
+    include_answer: true
+  };
+
+  if (hasDateBounds) {
+    if (options?.startDate) payload.start_date = options.startDate;
+    if (options?.endDate) payload.end_date = options.endDate;
+  } else {
+    payload.time_range = 'week';
+    payload.days = options?.days ?? 7;
+  }
+
+  if (options?.includeDomains && options.includeDomains.length > 0) {
+    payload.include_domains = options.includeDomains;
+  }
 
   try {
     const res = await fetch(TAVILY_URL, {
@@ -43,15 +71,7 @@ export async function runTavilyFinanceSearch(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        query,
-        topic: options?.topic ?? 'news',
-        search_depth: 'basic',
-        time_range: 'week',
-        days: options?.days ?? 7,
-        max_results: options?.maxResults ?? 5,
-        include_answer: true
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal
     });
 

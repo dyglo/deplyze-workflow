@@ -4,6 +4,7 @@ import {
   buildUpcomingCalendarContext,
   shouldAutoRunWebSearch
 } from './context.js';
+import { buildRangeAnalysisPacket } from './rangeContext.js';
 import { isTavilyConfigured, runTavilyFinanceSearch } from './tavily.js';
 import type { AiChatRequest, AiEffort, AiModelId, AiSourceLink } from './types.js';
 import { isStrategyPrompt, runAgenticStrategyMode } from '../strategy/agent.js';
@@ -171,9 +172,17 @@ export async function streamAiChat(
   const latestUserText = history[history.length - 1].content.trim();
   const symbolLabel = body.context?.symbol || body.context?.fullSymbol || 'market';
   const webMode = body.webSearchMode ?? 'auto';
+  const hasRangeSelection = Boolean(
+    body.context?.range &&
+      typeof body.context.range.startTs === 'number' &&
+      typeof body.context.range.endTs === 'number' &&
+      Number.isFinite(body.context.range.startTs) &&
+      Number.isFinite(body.context.range.endTs)
+  );
 
   // Route strategy design / backtesting / refinement requests into the Agentic Strategy Loop
-  if (isStrategyPrompt(latestUserText, history)) {
+  // (Skip auto-routing into strategy builder when the user explicitly clicked a range analysis pill)
+  if (!hasRangeSelection && isStrategyPrompt(latestUserText, history)) {
     try {
       await runAgenticStrategyMode({
         apiKey,
@@ -199,38 +208,60 @@ export async function streamAiChat(
   }
 
   const runSearch =
+    !hasRangeSelection &&
     isTavilyConfigured() &&
     (webMode === 'on' || (webMode === 'auto' && shouldAutoRunWebSearch(latestUserText)));
 
   try {
     let sources: AiSourceLink[] = [];
     let tavilySnippets: string | null = null;
+    let rangeDossier: string | null = null;
+    let usedRangeSearch = false;
+    let calendarCtx = '';
 
-    if (runSearch) {
-      writeSse(res, 'status', {
-        phase: 'searching',
-        label: `Searching latest news on ${symbolLabel}...`
-      });
-    } else if (images.length > 0) {
-      writeSse(res, 'status', {
-        phase: 'vision',
-        label: `Inspecting ${symbolLabel} chart...`
-      });
-    } else {
-      writeSse(res, 'status', { phase: 'thinking', label: 'Analyzing...' });
-    }
-
-    const searchQuery = `${symbolLabel} price market news macro catalysts ${latestUserText.slice(0, 120)}`;
-    const [calendarCtx, tavilyResult] = await Promise.all([
-      buildUpcomingCalendarContext(body.context),
-      runSearch ? runTavilyFinanceSearch(searchQuery, { topic: 'news', maxResults: 5, days: 7 }) : Promise.resolve(null)
-    ]);
-
-    if (tavilyResult) {
-      sources = tavilyResult.sources;
-      tavilySnippets = tavilyResult.snippets;
-      if (sources.length > 0) {
+    if (hasRangeSelection && body.context) {
+      const rangePacket = await buildRangeAnalysisPacket(
+        body.context,
+        latestUserText,
+        webMode,
+        (phase, label) => writeSse(res, 'status', { phase, label })
+      );
+      rangeDossier = rangePacket.dossier;
+      usedRangeSearch = rangePacket.usedWebSearch;
+      if (rangePacket.sources.length > 0) {
+        sources = rangePacket.sources;
         writeSse(res, 'sources', { sources });
+      }
+    } else {
+      if (runSearch) {
+        writeSse(res, 'status', {
+          phase: 'searching',
+          label: `Searching latest news on ${symbolLabel}...`
+        });
+      } else if (images.length > 0) {
+        writeSse(res, 'status', {
+          phase: 'vision',
+          label: `Inspecting ${symbolLabel} chart...`
+        });
+      } else {
+        writeSse(res, 'status', { phase: 'thinking', label: 'Analyzing...' });
+      }
+
+      const searchQuery = `${symbolLabel} price market news macro catalysts ${latestUserText.slice(0, 120)}`;
+      const [upcomingCal, tavilyResult] = await Promise.all([
+        buildUpcomingCalendarContext(body.context),
+        runSearch
+          ? runTavilyFinanceSearch(searchQuery, { topic: 'news', maxResults: 5, days: 7 })
+          : Promise.resolve(null)
+      ]);
+      calendarCtx = upcomingCal;
+
+      if (tavilyResult) {
+        sources = tavilyResult.sources;
+        tavilySnippets = tavilyResult.snippets;
+        if (sources.length > 0) {
+          writeSse(res, 'sources', { sources });
+        }
       }
     }
 
@@ -254,7 +285,8 @@ export async function streamAiChat(
       body.context,
       calendarCtx,
       tavilySnippets,
-      images.length > 0
+      images.length > 0,
+      rangeDossier
     );
 
     const apiMessages: Array<Record<string, unknown>> = [
@@ -371,7 +403,7 @@ export async function streamAiChat(
 
     writeSse(res, 'done', {
       model,
-      usedWebSearch: Boolean(tavilyResult),
+      usedWebSearch: Boolean(tavilySnippets) || usedRangeSearch,
       usedVision: images.length > 0
     });
     res.end();

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { PendingRangeAnalysisRequest } from './ai/types';
   import Chart, { type ChartQuote } from './Chart.svelte';
+  import ChartRangeAnalysisOverlay from './chart/ChartRangeAnalysisOverlay.svelte';
   import { getLayoutById, type LayoutId } from './chart/layouts';
   import ChartTradeOverlay from './paper/ChartTradeOverlay.svelte';
   import type { PaperPosition } from './paper/types';
@@ -20,6 +22,7 @@
     onPaneInterval?: (paneIndex: number, interval: string) => void;
     onRequestClosePosition?: (position: PaperPosition) => void;
     onRequestModifyPosition?: (position: PaperPosition, focusField?: 'tp' | 'sl' | null) => void;
+    onAnalyzeRange?: (request: PendingRangeAnalysisRequest) => void;
   }
 
   let {
@@ -34,7 +37,8 @@
     onPaneQuote,
     onPaneInterval,
     onRequestClosePosition,
-    onRequestModifyPosition
+    onRequestModifyPosition,
+    onAnalyzeRange
   }: Props = $props();
 
   const layout = $derived(getLayoutById(layoutId));
@@ -210,6 +214,20 @@
         onDockOffsetChange={(px) => handlePaneDockOffset(idx, px)}
         onRequestClosePosition={(pos) => onRequestClosePosition?.(pos)}
         onRequestModifyPosition={(pos, field) => onRequestModifyPosition?.(pos, field)}
+      />
+
+      <ChartRangeAnalysisOverlay
+        {theme}
+        symbol={paneSymbol}
+        shortName={paneState?.shortName || extractShortSymbol(paneSymbol)}
+        interval={paneInterval}
+        isActivePane={currentActivePane === idx}
+        leftToolbarCollapsed={idx > 0}
+        legendSlot={paneLegendSlots[idx] ?? null}
+        onAnalyzeRange={(req) => {
+          setActivePane(idx);
+          onAnalyzeRange?.(req);
+        }}
       />
     </div>
   {/each}

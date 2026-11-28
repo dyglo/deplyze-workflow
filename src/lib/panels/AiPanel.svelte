@@ -24,9 +24,11 @@
     type AiEffort,
     type AiMessage,
     type AiModelId,
+    type AiRangeSelectionContext,
     type AiSourceLink,
     type AiWebSearchMode,
-    type PendingImage
+    type PendingImage,
+    type PendingRangeAnalysisRequest
   } from '../ai/types';
 
   interface Props {
@@ -36,6 +38,8 @@
     activeInterval?: string;
     activePrice?: number;
     activeChangePercent?: number;
+    pendingRangeAnalysis?: PendingRangeAnalysisRequest | null;
+    onConsumePendingRangeAnalysis?: () => void;
     onClose: () => void;
   }
 
@@ -46,6 +50,8 @@
     activeInterval = 'D',
     activePrice,
     activeChangePercent,
+    pendingRangeAnalysis = null,
+    onConsumePendingRangeAnalysis,
     onClose
   }: Props = $props();
 
@@ -53,7 +59,9 @@
   const timeZone = getLocalTimeZone();
 
   let chats = $state<AiConversation[]>([]);
+  let chatsLoaded = $state(false);
   let activeChatId = $state<string | null>(null);
+  let lastConsumedRangeId = '';
   let draft = $state('');
   let selectedModel = $state<AiModelId>(initialPrefs.model);
   let selectedEffort = $state<AiEffort>(initialPrefs.effort);
@@ -115,6 +123,7 @@
   onMount(() => {
     void loadAiChats().then((loaded) => {
       chats = loaded;
+      chatsLoaded = true;
     });
 
     const onDocPointerDown = (e: PointerEvent) => {
@@ -367,7 +376,74 @@
     });
   }
 
-  async function sendPrompt(explicitText?: string) {
+  function formatIntervalLabel(rawIv: string | undefined): string {
+    const raw = (rawIv || 'D').trim().toUpperCase();
+    if (raw === '1') return '1m';
+    if (raw === '5') return '5m';
+    if (raw === '15') return '15m';
+    if (raw === '30') return '30m';
+    if (raw === '60') return '1h';
+    if (raw === '240') return '4h';
+    if (raw === 'D') return '1D';
+    if (raw === 'W') return '1W';
+    return rawIv || '1D';
+  }
+
+  function compactRangeChipLabel(r: AiRangeSelectionContext): string {
+    const s = r.startLabel.replace(/^[A-Za-z]{3}\s+/, '').replace(/\s+'\d{2}/, '');
+    const e = r.endLabel.replace(/^[A-Za-z]{3}\s+/, '').replace(/\s+'\d{2}/, '');
+    return `${s} → ${e}`;
+  }
+
+  function clearActiveChatRangeScope() {
+    if (!activeChatId) return;
+    chats = chats.map((c) => (c.id === activeChatId ? { ...c, rangeContext: undefined } : c));
+    void saveAiChats(chats);
+  }
+
+  // Consume incoming chart range analysis requests once persisted chats have loaded
+  $effect(() => {
+    const req = pendingRangeAnalysis;
+    if (!chatsLoaded || !req || req.id === lastConsumedRangeId) return;
+    lastConsumedRangeId = req.id;
+    onConsumePendingRangeAnalysis?.();
+    void runPendingRangeAnalysis(req);
+  });
+
+  async function runPendingRangeAnalysis(req: PendingRangeAnalysisRequest) {
+    if (isStreaming) {
+      stopStreaming();
+    }
+    const existing = activeChat;
+    const sameRange =
+      existing?.rangeContext &&
+      existing.fullSymbol === req.fullSymbol &&
+      Math.abs(existing.rangeContext.startTs - req.range.startTs) < 60 &&
+      Math.abs(existing.rangeContext.endTs - req.range.endTs) < 60;
+
+    if (!sameRange) {
+      activeChatId = null;
+    }
+
+    await sendPrompt(req.prompt, {
+      symbolOverride: req.symbol,
+      fullSymbolOverride: req.fullSymbol,
+      intervalOverride: req.interval,
+      rangeOverride: req.range,
+      preCapturedChartUrl: req.chartDataUrl
+    });
+  }
+
+  async function sendPrompt(
+    explicitText?: string,
+    options?: {
+      symbolOverride?: string;
+      fullSymbolOverride?: string;
+      intervalOverride?: string;
+      rangeOverride?: AiRangeSelectionContext;
+      preCapturedChartUrl?: string | null;
+    }
+  ) {
     const text = (explicitText ?? draft).trim();
     if (!text || isStreaming) return;
 
@@ -381,18 +457,33 @@
     }
 
     const nowIso = new Date().toISOString();
-    const sym = activeSymbol || 'XAUUSD';
-    const fullSym = activeFullSymbol || sym;
+    const sym = options?.symbolOverride || activeSymbol || 'XAUUSD';
+    const fullSym = options?.fullSymbolOverride || activeFullSymbol || sym;
+    const effectiveInterval = options?.intervalOverride || activeInterval || 'D';
 
-    // Collect images: auto-capture active chart pane first (unless disabled or "What can you do?")
+    // Range context: either explicit from chart range popover, or inherited from active range-scoped thread
+    const effectiveRange: AiRangeSelectionContext | undefined =
+      options?.rangeOverride ??
+      (activeChat?.rangeContext
+        ? { ...activeChat.rangeContext, mode: 'custom' }
+        : undefined);
+
+    // Collect images: use pre-captured range-highlighted screenshot when provided, else auto-capture active chart
     const attachedDataUrls: string[] = [];
     let chartCapturedUrl: string | null = null;
     const isMetaHelp = /^what can you do\??$/i.test(text);
 
     isStreaming = true;
-    streamStatus = autoCapture && !isMetaHelp ? `Capturing ${sym} chart...` : 'Preparing...';
+    streamStatus = effectiveRange
+      ? `Loading ${sym} candles & events in range...`
+      : autoCapture && !isMetaHelp
+        ? `Capturing ${sym} chart...`
+        : 'Preparing...';
 
-    if (autoCapture && !isMetaHelp) {
+    if (options?.preCapturedChartUrl) {
+      chartCapturedUrl = options.preCapturedChartUrl;
+      attachedDataUrls.push(options.preCapturedChartUrl);
+    } else if (autoCapture && !isMetaHelp) {
       const snap = await captureActiveChart();
       if (snap?.dataUrl) {
         chartCapturedUrl = snap.dataUrl;
@@ -409,11 +500,17 @@
     // Ensure conversation exists
     let targetChatId = activeChatId;
     if (!targetChatId || !chats.some((c) => c.id === targetChatId)) {
+      const defaultTitle = effectiveRange
+        ? `${sym} · ${compactRangeChipLabel(effectiveRange)}`
+        : text.length > 44
+          ? `${text.slice(0, 44).trim()}...`
+          : text;
       const newChat: AiConversation = {
         id: makeAiId('chat'),
-        title: text.length > 44 ? `${text.slice(0, 44).trim()}...` : text,
+        title: defaultTitle.length > 48 ? `${defaultTitle.slice(0, 48).trim()}...` : defaultTitle,
         symbol: sym,
         fullSymbol: fullSym,
+        rangeContext: effectiveRange,
         messages: [],
         createdAt: nowIso,
         updatedAt: nowIso
@@ -421,6 +518,10 @@
       chats = [newChat, ...chats];
       targetChatId = newChat.id;
       activeChatId = targetChatId;
+    } else if (options?.rangeOverride) {
+      chats = chats.map((c) =>
+        c.id === targetChatId ? { ...c, rangeContext: options.rangeOverride } : c
+      );
     }
 
     const userMsg: AiMessage = {
@@ -429,7 +530,8 @@
       content: text,
       createdAt: nowIso,
       hasChart: Boolean(chartCapturedUrl),
-      imageCount: attachedDataUrls.length
+      imageCount: attachedDataUrls.length,
+      rangeContext: effectiveRange
     };
 
     const assistantMsgId = makeAiId('a');
@@ -481,13 +583,14 @@
           context: {
             symbol: sym,
             fullSymbol: fullSym,
-            interval: activeInterval || 'D',
+            interval: effectiveInterval,
             price: typeof activePrice === 'number' && Number.isFinite(activePrice) ? activePrice : undefined,
             changePercent:
               typeof activeChangePercent === 'number' && Number.isFinite(activeChangePercent)
                 ? activeChangePercent
                 : undefined,
-            timezone: timeZone
+            timezone: timeZone,
+            range: effectiveRange
           },
           webSearchMode
         },
@@ -700,11 +803,32 @@
             {#if msg.role === 'user'}
               <div class="msg-user-wrap">
                 <div class="msg-user-bubble">
+                  {#if msg.rangeContext}
+                    <div class="msg-range-chip">
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <line x1="3.75" y1="4.25" x2="3.75" y2="15.75" />
+                        <line x1="16.25" y1="4.25" x2="16.25" y2="15.75" />
+                        <path d="M10 6c.42 2.25 1.75 3.58 4 4-2.25.42-3.58 1.75-4 4-.42-2.25-1.75-3.58-4-4 2.25-.42 3.58-1.75 4-4Z" />
+                      </svg>
+                      <span>{compactRangeChipLabel(msg.rangeContext)}</span>
+                      <span class="mrc-sep">·</span>
+                      <span>{formatIntervalLabel(msg.rangeContext.interval)}</span>
+                      {#if typeof msg.rangeContext.netChangePct === 'number'}
+                        <span
+                          class="mrc-delta"
+                          class:pos={msg.rangeContext.netChangePct > 0}
+                          class:neg={msg.rangeContext.netChangePct < 0}
+                        >
+                          {msg.rangeContext.netChangePct >= 0 ? '+' : ''}{msg.rangeContext.netChangePct.toFixed(2)}%
+                        </span>
+                      {/if}
+                    </div>
+                  {/if}
                   <div class="msg-user-text">{msg.content}</div>
                   <div class="msg-user-foot">
                     <span>{formatTime(msg.createdAt)}</span>
                     {#if msg.hasChart}
-                      <span class="msg-chart-tag">Chart snapped</span>
+                      <span class="msg-chart-tag">{msg.rangeContext ? 'Range snapped' : 'Chart snapped'}</span>
                     {:else if msg.imageCount > 0}
                       <span class="msg-chart-tag">
                         {msg.imageCount} image{msg.imageCount > 1 ? 's' : ''}
@@ -876,6 +1000,30 @@
             </span>
           </button>
         </div>
+
+        {#if activeChat?.rangeContext}
+          <div class="active-range-strip">
+            <span class="ars-icon" aria-hidden="true">
+              <svg viewBox="0 0 20 20">
+                <line x1="3.75" y1="4.25" x2="3.75" y2="15.75" />
+                <line x1="16.25" y1="4.25" x2="16.25" y2="15.75" />
+                <path d="M10 6c.42 2.25 1.75 3.58 4 4-2.25.42-3.58 1.75-4 4-.42-2.25-1.75-3.58-4-4 2.25-.42 3.58-1.75 4-4Z" />
+              </svg>
+            </span>
+            <span class="ars-text">
+              Range: {compactRangeChipLabel(activeChat.rangeContext)} · {formatIntervalLabel(activeChat.rangeContext.interval)}
+            </span>
+            <button
+              class="ars-clear"
+              type="button"
+              title="Detach range scope from follow-ups"
+              aria-label="Detach range scope"
+              onclick={clearActiveChatRangeScope}
+            >
+              ×
+            </button>
+          </div>
+        {/if}
 
         {#if pendingImages.length > 0}
           <div class="pending-images">
@@ -1433,6 +1581,113 @@
     padding: 1px 6px;
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.14);
+  }
+
+  .msg-range-chip {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 6px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    background: linear-gradient(135deg, rgba(184, 51, 245, 0.24), rgba(41, 98, 255, 0.28));
+    border: 1px solid rgba(124, 92, 255, 0.38);
+    color: inherit;
+  }
+
+  .msg-range-chip svg {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .mrc-sep {
+    opacity: 0.6;
+  }
+
+  .mrc-delta {
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 10.5px;
+    font-weight: 700;
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .mrc-delta.pos {
+    color: #5eead4;
+  }
+
+  .mrc-delta.neg {
+    color: #fca5a5;
+  }
+
+  .active-range-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 2px 10px 4px;
+    padding: 4px 8px;
+    border-radius: 7px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ai-text);
+    background: linear-gradient(135deg, rgba(184, 51, 245, 0.14), rgba(41, 98, 255, 0.16));
+    border: 1px solid rgba(124, 92, 255, 0.3);
+  }
+
+  .ars-icon {
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+  }
+
+  .ars-icon svg {
+    width: 13px;
+    height: 13px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .ars-text {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ars-clear {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--ai-secondary);
+    font-size: 13px;
+    line-height: 1;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+  }
+
+  .ars-clear:hover {
+    color: var(--ai-text);
+    background: var(--ai-option-hover);
   }
 
   .msg-assistant {

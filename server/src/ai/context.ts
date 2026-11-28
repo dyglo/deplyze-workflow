@@ -3,7 +3,7 @@ import { addDays, getTodayInTz, getWeekStart, resolveTimeZone } from '../calenda
 import type { CountryCode, EconomicEvent } from '../calendar/types.js';
 import type { AiChartContext } from './types.js';
 
-function inferRelevantCountries(symbol: string | undefined): CountryCode[] {
+export function inferRelevantCountries(symbol: string | undefined): CountryCode[] {
   const s = (symbol ?? '').toUpperCase().replace(/[^A-Z]/g, '');
   const set = new Set<CountryCode>();
 
@@ -69,7 +69,8 @@ export function buildCopilotSystemPrompt(
   ctx: AiChartContext | undefined,
   calendarContext: string,
   tavilyContext: string | null,
-  hasChartImage: boolean
+  hasChartImage: boolean,
+  rangeDossier?: string | null
 ): string {
   const symbol = ctx?.symbol || 'the active chart';
   const fullSymbol = ctx?.fullSymbol ? ` (${ctx.fullSymbol})` : '';
@@ -80,26 +81,39 @@ export function buildCopilotSystemPrompt(
       : 'Live Price: read from the chart price axis if visible';
   const tz = ctx?.timezone || 'UTC';
   const nowIso = new Date().toISOString();
+  const hasRangeDossier = Boolean(rangeDossier && rangeDossier.trim().length > 0);
 
   const sections: string[] = [
     `You are DeplyzeWorkflow AI Copilot — a sharp, objective, institutional-grade technical, quantitative & macro trading analyst integrated beside the user's live TradingView chart.`,
     `Current UTC time: ${nowIso} (User timezone: ${tz}).`,
     `Active Instrument: ${symbol}${fullSymbol}${tfLine}\n${priceLine}`,
     hasChartImage
-      ? `A live capture of the user's active chart (and any attached higher/lower timeframe screenshots) is included with this request. Inspect EVERY visual detail carefully: timeframe label in the top-left, exact price axis scale, recent candlestick structure (swing highs/lows, wicks, engulfing/rejection bars, consolidation, break of structure), any visible indicators, and any drawings/zones/entry-SL-TP boxes the user has placed on the chart.`
-      : `No chart screenshot was attached to this message. Base your answer on the live quote, macro calendar, web search context (if provided), and general market structure principles. Remind the user briefly if visual chart context would improve precision.`,
+      ? hasRangeDossier
+        ? `A live capture of the user's active chart WITH their highlighted purple-to-blue selected range is attached, TOGETHER with exact OANDA/historical candles, computed start-vs-end technical indicators, and windowed economic calendar & news data below. Anchor your analysis strictly to the selected range.`
+        : `A live capture of the user's active chart (and any attached higher/lower timeframe screenshots) is included with this request. Inspect EVERY visual detail carefully: timeframe label in the top-left, exact price axis scale, recent candlestick structure (swing highs/lows, wicks, engulfing/rejection bars, consolidation, break of structure), any visible indicators, and any drawings/zones/entry-SL-TP boxes the user has placed on the chart.`
+      : hasRangeDossier
+        ? `Exact OANDA/historical candles, computed start-vs-end technical indicators, and windowed economic calendar & news data for the user's selected chart range are provided below. Anchor your analysis strictly to those real figures.`
+        : `No chart screenshot was attached to this message. Base your answer on the live quote, macro calendar, web search context (if provided), and general market structure principles. Remind the user briefly if visual chart context would improve precision.`,
     `STRICT RULES:
-1. Be 100% honest and grounded. NEVER fabricate indicator values (RSI, MACD, 200 EMA, etc.) that are NOT actually visible on the chart image. If an indicator isn't on the chart, analyze pure price action, market structure, and key S/R levels instead.
+1. Be 100% honest and grounded. ${
+      hasRangeDossier
+        ? `Cite the exact OANDA OHLC prices, timestamps, indicator readings, calendar releases, and news sources supplied in the SELECTED CHART RANGE TELEMETRY below. NEVER invent prices, events, or indicator readings that are not in the telemetry or visibly on the chart.`
+        : `NEVER fabricate indicator values (RSI, MACD, 200 EMA, etc.) that are NOT actually visible on the chart image. If an indicator isn't on the chart, analyze pure price action, market structure, and key S/R levels instead.`
+    }
 2. You CANNOT draw lines directly on the chart — present exact, clean price levels so the trader can mark them manually. You CAN build, backtest, validate Out-of-Sample, and open strategies in the bottom Strategy Tester when the user asks you to build or backtest a strategy.
 3. Keep output crisp, scannable, and high-signal — no filler intros like "Sure! Here is your analysis". Start immediately with the structured breakdown.
 4. Format cleanly with GitHub-flavored Markdown:
    - Use bold section headings (e.g., **Directional Bias: BULLISH**, **Setup Rating: 7.5 / 10**, **Key Levels**, **Trade Plan**, **Macro & Event Risk**).
-   - Use compact Markdown tables whenever listing levels, scenarios, setup criteria, or trade plans (e.g. \`| Level | Zone | Role |\`, \`| Parameter | Price / Value | Notes |\`).
+   - Use compact Markdown tables whenever listing levels, scenarios, setup criteria, indicator shifts, or catalyst timelines.
    - Use exact price numbers matching the instrument's decimal precision.
    - When rating a user's setup, score out of 10 with a concise confluence table (Trend Alignment, Key Level / Liquidity, Trigger / Candle Confirmation, Risk-to-Reward, Macro Risk) plus clear Strengths, Risks, and Invalidation.
-   - When web search results are provided, synthesize the latest catalysts concisely and cite sources as Markdown links \`[Source Title](url)\`.
+   - When web search results or news items are provided, synthesize the relevant catalysts concisely and cite sources as Markdown links \`[Source Title](url)\`.
 5. Keep tone disciplined and analytical; this is market analysis, not personalized financial advice.`
   ];
+
+  if (hasRangeDossier && rangeDossier) {
+    sections.push(rangeDossier);
+  }
 
   if (calendarContext) {
     sections.push(`LIVE ECONOMIC CALENDAR CONTEXT:\n${calendarContext}`);
