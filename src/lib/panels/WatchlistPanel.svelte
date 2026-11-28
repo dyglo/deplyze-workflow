@@ -371,12 +371,20 @@
       if (moreMenuOpen && !el.closest('[data-wl-more-menu]')) moreMenuOpen = false;
       if (analysisMenuPos && !el.closest('[data-wl-analysis-menu]')) analysisMenuPos = null;
     };
+    const onExternalWatchlistUpdate = () => {
+      void loadWatchlistState().then((loaded) => {
+        wlState = loaded;
+        void refreshQuotes();
+      });
+    };
     window.addEventListener('pointerdown', onDocDown);
+    window.addEventListener('deplyze:watchlist-updated', onExternalWatchlistUpdate);
 
     return () => {
       unsubAlerts();
       if (pollTimer) clearInterval(pollTimer);
       window.removeEventListener('pointerdown', onDocDown);
+      window.removeEventListener('deplyze:watchlist-updated', onExternalWatchlistUpdate);
     };
   });
 

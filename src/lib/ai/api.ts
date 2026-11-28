@@ -4,12 +4,16 @@ import type { Note, NoteAttachment } from '../notes/types';
 import { markdownToCleanText } from './markdown';
 import type { BacktestReport } from '../strategy/types';
 import type {
+  AiAgentStep,
+  AiApprovalCard,
   AiChartContext,
+  AiClientAction,
   AiConversation,
   AiEffort,
   AiModelId,
   AiSourceLink,
   AiWebSearchMode,
+  AiWorkspaceSnapshot,
   CapturedChart
 } from './types';
 
@@ -235,6 +239,7 @@ export interface AiStreamRequest {
   messages: { role: 'user' | 'assistant'; content: string }[];
   images: string[];
   context: AiChartContext;
+  workspace?: AiWorkspaceSnapshot;
   webSearchMode: AiWebSearchMode;
 }
 
@@ -244,6 +249,9 @@ export interface AiStreamCallbacks {
   onReasoning?: (delta: string) => void;
   onToken?: (delta: string) => void;
   onStrategyResult?: (report: BacktestReport) => void;
+  onAgentStep?: (step: AiAgentStep) => void;
+  onClientAction?: (action: AiClientAction) => void;
+  onApprovalCard?: (card: AiApprovalCard) => void;
   onDone?: (meta: { model: string; usedWebSearch: boolean; usedVision: boolean }) => void;
   onError?: (message: string) => void;
 }
@@ -314,6 +322,12 @@ export async function streamAiChat(
       callbacks.onToken?.(payload.delta);
     } else if (eventName === 'strategy_result' && payload.report && typeof payload.report === 'object') {
       callbacks.onStrategyResult?.(payload.report as BacktestReport);
+    } else if (eventName === 'agent_step' && payload.step && typeof payload.step === 'object') {
+      callbacks.onAgentStep?.(payload.step as AiAgentStep);
+    } else if (eventName === 'client_action' && payload.action && typeof payload.action === 'object') {
+      callbacks.onClientAction?.(payload.action as AiClientAction);
+    } else if (eventName === 'approval_card' && payload.card && typeof payload.card === 'object') {
+      callbacks.onApprovalCard?.(payload.card as AiApprovalCard);
     } else if (eventName === 'done') {
       callbacks.onDone?.({
         model: String(payload.model ?? request.model),

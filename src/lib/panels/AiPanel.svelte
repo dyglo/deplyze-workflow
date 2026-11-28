@@ -13,6 +13,14 @@
     saveAnalysisToNotes,
     streamAiChat
   } from '../ai/api';
+  import {
+    buildWorkspaceSnapshot,
+    canUndoClientAction,
+    executeApprovalCard,
+    executeClientAction,
+    undoClientAction,
+    type AgentHostCallbacks
+  } from '../ai/actionBus';
   import { renderMarkdown } from '../ai/markdown';
   import { saveAiAnalysisToPlaybook } from '../playbook/store';
   import { openSavedStrategy, openStrategyFromAi } from '../strategy/store';
@@ -20,6 +28,9 @@
   import {
     AI_EFFORTS,
     AI_MODELS,
+    type AiAgentStep,
+    type AiApprovalCard,
+    type AiClientAction,
     type AiConversation,
     type AiEffort,
     type AiMessage,
@@ -40,6 +51,7 @@
     activeChangePercent?: number;
     pendingRangeAnalysis?: PendingRangeAnalysisRequest | null;
     onConsumePendingRangeAnalysis?: () => void;
+    agentHost?: AgentHostCallbacks;
     onClose: () => void;
   }
 
@@ -52,6 +64,7 @@
     activeChangePercent,
     pendingRangeAnalysis = null,
     onConsumePendingRangeAnalysis,
+    agentHost,
     onClose
   }: Props = $props();
 
@@ -112,11 +125,11 @@
   });
 
   const SUGGESTIONS = $derived([
+    `Prep a 4-chart desk & alerts around ${activeSymbol || 'XAUUSD'}`,
+    'Scan OANDA markets for trapped-crowd dislocations',
+    `Plan & size a 1% risk trade on ${activeSymbol || 'XAUUSD'}`,
     `Build & backtest a strategy on ${activeSymbol || 'XAUUSD'}`,
-    'Is this chart bullish or bearish?',
-    'Plan entry and exit',
-    'Identify key levels',
-    'Rate my current setup',
+    'Audit my open positions & pre-trade risk',
     `What's the latest on ${activeSymbol || 'XAUUSD'}?`
   ]);
 
@@ -401,6 +414,75 @@
     void saveAiChats(chats);
   }
 
+  function formatCardPrice(val: number | null | undefined, symbol: string): string {
+    if (typeof val !== 'number' || !Number.isFinite(val)) return '—';
+    const upper = symbol.toUpperCase();
+    const isJpy = upper.includes('JPY');
+    const isFxMajor =
+      !upper.includes('XAU') &&
+      !upper.includes('XAG') &&
+      !upper.includes('OIL') &&
+      !upper.includes('BTC') &&
+      !upper.includes('ETH') &&
+      !upper.includes('US30') &&
+      !upper.includes('NAS') &&
+      !upper.includes('SPX') &&
+      !upper.includes('500') &&
+      !upper.includes('DXY') &&
+      /^[A-Z]{6}$/.test(upper.replace(/.*:/, ''));
+    const decimals = isJpy ? 3 : isFxMajor ? 5 : Math.abs(val) < 10 ? 4 : 2;
+    return val.toFixed(decimals);
+  }
+
+  async function handleUndoAction(chatId: string, msgId: string, actionId: string) {
+    const ok = await undoClientAction(actionId);
+    if (!ok) return;
+    updateAssistantMessage(chatId, msgId, (m) => ({
+      ...m,
+      executedActions: (m.executedActions ?? []).map((a) =>
+        a.id === actionId ? { ...a, status: 'undone', canUndo: false } : a
+      )
+    }));
+    await saveAiChats(chats);
+  }
+
+  async function handleApprovalAction(
+    chatId: string,
+    msgId: string,
+    card: AiApprovalCard,
+    mode: 'stage' | 'execute' | 'dismiss'
+  ) {
+    if (mode === 'dismiss') {
+      updateAssistantMessage(chatId, msgId, (m) => ({
+        ...m,
+        approvalCards: (m.approvalCards ?? []).map((c) =>
+          c.id === card.id ? { ...c, status: 'dismissed', statusNote: 'Dismissed' } : c
+        )
+      }));
+      await saveAiChats(chats);
+      return;
+    }
+
+    const res = executeApprovalCard(card, mode);
+    if (!res.ok) {
+      errorBanner = res.note;
+      return;
+    }
+
+    errorBanner = null;
+    updateAssistantMessage(chatId, msgId, (m) => ({
+      ...m,
+      approvalCards: (m.approvalCards ?? []).map((c) => {
+        if (c.id !== card.id) return c;
+        if (c.kind === 'stage_paper_order') {
+          return { ...c, status: res.status, statusNote: res.note };
+        }
+        return { ...c, status: 'executed', statusNote: res.note };
+      })
+    }));
+    await saveAiChats(chats);
+  }
+
   // Consume incoming chart range analysis requests once persisted chats have loaded
   $effect(() => {
     const req = pendingRangeAnalysis;
@@ -544,7 +626,10 @@
       hasChart: false,
       imageCount: 0,
       model: selectedModel,
-      sources: []
+      sources: [],
+      agentSteps: [],
+      executedActions: [],
+      approvalCards: []
     };
 
     if (chartCapturedUrl) {
@@ -567,6 +652,9 @@
     const historyForApi = (currentConv?.messages ?? [])
       .filter((m) => m.id !== assistantMsgId && m.content.trim().length > 0)
       .map((m) => ({ role: m.role, content: m.content }));
+
+    const workspace = await buildWorkspaceSnapshot(agentHost);
+    const pendingActionPromises: Promise<void>[] = [];
 
     await scrollToBottom();
 
@@ -592,11 +680,47 @@
             timezone: timeZone,
             range: effectiveRange
           },
+          workspace,
           webSearchMode
         },
         {
           onStatus: (_phase, label) => {
             streamStatus = label;
+          },
+          onAgentStep: (step: AiAgentStep) => {
+            streamStatus = step.label;
+            updateAssistantMessage(targetChatId!, assistantMsgId, (m) => {
+              const existing = m.agentSteps ?? [];
+              const idx = existing.findIndex((s) => s.id === step.id);
+              const nextSteps =
+                idx >= 0
+                  ? existing.map((s, i) => (i === idx ? step : s))
+                  : [...existing, step];
+              return { ...m, agentSteps: nextSteps };
+            });
+            void scrollToBottom();
+          },
+          onClientAction: (action: AiClientAction) => {
+            const p = executeClientAction(action, agentHost).then((rec) => {
+              updateAssistantMessage(targetChatId!, assistantMsgId, (m) => {
+                const existing = m.executedActions ?? [];
+                if (existing.some((a) => a.id === rec.id)) return m;
+                return { ...m, executedActions: [...existing, rec] };
+              });
+              void scrollToBottom();
+            });
+            pendingActionPromises.push(p);
+          },
+          onApprovalCard: (card: AiApprovalCard) => {
+            updateAssistantMessage(targetChatId!, assistantMsgId, (m) => {
+              const existing = m.approvalCards ?? [];
+              if (existing.some((c) => c.id === card.id)) return m;
+              return {
+                ...m,
+                approvalCards: [...existing, { ...card, status: 'pending' }]
+              };
+            });
+            void scrollToBottom();
           },
           onSources: (sources: AiSourceLink[]) => {
             updateAssistantMessage(targetChatId!, assistantMsgId, (m) => ({
@@ -664,16 +788,25 @@
         }));
       }
     } finally {
+      if (pendingActionPromises.length > 0) {
+        await Promise.all(pendingActionPromises.map((p) => p.catch(() => undefined)));
+      }
       if (activeAbort === controller) {
         activeAbort = null;
       }
       isStreaming = false;
       streamStatus = '';
-      // Remove empty assistant placeholder if aborted before any tokens arrived
+      // Remove empty assistant placeholder if aborted before any content or agent outputs arrived
       chats = chats.map((c) => {
         if (c.id !== targetChatId) return c;
         const cleaned = c.messages.filter(
-          (m) => !(m.id === assistantMsgId && !m.content.trim())
+          (m) =>
+            !(
+              m.id === assistantMsgId &&
+              !m.content.trim() &&
+              !(m.executedActions && m.executedActions.length > 0) &&
+              !(m.approvalCards && m.approvalCards.length > 0)
+            )
         );
         return { ...c, messages: cleaned };
       });
@@ -839,7 +972,87 @@
               </div>
             {:else}
               {@const isLastAssistant = idx === messages.length - 1}
+              {@const hasRunningStep = (msg.agentSteps ?? []).some((s) => s.status === 'running')}
               <div class="msg-assistant">
+                {#if msg.agentSteps && msg.agentSteps.length > 0}
+                  <details class="agent-steps-box" open={isStreaming && isLastAssistant && !msg.content}>
+                    <summary>
+                      {#if isStreaming && isLastAssistant && hasRunningStep}
+                        <span class="status-spinner small"></span>
+                      {:else}
+                        <span class="agent-steps-dot"></span>
+                      {/if}
+                      <span class="agent-steps-title">
+                        {#if isStreaming && isLastAssistant && hasRunningStep}
+                          Desk Agent · {msg.agentSteps.find((s) => s.status === 'running')?.label ?? 'Running tools...'}
+                        {:else}
+                          Desk Agent · {msg.agentSteps.length} {msg.agentSteps.length === 1 ? 'tool step' : 'tool steps'}
+                        {/if}
+                      </span>
+                    </summary>
+                    <div class="agent-steps-list">
+                      {#each msg.agentSteps as step (step.id)}
+                        <div class="agent-step-row" class:running={step.status === 'running'} class:err={step.status === 'error'}>
+                          <span class="agent-step-icon">
+                            {#if step.status === 'running'}
+                              <span class="status-spinner tiny"></span>
+                            {:else if step.status === 'error'}
+                              !
+                            {:else}
+                              ✓
+                            {/if}
+                          </span>
+                          <div class="agent-step-text">
+                            <span class="agent-step-label">{step.label}</span>
+                            {#if step.detail}
+                              <span class="agent-step-detail">{step.detail}</span>
+                            {/if}
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  </details>
+                {/if}
+
+                {#if msg.executedActions && msg.executedActions.length > 0}
+                  <div class="agent-actions-list">
+                    {#each msg.executedActions as act (act.id)}
+                      <div
+                        class="agent-action-chip"
+                        class:undone={act.status === 'undone'}
+                        class:failed={act.status === 'failed'}
+                      >
+                        <span class="aac-icon">
+                          {#if act.status === 'undone'}
+                            ↩
+                          {:else if act.status === 'failed'}
+                            !
+                          {:else}
+                            ✓
+                          {/if}
+                        </span>
+                        <div class="aac-main">
+                          <span class="aac-label">{act.label}</span>
+                          {#if act.detail}
+                            <span class="aac-detail">
+                              {act.status === 'undone' ? 'Undone' : act.detail}
+                            </span>
+                          {/if}
+                        </div>
+                        {#if act.status === 'executed' && act.canUndo && canUndoClientAction(act.id) && activeChat}
+                          <button
+                            class="aac-undo-btn"
+                            type="button"
+                            onclick={() => void handleUndoAction(activeChat.id, msg.id, act.id)}
+                          >
+                            Undo
+                          </button>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+
                 {#if msg.reasoning && msg.reasoning.trim().length > 0}
                   <details class="reasoning-box" open={isStreaming && isLastAssistant && !msg.content}>
                     <summary>
@@ -852,7 +1065,7 @@
                   </details>
                 {/if}
 
-                {#if isStreaming && isLastAssistant && !msg.content && !(msg.reasoning && msg.reasoning.trim().length > 0)}
+                {#if isStreaming && isLastAssistant && !msg.content && !(msg.reasoning && msg.reasoning.trim().length > 0) && !hasRunningStep}
                   <div class="stream-status">
                     <span class="status-spinner"></span>
                     <span>{streamStatus || 'Analyzing...'}</span>
@@ -862,6 +1075,211 @@
                 {#if msg.content}
                   <div class="md-content">
                     {@html renderMarkdown(msg.content)}
+                  </div>
+                {/if}
+
+                {#if msg.approvalCards && msg.approvalCards.length > 0 && activeChat}
+                  <div class="approval-cards-list">
+                    {#each msg.approvalCards as card (card.id)}
+                      {@const cardState = card.status ?? 'pending'}
+                      <div class="approval-card" class:resolved={cardState !== 'pending'}>
+                        {#if card.kind === 'stage_paper_order'}
+                          <div class="ac-head">
+                            <div class="ac-title-row">
+                              <span class="ac-side-badge" class:buy={card.side === 'buy'} class:sell={card.side === 'sell'}>
+                                {card.side.toUpperCase()} · {card.orderType.toUpperCase()}
+                              </span>
+                              <span class="ac-symbol">{card.shortName}</span>
+                            </div>
+                            {#if cardState !== 'pending'}
+                              <span class="ac-status-pill" class:ok={cardState === 'executed' || cardState === 'staged'}>
+                                {cardState === 'staged' ? 'Staged' : cardState === 'executed' ? 'Submitted' : 'Dismissed'}
+                              </span>
+                            {/if}
+                          </div>
+                          <div class="ac-rationale">{card.rationale}</div>
+                          <div class="ac-grid">
+                            <div class="ac-cell">
+                              <span class="ac-k">Entry</span>
+                              <span class="ac-v">{formatCardPrice(card.entryPrice, card.symbol)}</span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">Stop Loss</span>
+                              <span class="ac-v neg">{formatCardPrice(card.stopLoss, card.symbol)}</span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">Take Profit</span>
+                              <span class="ac-v pos">{formatCardPrice(card.takeProfit, card.symbol)}</span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">Qty</span>
+                              <span class="ac-v">{card.suggestedQuantity}</span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">Risk</span>
+                              <span class="ac-v">
+                                {card.riskPct.toFixed(2)}%{card.riskUsd !== null ? ` ($${card.riskUsd.toFixed(0)})` : ''}
+                              </span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">R:R</span>
+                              <span class="ac-v">
+                                {card.rrRatio !== null ? `${card.rrRatio.toFixed(2)}R` : '—'}
+                              </span>
+                            </div>
+                          </div>
+                          {#if card.spreadNote}
+                            <div class="ac-meta-note">{card.spreadNote}</div>
+                          {/if}
+                          {#if card.warnings && card.warnings.length > 0}
+                            <div class="ac-warnings">
+                              {#each card.warnings as w (w)}
+                                <div class="ac-warning-item">⚠ {w}</div>
+                              {/each}
+                            </div>
+                          {/if}
+                          {#if cardState === 'pending'}
+                            <div class="ac-actions">
+                              <button
+                                class="ac-btn primary"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'stage')}
+                              >
+                                Stage Ticket
+                              </button>
+                              <button
+                                class="ac-btn execute"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'execute')}
+                              >
+                                Place Paper Order
+                              </button>
+                              <button
+                                class="ac-btn ghost"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'dismiss')}
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          {:else if card.statusNote}
+                            <div class="ac-result-note">{card.statusNote}</div>
+                          {/if}
+                        {:else if card.kind === 'protect_position'}
+                          <div class="ac-head">
+                            <div class="ac-title-row">
+                              <span class="ac-side-badge warn">
+                                {card.operation === 'modify_brackets'
+                                  ? 'PROTECT'
+                                  : card.operation === 'close_partial'
+                                    ? `TRIM ${Math.round((card.closeFraction ?? 0.5) * 100)}%`
+                                    : 'CLOSE'}
+                              </span>
+                              <span class="ac-symbol">{card.shortName} ({card.side.toUpperCase()})</span>
+                            </div>
+                            {#if cardState !== 'pending'}
+                              <span class="ac-status-pill" class:ok={cardState === 'executed'}>
+                                {cardState === 'executed' ? 'Applied' : 'Dismissed'}
+                              </span>
+                            {/if}
+                          </div>
+                          <div class="ac-rationale">{card.rationale}</div>
+                          {#if card.operation === 'modify_brackets'}
+                            <div class="ac-grid two">
+                              <div class="ac-cell">
+                                <span class="ac-k">New Stop Loss</span>
+                                <span class="ac-v neg">{formatCardPrice(card.newStopLoss, card.symbol)}</span>
+                              </div>
+                              <div class="ac-cell">
+                                <span class="ac-k">New Take Profit</span>
+                                <span class="ac-v pos">{formatCardPrice(card.newTakeProfit, card.symbol)}</span>
+                              </div>
+                            </div>
+                          {/if}
+                          {#if card.warnings && card.warnings.length > 0}
+                            <div class="ac-warnings">
+                              {#each card.warnings as w (w)}
+                                <div class="ac-warning-item">⚠ {w}</div>
+                              {/each}
+                            </div>
+                          {/if}
+                          {#if cardState === 'pending'}
+                            <div class="ac-actions">
+                              <button
+                                class="ac-btn primary"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'execute')}
+                              >
+                                Apply Protection
+                              </button>
+                              <button
+                                class="ac-btn ghost"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'dismiss')}
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          {:else if card.statusNote}
+                            <div class="ac-result-note">{card.statusNote}</div>
+                          {/if}
+                        {:else if card.kind === 'deploy_strategy_bot'}
+                          <div class="ac-head">
+                            <div class="ac-title-row">
+                              <span class="ac-side-badge bot">BOT · {card.executionMode === 'auto_sim' ? 'AUTO SIM' : 'NOTIFY'}</span>
+                              <span class="ac-symbol">{card.strategyName}</span>
+                            </div>
+                            {#if cardState !== 'pending'}
+                              <span class="ac-status-pill" class:ok={cardState === 'executed'}>
+                                {cardState === 'executed' ? 'Deployed' : 'Dismissed'}
+                              </span>
+                            {/if}
+                          </div>
+                          <div class="ac-rationale">{card.rationale}</div>
+                          <div class="ac-grid">
+                            <div class="ac-cell">
+                              <span class="ac-k">Symbol</span>
+                              <span class="ac-v">{card.symbol}</span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">Timeframe</span>
+                              <span class="ac-v">{card.interval}</span>
+                            </div>
+                            <div class="ac-cell">
+                              <span class="ac-k">Daily Loss Cap</span>
+                              <span class="ac-v">{card.maxDailyLossPct.toFixed(1)}%</span>
+                            </div>
+                          </div>
+                          {#if card.warnings && card.warnings.length > 0}
+                            <div class="ac-warnings">
+                              {#each card.warnings as w (w)}
+                                <div class="ac-warning-item">⚠ {w}</div>
+                              {/each}
+                            </div>
+                          {/if}
+                          {#if cardState === 'pending'}
+                            <div class="ac-actions">
+                              <button
+                                class="ac-btn primary"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'execute')}
+                              >
+                                Deploy SIM Bot
+                              </button>
+                              <button
+                                class="ac-btn ghost"
+                                type="button"
+                                onclick={() => void handleApprovalAction(activeChat.id, msg.id, card, 'dismiss')}
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          {:else if card.statusNote}
+                            <div class="ac-result-note">{card.statusNote}</div>
+                          {/if}
+                        {/if}
+                      </div>
+                    {/each}
                   </div>
                 {/if}
 
@@ -2543,5 +2961,421 @@
 
   .srs-open-btn:hover {
     background: var(--ai-option-hover);
+  }
+
+  /* Agentic Steps, Tier-1 Action Chips, and Tier-2 Approval Cards */
+  .status-spinner.small {
+    width: 11px;
+    height: 11px;
+    flex: 0 0 11px;
+  }
+
+  .status-spinner.tiny {
+    width: 9px;
+    height: 9px;
+    border-width: 1.5px;
+  }
+
+  .agent-steps-box {
+    border: 1px solid var(--ai-border-soft);
+    border-radius: 9px;
+    background: var(--ai-elevated);
+    font-size: 11.5px;
+  }
+
+  .agent-steps-box summary {
+    padding: 7px 10px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--ai-secondary);
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+
+  .agent-steps-box summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .agent-steps-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #089981;
+    flex: 0 0 6px;
+  }
+
+  .agent-steps-title {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .agent-steps-list {
+    padding: 6px 10px 8px;
+    border-top: 1px solid var(--ai-border-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .agent-step-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    color: var(--ai-text);
+  }
+
+  .agent-step-row.err {
+    color: #f23645;
+  }
+
+  .agent-step-icon {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    margin-top: 1px;
+    display: grid;
+    place-items: center;
+    font-size: 10px;
+    font-weight: 700;
+    color: #089981;
+  }
+
+  .agent-step-row.err .agent-step-icon {
+    color: #f23645;
+  }
+
+  .agent-step-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .agent-step-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .agent-step-detail {
+    font-size: 10.5px;
+    color: var(--ai-secondary);
+    line-height: 1.3;
+  }
+
+  .agent-actions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .agent-action-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: 8px;
+    border: 1px solid rgba(8, 153, 129, 0.3);
+    background: rgba(8, 153, 129, 0.08);
+    font-size: 11.5px;
+  }
+
+  .agent-action-chip.undone {
+    border-color: var(--ai-border);
+    background: var(--ai-elevated);
+    opacity: 0.72;
+  }
+
+  .agent-action-chip.failed {
+    border-color: rgba(242, 54, 69, 0.32);
+    background: rgba(242, 54, 69, 0.08);
+  }
+
+  .aac-icon {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 10px;
+    font-weight: 700;
+    color: #089981;
+    background: rgba(8, 153, 129, 0.16);
+  }
+
+  .agent-action-chip.undone .aac-icon {
+    color: var(--ai-secondary);
+    background: var(--ai-chip-bg);
+  }
+
+  .agent-action-chip.failed .aac-icon {
+    color: #f23645;
+    background: rgba(242, 54, 69, 0.16);
+  }
+
+  .aac-main {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .aac-label {
+    font-weight: 600;
+    color: var(--ai-text);
+    line-height: 1.25;
+  }
+
+  .aac-detail {
+    font-size: 10.5px;
+    color: var(--ai-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .aac-undo-btn {
+    height: 22px;
+    padding: 0 8px;
+    flex: 0 0 auto;
+    border: 1px solid var(--ai-border);
+    border-radius: 5px;
+    background: var(--ai-surface);
+    color: var(--ai-text);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 120ms ease;
+  }
+
+  .aac-undo-btn:hover {
+    background: var(--ai-option-hover);
+  }
+
+  .approval-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  .approval-card {
+    padding: 10px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--ai-border);
+    background: var(--ai-elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .approval-card.resolved {
+    opacity: 0.85;
+  }
+
+  .ac-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .ac-title-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .ac-side-badge {
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    flex: 0 0 auto;
+  }
+
+  .ac-side-badge.buy {
+    background: rgba(8, 153, 129, 0.18);
+    color: #089981;
+  }
+
+  .ac-side-badge.sell {
+    background: rgba(242, 54, 69, 0.18);
+    color: #f23645;
+  }
+
+  .ac-side-badge.warn {
+    background: rgba(245, 158, 11, 0.18);
+    color: #d97706;
+  }
+
+  .ac-side-badge.bot {
+    background: rgba(41, 98, 255, 0.16);
+    color: #2962ff;
+  }
+
+  .ac-symbol {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--ai-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ac-status-pill {
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--ai-chip-bg);
+    color: var(--ai-secondary);
+    flex: 0 0 auto;
+  }
+
+  .ac-status-pill.ok {
+    background: rgba(8, 153, 129, 0.16);
+    color: #089981;
+  }
+
+  .ac-rationale {
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--ai-secondary);
+  }
+
+  .ac-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .ac-grid.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ac-cell {
+    padding: 5px 7px;
+    border-radius: 6px;
+    border: 1px solid var(--ai-border-soft);
+    background: var(--ai-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .ac-k {
+    font-size: 9.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--ai-secondary);
+  }
+
+  .ac-v {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--ai-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ac-v.pos {
+    color: #089981;
+  }
+
+  .ac-v.neg {
+    color: #f23645;
+  }
+
+  .ac-meta-note {
+    font-size: 10.5px;
+    color: var(--ai-secondary);
+  }
+
+  .ac-warnings {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.11);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+  }
+
+  .ac-warning-item {
+    font-size: 11px;
+    line-height: 1.35;
+    color: #d97706;
+    font-weight: 500;
+  }
+
+  .ac-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding-top: 2px;
+  }
+
+  .ac-btn {
+    height: 27px;
+    padding: 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--ai-border);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 120ms ease, opacity 120ms ease;
+  }
+
+  .ac-btn.primary {
+    border-color: #2962ff;
+    background: #2962ff;
+    color: #ffffff;
+  }
+
+  .ac-btn.primary:hover {
+    opacity: 0.92;
+  }
+
+  .ac-btn.execute {
+    border-color: rgba(8, 153, 129, 0.45);
+    background: rgba(8, 153, 129, 0.14);
+    color: #089981;
+  }
+
+  .ac-btn.execute:hover {
+    background: rgba(8, 153, 129, 0.22);
+  }
+
+  .ac-btn.ghost {
+    background: transparent;
+    color: var(--ai-secondary);
+  }
+
+  .ac-btn.ghost:hover {
+    color: var(--ai-text);
+    background: var(--ai-option-hover);
+  }
+
+  .ac-result-note {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ai-secondary);
   }
 </style>

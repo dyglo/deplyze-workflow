@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { AgentHostCallbacks, ChartDeskPatch } from './ai/actionBus';
   import type { PendingRangeAnalysisRequest } from './ai/types';
   import AiPanel from './panels/AiPanel.svelte';
   import AlertsPanel from './panels/AlertsPanel.svelte';
@@ -56,6 +57,8 @@
     onToggleRangeAnalysis?: () => void;
     pendingRangeAnalysis?: PendingRangeAnalysisRequest | null;
     onConsumePendingRangeAnalysis?: () => void;
+    onGetAgentDeskSnapshot?: AgentHostCallbacks['getDeskSnapshot'];
+    onApplyAgentChartDesk?: (patch: ChartDeskPatch) => () => void;
   }
 
   let {
@@ -84,7 +87,9 @@
     rangeAnalysisActive = false,
     onToggleRangeAnalysis,
     pendingRangeAnalysis = null,
-    onConsumePendingRangeAnalysis
+    onConsumePendingRangeAnalysis,
+    onGetAgentDeskSnapshot,
+    onApplyAgentChartDesk
   }: Props = $props();
 
   type RailId =
@@ -146,6 +151,21 @@
   let radarTopSetupLabel = $state<string | null>(null);
 
   const activeLayoutDef = $derived(getLayoutById(layoutId));
+
+  const agentHost = $derived<AgentHostCallbacks | undefined>(
+    onGetAgentDeskSnapshot && onApplyAgentChartDesk
+      ? {
+          getDeskSnapshot: onGetAgentDeskSnapshot,
+          applyChartDesk: onApplyAgentChartDesk,
+          openRailPanel: (panel) => {
+            layoutAnchor = null;
+            if (panel !== 'screener') onCloseScreenerFullscreen?.();
+            active = panel;
+            persistRail(panel);
+          }
+        }
+      : undefined
+  );
 
   // Auto-open AI Copilot side-by-side whenever a chart range analysis request arrives
   $effect(() => {
@@ -330,6 +350,7 @@
     {activeChangePercent}
     {pendingRangeAnalysis}
     {onConsumePendingRangeAnalysis}
+    {agentHost}
     onClose={closePanel}
   />
 {:else if active === 'alerts'}

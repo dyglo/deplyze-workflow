@@ -70,7 +70,8 @@ export function buildCopilotSystemPrompt(
   calendarContext: string,
   tavilyContext: string | null,
   hasChartImage: boolean,
-  rangeDossier?: string | null
+  rangeDossier?: string | null,
+  agentDossier?: string | null
 ): string {
   const symbol = ctx?.symbol || 'the active chart';
   const fullSymbol = ctx?.fullSymbol ? ` (${ctx.fullSymbol})` : '';
@@ -82,37 +83,45 @@ export function buildCopilotSystemPrompt(
   const tz = ctx?.timezone || 'UTC';
   const nowIso = new Date().toISOString();
   const hasRangeDossier = Boolean(rangeDossier && rangeDossier.trim().length > 0);
+  const hasAgentDossier = Boolean(agentDossier && agentDossier.trim().length > 0);
+  const hasGroundedData = hasRangeDossier || hasAgentDossier;
 
   const sections: string[] = [
-    `You are DeplyzeWorkflow AI Copilot — a sharp, objective, institutional-grade technical, quantitative & macro trading analyst integrated beside the user's live TradingView chart.`,
+    `You are DeplyzeWorkflow AI Copilot — an institutional-grade Agentic Trading Desk Analyst & Risk Officer integrated directly into the trader's live workstation.`,
     `Current UTC time: ${nowIso} (User timezone: ${tz}).`,
     `Active Instrument: ${symbol}${fullSymbol}${tfLine}\n${priceLine}`,
     hasChartImage
       ? hasRangeDossier
         ? `A live capture of the user's active chart WITH their highlighted purple-to-blue selected range is attached, TOGETHER with exact OANDA/historical candles, computed start-vs-end technical indicators, and windowed economic calendar & news data below. Anchor your analysis strictly to the selected range.`
-        : `A live capture of the user's active chart (and any attached higher/lower timeframe screenshots) is included with this request. Inspect EVERY visual detail carefully: timeframe label in the top-left, exact price axis scale, recent candlestick structure (swing highs/lows, wicks, engulfing/rejection bars, consolidation, break of structure), any visible indicators, and any drawings/zones/entry-SL-TP boxes the user has placed on the chart.`
-      : hasRangeDossier
-        ? `Exact OANDA/historical candles, computed start-vs-end technical indicators, and windowed economic calendar & news data for the user's selected chart range are provided below. Anchor your analysis strictly to those real figures.`
+        : hasAgentDossier
+          ? `A live capture of the user's active chart is attached TOGETHER with verified multi-market OANDA tool telemetry, workspace state, and executed/proposed agent actions below.`
+          : `A live capture of the user's active chart (and any attached higher/lower timeframe screenshots) is included with this request. Inspect EVERY visual detail carefully: timeframe label in the top-left, exact price axis scale, recent candlestick structure (swing highs/lows, wicks, engulfing/rejection bars, consolidation, break of structure), any visible indicators, and any drawings/zones/entry-SL-TP boxes the user has placed on the chart.`
+      : hasGroundedData
+        ? `Verified real-time OANDA market telemetry, intermarket dislocation metrics, workspace portfolio state, and/or selected chart range data are provided below. Ground every figure strictly in those real numbers.`
         : `No chart screenshot was attached to this message. Base your answer on the live quote, macro calendar, web search context (if provided), and general market structure principles. Remind the user briefly if visual chart context would improve precision.`,
     `STRICT RULES:
 1. Be 100% honest and grounded. ${
-      hasRangeDossier
-        ? `Cite the exact OANDA OHLC prices, timestamps, indicator readings, calendar releases, and news sources supplied in the SELECTED CHART RANGE TELEMETRY below. NEVER invent prices, events, or indicator readings that are not in the telemetry or visibly on the chart.`
+      hasGroundedData
+        ? `Cite the exact OANDA OHLC prices, technical indicator values, screener/dislocation scores, OANDA crowd skew, risk sizing numbers, calendar releases, and news sources supplied in the verified telemetry below. NEVER invent prices, events, or indicator values not present in the telemetry or visible on the chart.`
         : `NEVER fabricate indicator values (RSI, MACD, 200 EMA, etc.) that are NOT actually visible on the chart image. If an indicator isn't on the chart, analyze pure price action, market structure, and key S/R levels instead.`
     }
-2. You CANNOT draw lines directly on the chart — present exact, clean price levels so the trader can mark them manually. You CAN build, backtest, validate Out-of-Sample, and open strategies in the bottom Strategy Tester when the user asks you to build or backtest a strategy.
+2. You CANNOT draw trendlines or add TradingView studies directly inside the embedded TradingView chart iframe — be transparent if asked, and instead present exact levels or use your workspace tools (multi-chart desk layouts, watchlists, alerts, notes, tasks, Strategy Tester, and 1-click risk-sized Paper Order cards).
 3. Keep output crisp, scannable, and high-signal — no filler intros like "Sure! Here is your analysis". Start immediately with the structured breakdown.
 4. Format cleanly with GitHub-flavored Markdown:
    - Use bold section headings (e.g., **Directional Bias: BULLISH**, **Setup Rating: 7.5 / 10**, **Key Levels**, **Trade Plan**, **Macro & Event Risk**).
-   - Use compact Markdown tables whenever listing levels, scenarios, setup criteria, indicator shifts, or catalyst timelines.
+   - Keep Markdown tables compact (3–4 short columns max) so they read cleanly inside a side panel without wrapping words.
    - Use exact price numbers matching the instrument's decimal precision.
-   - When rating a user's setup, score out of 10 with a concise confluence table (Trend Alignment, Key Level / Liquidity, Trigger / Candle Confirmation, Risk-to-Reward, Macro Risk) plus clear Strengths, Risks, and Invalidation.
+   - When rating a user's setup, score out of 10 with a concise confluence table plus clear Strengths, Risks, and Invalidation.
    - When web search results or news items are provided, synthesize the relevant catalysts concisely and cite sources as Markdown links \`[Source Title](url)\`.
 5. Keep tone disciplined and analytical; this is market analysis, not personalized financial advice.`
   ];
 
   if (hasRangeDossier && rangeDossier) {
     sections.push(rangeDossier);
+  }
+
+  if (hasAgentDossier && agentDossier) {
+    sections.push(agentDossier);
   }
 
   if (calendarContext) {

@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { AgentHostCallbacks, ChartDeskPatch } from './lib/ai/actionBus';
   import type { PendingRangeAnalysisRequest } from './lib/ai/types';
   import type { ThemeMode } from './lib/AppMenu.svelte';
+  import { normalizeSymbolInput } from './lib/watchlist/store';
   import type { ChartQuote } from './lib/Chart.svelte';
   import ChartGrid from './lib/ChartGrid.svelte';
   import SymbolInsightsPage from './lib/insights/SymbolInsightsPage.svelte';
@@ -421,6 +423,125 @@
     });
   }
 
+  function getAgentDeskSnapshot(): ReturnType<AgentHostCallbacks['getDeskSnapshot']> {
+    const tab = getActiveTab(tabsState);
+    const layoutDef = getLayoutById(tab.layoutId);
+    const panes = Array.from({ length: layoutDef.count }, (_, idx) => {
+      const ps = getPaneState(tab, idx);
+      return {
+        index: idx,
+        symbol: ps.symbol,
+        shortName: ps.shortName || extractShortSymbol(ps.symbol),
+        interval: ps.interval || 'D'
+      };
+    });
+    return {
+      layoutId: tab.layoutId,
+      activeTabTitle: tab.title,
+      panes
+    };
+  }
+
+  function applyAgentChartDesk(patch: ChartDeskPatch): () => void {
+    symbolInsights = null;
+    screenerFullscreen = false;
+    const prevTabsSnapshot: TabsState = JSON.parse(JSON.stringify(tabsState)) as TabsState;
+
+    const curGroup = getActiveGroup(tabsState);
+    const curTab = getActiveTab(tabsState);
+    const targetLayout: LayoutId = patch.layoutId ?? curTab.layoutId;
+    const layoutCount = getLayoutById(targetLayout).count;
+
+    if (patch.layoutId) {
+      saveLayoutId(patch.layoutId);
+    }
+
+    const buildPanes = (baseTab: WorkspaceTab) => {
+      const seeded = seedTabPanes(baseTab, targetLayout);
+      for (let i = 0; i < patch.panes.length; i++) {
+        const req = patch.panes[i];
+        const idx =
+          typeof req.paneIndex === 'number' && req.paneIndex >= 0 && req.paneIndex < layoutCount
+            ? req.paneIndex
+            : i < layoutCount
+              ? i
+              : 0;
+        const norm = normalizeSymbolInput(req.symbol);
+        const prevPane = seeded[idx];
+        seeded[idx] = {
+          symbol: norm.symbol,
+          shortName: norm.shortName,
+          interval: req.interval || prevPane?.interval || '60'
+        };
+      }
+      return seeded;
+    };
+
+    if (patch.openInNewTab) {
+      const firstSym = patch.panes[0]
+        ? normalizeSymbolInput(patch.panes[0].symbol)
+        : { symbol: curTab.symbol, shortName: curTab.title };
+      const freshTab = createTab({
+        title: patch.tabTitle || firstSym.shortName,
+        symbol: firstSym.symbol,
+        layoutId: targetLayout
+      });
+      const seeded = buildPanes(freshTab);
+      const primaryPane = seeded[0];
+      const finalTab: WorkspaceTab = {
+        ...freshTab,
+        title: patch.tabTitle || primaryPane.shortName || extractShortSymbol(primaryPane.symbol),
+        symbol: primaryPane.symbol,
+        panes: seeded,
+        activePane: 0
+      };
+      commitTabs({
+        ...tabsState,
+        groups: tabsState.groups.map((g) =>
+          g.id === curGroup.id
+            ? { ...g, tabs: [...g.tabs, finalTab], activeTabId: finalTab.id }
+            : g
+        )
+      });
+    } else {
+      commitTabs({
+        ...tabsState,
+        groups: tabsState.groups.map((g) =>
+          g.id !== curGroup.id
+            ? g
+            : {
+                ...g,
+                tabs: g.tabs.map((t) => {
+                  if (t.id !== curTab.id) return t;
+                  const seeded = buildPanes(t);
+                  const primaryIdx =
+                    patch.panes.length === 1 && typeof patch.panes[0].paneIndex === 'number'
+                      ? Math.min(layoutCount - 1, Math.max(0, patch.panes[0].paneIndex))
+                      : 0;
+                  const primaryPane = seeded[primaryIdx] ?? seeded[0];
+                  return {
+                    ...t,
+                    layoutId: targetLayout,
+                    panes: seeded,
+                    activePane: primaryIdx,
+                    symbol: primaryPane.symbol,
+                    title:
+                      patch.tabTitle ||
+                      primaryPane.shortName ||
+                      extractShortSymbol(primaryPane.symbol),
+                    quote: undefined
+                  };
+                })
+              }
+        )
+      });
+    }
+
+    return () => {
+      commitTabs(prevTabsSnapshot);
+    };
+  }
+
   function openSymbolInsights(
     symbol: string,
     shortName: string,
@@ -749,6 +870,8 @@
       }}
       {pendingRangeAnalysis}
       onConsumePendingRangeAnalysis={() => (pendingRangeAnalysis = null)}
+      onGetAgentDeskSnapshot={getAgentDeskSnapshot}
+      onApplyAgentChartDesk={applyAgentChartDesk}
     />
   </div>
 

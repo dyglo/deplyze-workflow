@@ -1,5 +1,9 @@
 import type { ServerResponse } from 'node:http';
 import {
+  runAgenticOrchestrator,
+  shouldRunAgenticOrchestrator
+} from './agent.js';
+import {
   buildCopilotSystemPrompt,
   buildUpcomingCalendarContext,
   shouldAutoRunWebSearch
@@ -207,8 +211,11 @@ export async function streamAiChat(
     return;
   }
 
+  const runAgent = shouldRunAgenticOrchestrator(latestUserText, hasRangeSelection);
+
   const runSearch =
     !hasRangeSelection &&
+    !runAgent &&
     isTavilyConfigured() &&
     (webMode === 'on' || (webMode === 'auto' && shouldAutoRunWebSearch(latestUserText)));
 
@@ -216,7 +223,9 @@ export async function streamAiChat(
     let sources: AiSourceLink[] = [];
     let tavilySnippets: string | null = null;
     let rangeDossier: string | null = null;
+    let agentDossier: string | null = null;
     let usedRangeSearch = false;
+    let usedAgentSearch = false;
     let calendarCtx = '';
 
     if (hasRangeSelection && body.context) {
@@ -232,7 +241,46 @@ export async function streamAiChat(
         sources = rangePacket.sources;
         writeSse(res, 'sources', { sources });
       }
-    } else {
+    }
+
+    if (runAgent) {
+      const agentRes = await runAgenticOrchestrator({
+        apiKey,
+        model,
+        history,
+        latestUserText,
+        context: body.context,
+        workspace: body.workspace,
+        webSearchMode: webMode,
+        abortSignal,
+        onStep: (step) => writeSse(res, 'agent_step', { step }),
+        onStatus: (phase, label) => writeSse(res, 'status', { phase, label })
+      });
+      if (agentRes.telemetryDossier) {
+        agentDossier = agentRes.telemetryDossier;
+      }
+      if (agentRes.usedWebSearch) usedAgentSearch = true;
+      if (agentRes.sources.length > 0) {
+        const merged = [...sources];
+        const seen = new Set(merged.map((s) => s.url));
+        for (const s of agentRes.sources) {
+          if (!seen.has(s.url)) {
+            seen.add(s.url);
+            merged.push(s);
+          }
+        }
+        sources = merged;
+        writeSse(res, 'sources', { sources });
+      }
+      for (const act of agentRes.clientActions) {
+        writeSse(res, 'client_action', { action: act });
+      }
+      for (const card of agentRes.approvalCards) {
+        writeSse(res, 'approval_card', { card });
+      }
+    }
+
+    if (!hasRangeSelection && !agentDossier) {
       if (runSearch) {
         writeSse(res, 'status', {
           phase: 'searching',
@@ -286,7 +334,8 @@ export async function streamAiChat(
       calendarCtx,
       tavilySnippets,
       images.length > 0,
-      rangeDossier
+      rangeDossier,
+      agentDossier
     );
 
     const apiMessages: Array<Record<string, unknown>> = [
@@ -403,7 +452,7 @@ export async function streamAiChat(
 
     writeSse(res, 'done', {
       model,
-      usedWebSearch: Boolean(tavilySnippets) || usedRangeSearch,
+      usedWebSearch: Boolean(tavilySnippets) || usedRangeSearch || usedAgentSearch,
       usedVision: images.length > 0
     });
     res.end();
