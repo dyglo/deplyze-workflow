@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import {
     calibrateRangeTimeAxis,
     captureElementRegion,
@@ -19,6 +19,7 @@
     isActivePane?: boolean;
     leftToolbarCollapsed?: boolean;
     legendSlot?: { top: number; left: number } | null;
+    toggleSeq?: number;
     onAnalyzeRange: (request: PendingRangeAnalysisRequest) => void;
     onRangeActiveChange?: (active: boolean) => void;
   }
@@ -31,6 +32,7 @@
     isActivePane = true,
     leftToolbarCollapsed = false,
     legendSlot = null,
+    toggleSeq = 0,
     onAnalyzeRange,
     onRangeActiveChange
   }: Props = $props();
@@ -38,9 +40,9 @@
   type SelectionPhase = 'idle' | 'selecting-start' | 'selecting-end' | 'selected';
 
   const PLOT_TOP_PX = 38;
+  // TradingView widgetembed renders ONLY the 28px time axis at the bottom (no extra 36px preset bar)
   const TIME_AXIS_HEIGHT_PX = 28;
-  const BOTTOM_BAR_HEIGHT_PX = 36;
-  const PLOT_BOTTOM_INSET_PX = TIME_AXIS_HEIGHT_PX + BOTTOM_BAR_HEIGHT_PX; // 64px
+  const PLOT_BOTTOM_INSET_PX = TIME_AXIS_HEIGHT_PX;
   const PRICE_AXIS_WIDTH_PX = 58;
   const POPOVER_W = 284;
   const POPOVER_H = 198;
@@ -60,10 +62,13 @@
   let paneHeight = $state(600);
 
   let phase = $state<SelectionPhase>('idle');
-  let anchorX = $state<number | null>(null);
-  let hoverX = $state<number | null>(null);
-  let startX = $state<number>(0);
-  let endX = $state<number>(0);
+  // Store coordinates relative to plotRight (`distFromRight = plotRight - x`) so when
+  // AI Copilot opens/closes and TradingView keeps the right edge anchored, the highlighted
+  // range stays glued to the exact same candles!
+  let anchorDistR = $state<number | null>(null);
+  let hoverDistR = $state<number | null>(null);
+  let startDistR = $state<number>(0);
+  let endDistR = $state<number>(0);
 
   let dragHandle = $state<'start' | 'end' | null>(null);
   let isPointerDraggingNew = $state(false);
@@ -73,12 +78,25 @@
   let capturingForAi = $state(false);
   let customQuestion = $state('');
 
-  // Bar-index & axis calibration state
+  // Bar-index & right-edge-anchored axis calibration state
   let bars = $state<RangeBarPreviewItem[]>([]);
   let barSec = $state(900);
-  let calibratedAnchors = $state<CalibratedAxisAnchor[]>([]);
+  // Anchors stored as pixel distance from plotRight so they stay valid across pane resizes!
+  let calibratedAnchors = $state<{ distR: number; ts: number; label: string }[]>([]);
   let isCalibrated = $state(false);
+  // Snapshot of the plotWidth at the moment Range Mode opened (preserves default pxPerBar on resize)
+  let initialCalibrationPlotWidth = $state(850);
   let activeAbort: AbortController | null = null;
+
+  // Respond cleanly to Rail |✦| button clicks without triggering on initial mount
+  let lastHandledToggleSeq = untrack(() => toggleSeq);
+  $effect(() => {
+    const seq = toggleSeq;
+    if (seq > lastHandledToggleSeq) {
+      lastHandledToggleSeq = seq;
+      untrack(() => toggleRangeMode());
+    }
+  });
 
   const plotLeft = $derived.by(() => {
     if (legendSlot && legendSlot.left > 12 && legendSlot.left < 120) {
@@ -98,25 +116,35 @@
     return !(iv === 'D' || iv === '1D' || iv === 'W' || iv === '1W' || iv === 'M' || iv === '1M');
   });
 
-  // Active preview coordinates during selecting-end or final selected coordinates
-  const activeStartX = $derived.by(() => {
-    if (phase === 'selected') return Math.min(startX, endX);
-    if (phase === 'selecting-end' && anchorX !== null) {
-      return hoverX !== null ? Math.min(anchorX, hoverX) : anchorX;
+  // Logical distance-from-right bounds (larger distR = further left = earlier in time)
+  const activeStartDistR = $derived.by(() => {
+    if (phase === 'selected') return Math.max(startDistR, endDistR);
+    if (phase === 'selecting-end' && anchorDistR !== null) {
+      return hoverDistR !== null ? Math.max(anchorDistR, hoverDistR) : anchorDistR;
     }
     return 0;
   });
 
-  const activeEndX = $derived.by(() => {
-    if (phase === 'selected') return Math.max(startX, endX);
-    if (phase === 'selecting-end' && anchorX !== null) {
-      return hoverX !== null ? Math.max(anchorX, hoverX) : anchorX;
+  const activeEndDistR = $derived.by(() => {
+    if (phase === 'selected') return Math.min(startDistR, endDistR);
+    if (phase === 'selecting-end' && anchorDistR !== null) {
+      return hoverDistR !== null ? Math.min(anchorDistR, hoverDistR) : anchorDistR;
     }
     return 0;
   });
+
+  // Clamped visual X coordinates within current plot bounds
+  const rawStartX = $derived(Math.round(plotRight - activeStartDistR));
+  const rawEndX = $derived(Math.round(plotRight - activeEndDistR));
+  const activeStartX = $derived(Math.max(plotLeft, Math.min(plotRight, rawStartX)));
+  const activeEndX = $derived(Math.max(plotLeft, Math.min(plotRight, rawEndX)));
+  const startClippedLeft = $derived(rawStartX < plotLeft + 1);
+  const hoverX = $derived(
+    hoverDistR !== null ? Math.max(plotLeft, Math.min(plotRight, Math.round(plotRight - hoverDistR))) : null
+  );
 
   const hasVisibleBand = $derived(
-    phase === 'selected' || (phase === 'selecting-end' && anchorX !== null)
+    phase === 'selected' || (phase === 'selecting-end' && anchorDistR !== null)
   );
   const bandWidth = $derived(Math.max(0, activeEndX - activeStartX));
 
@@ -150,66 +178,66 @@
     return lo;
   }
 
-  // Build linear bar-index scale from calibrated anchors (or default TV density)
+  // Right-edge-anchored linear bar-index scale: `idx = rightEdgeIdx - distR * barsPerPx`
+  // Invariant across pane horizontal resizes (e.g. when AI Copilot slides open/closed)!
   const barScale = $derived.by(() => {
     const list = bars;
-    const defaultVisible = Math.max(45, Math.min(180, Math.round(plotWidth / 7.5)));
+    const refWidth = Math.max(240, initialCalibrationPlotWidth || plotWidth);
+    const defaultBarsPerPx = 1 / 6.8;
+
     if (list.length < 2) {
       return {
         hasBars: false,
-        leftIdx: 0,
-        barsSpan: defaultVisible
+        rightEdgeIdx: 0,
+        barsPerPx: defaultBarsPerPx
       };
     }
 
     if (calibratedAnchors.length >= 2) {
-      const a0 = calibratedAnchors[0];
-      const a1 = calibratedAnchors[calibratedAnchors.length - 1];
-      const idx0 = findNearestBarIndex(list, a0.ts);
-      const idx1 = findNearestBarIndex(list, a1.ts);
-      const dRatio = a1.xRatio - a0.xRatio;
-      const dIdx = idx1 - idx0;
-      if (dRatio > 0.08 && dIdx >= 2) {
-        const barsPerRatio = dIdx / dRatio;
-        const leftIdx = idx0 - a0.xRatio * barsPerRatio;
+      // calibratedAnchors are sorted left-to-right (distR descending, ts ascending)
+      const leftA = calibratedAnchors[0];
+      const rightA = calibratedAnchors[calibratedAnchors.length - 1];
+      const idxLeft = findNearestBarIndex(list, leftA.ts);
+      const idxRight = findNearestBarIndex(list, rightA.ts);
+      const dDistR = leftA.distR - rightA.distR; // positive pixels between leftA and rightA
+      const dIdx = idxRight - idxLeft;
+      if (dDistR > 60 && dIdx >= 2) {
+        const barsPerPx = dIdx / dDistR;
+        const rightEdgeIdx = idxRight + rightA.distR * barsPerPx;
         return {
           hasBars: true,
-          leftIdx,
-          barsSpan: barsPerRatio
+          rightEdgeIdx,
+          barsPerPx
         };
       }
     }
 
-    // Default TradingView viewport: ~7 bars right margin + defaultVisible bars across plotWidth
+    // Default TradingView viewport before calibration resolves
+    const defaultVisible = Math.max(45, Math.min(200, Math.round(refWidth * defaultBarsPerPx)));
     const rightMarginBars = Math.round(defaultVisible * 0.075);
-    const rightIdx = list.length - 1 + rightMarginBars;
-    const leftIdx = rightIdx - defaultVisible;
     return {
       hasBars: true,
-      leftIdx,
-      barsSpan: defaultVisible
+      rightEdgeIdx: list.length - 1 + rightMarginBars,
+      barsPerPx: defaultBarsPerPx
     };
   });
 
-  function xToBarIndex(xPx: number): number {
-    const ratio = Math.max(0, Math.min(1, (xPx - plotLeft) / plotWidth));
+  function distRToBarIndex(distR: number): number {
     if (!barScale.hasBars || bars.length === 0) return -1;
-    const rawIdx = Math.round(barScale.leftIdx + ratio * barScale.barsSpan);
+    const rawIdx = Math.round(barScale.rightEdgeIdx - distR * barScale.barsPerPx);
     return Math.max(0, Math.min(bars.length - 1, rawIdx));
   }
 
-  function xToTimestamp(xPx: number): number {
-    const ratio = Math.max(0, Math.min(1, (xPx - plotLeft) / plotWidth));
+  function distRToTimestamp(distR: number): number {
     if (barScale.hasBars && bars.length > 0) {
-      const idx = xToBarIndex(xPx);
+      const idx = distRToBarIndex(distR);
       return bars[idx].ts;
     }
     const step = barSec || intervalToFallbackSec(interval);
     const nowSec = Math.floor(Date.now() / 1000);
     const alignedNow = Math.floor(nowSec / step) * step;
-    const totalSpanSec = barScale.barsSpan * step;
-    const rawTs = alignedNow - (1 - ratio) * totalSpanSec;
-    return Math.round(rawTs / step) * step;
+    const barsBack = Math.max(0, Math.round(distR * barScale.barsPerPx));
+    return alignedNow - barsBack * step;
   }
 
   function formatTvAxisPill(ts: number): string {
@@ -247,8 +275,8 @@
     }
   }
 
-  const startTs = $derived(hasVisibleBand ? xToTimestamp(activeStartX) : 0);
-  const endTs = $derived(hasVisibleBand ? xToTimestamp(activeEndX) : 0);
+  const startTs = $derived(hasVisibleBand ? distRToTimestamp(activeStartDistR) : 0);
+  const endTs = $derived(hasVisibleBand ? distRToTimestamp(activeEndDistR) : 0);
   const startLabel = $derived(hasVisibleBand ? formatTvAxisPill(startTs) : '');
   const endLabel = $derived(hasVisibleBand ? formatTvAxisPill(endTs) : '');
 
@@ -276,8 +304,8 @@
     if (!hasVisibleBand || bars.length === 0) {
       return { barCount: undefined as number | undefined, netChangePct: null as number | null };
     }
-    const i1 = xToBarIndex(activeStartX);
-    const i2 = xToBarIndex(activeEndX);
+    const i1 = distRToBarIndex(activeStartDistR);
+    const i2 = distRToBarIndex(activeEndDistR);
     const lo = Math.min(i1, i2);
     const hi = Math.max(i1, i2);
     if (lo < 0 || hi < lo) return { barCount: undefined, netChangePct: null };
@@ -293,38 +321,25 @@
     const insideThreshold = POPOVER_W + 40;
     let left: number;
     let top: number;
-    let placement: 'inside' | 'outside-right' | 'outside-left' | 'clamped';
 
     if (bandWidth >= insideThreshold) {
-      // Wide range: center INSIDE upper portion of the shaded zone (Screenshot 3)
       left = activeStartX + (bandWidth - POPOVER_W) / 2;
       top = PLOT_TOP_PX + Math.max(24, Math.min(92, Math.round(plotHeight * 0.16)));
-      placement = 'inside';
     } else if (activeEndX + gap + POPOVER_W <= plotRight - 6) {
-      // Narrow range with space on right: OUTSIDE right of end line (Screenshot 4)
       left = activeEndX + gap;
       top = PLOT_TOP_PX + Math.max(24, Math.min(plotHeight - POPOVER_H - 16, Math.round(plotHeight * 0.28)));
-      placement = 'outside-right';
     } else if (activeStartX - gap - POPOVER_W >= plotLeft + 6) {
-      // Narrow range near right edge: flip OUTSIDE left of start line
       left = activeStartX - gap - POPOVER_W;
       top = PLOT_TOP_PX + Math.max(24, Math.min(plotHeight - POPOVER_H - 16, Math.round(plotHeight * 0.28)));
-      placement = 'outside-left';
     } else {
-      // Small multi-pane fallback: center inside plot bounds
       left = plotLeft + (plotWidth - POPOVER_W) / 2;
       top = PLOT_TOP_PX + Math.max(16, Math.min(plotHeight - POPOVER_H - 16, Math.round(plotHeight * 0.2)));
-      placement = 'clamped';
     }
 
-    const clampedLeft = Math.round(
-      Math.max(plotLeft + 6, Math.min(plotRight - POPOVER_W - 6, left))
-    );
-    const clampedTop = Math.round(
-      Math.max(PLOT_TOP_PX + 10, Math.min(plotBottom - POPOVER_H - 10, top))
-    );
-
-    return { left: clampedLeft, top: clampedTop, placement };
+    return {
+      left: Math.round(Math.max(plotLeft + 6, Math.min(plotRight - POPOVER_W - 6, left))),
+      top: Math.round(Math.max(PLOT_TOP_PX + 10, Math.min(plotBottom - POPOVER_H - 10, top)))
+    };
   });
 
   // Notify parent when range mode opens/closes
@@ -392,12 +407,16 @@
     return Math.round(Math.max(plotLeft + 2, Math.min(plotRight - 2, rawX)));
   }
 
+  function xToDistR(xPx: number): number {
+    return Math.max(0, plotRight - xPx);
+  }
+
   function resetSelection() {
     activeAbort?.abort();
     activeAbort = null;
     phase = 'idle';
-    anchorX = null;
-    hoverX = null;
+    anchorDistR = null;
+    hoverDistR = null;
     dragHandle = null;
     isPointerDraggingNew = false;
     popoverCollapsed = false;
@@ -414,13 +433,25 @@
   }
 
   function startRangeMode() {
-    if (overlayRootEl) {
-      paneWidth = Math.round(overlayRootEl.clientWidth || paneWidth);
-      paneHeight = Math.round(overlayRootEl.clientHeight || paneHeight);
-    }
+    const curW = overlayRootEl ? Math.round(overlayRootEl.clientWidth || paneWidth) : paneWidth;
+    const curH = overlayRootEl ? Math.round(overlayRootEl.clientHeight || paneHeight) : paneHeight;
+    paneWidth = curW;
+    paneHeight = curH;
+
+    const curPlotLeft =
+      legendSlot && legendSlot.left > 12 && legendSlot.left < 120
+        ? Math.max(0, Math.round(legendSlot.left - 10))
+        : leftToolbarCollapsed
+          ? 2
+          : 52;
+    const curPlotRight = Math.max(curPlotLeft + 120, curW - PRICE_AXIS_WIDTH_PX);
+    const curPlotWidth = Math.max(120, curPlotRight - curPlotLeft);
+    const curPlotBottom = Math.max(PLOT_TOP_PX + 100, curH - PLOT_BOTTOM_INSET_PX);
+    initialCalibrationPlotWidth = curPlotWidth;
+
     phase = 'selecting-start';
-    anchorX = null;
-    hoverX = null;
+    anchorDistR = null;
+    hoverDistR = null;
     popoverCollapsed = false;
     customQuestion = '';
     calibratedAnchors = [];
@@ -438,17 +469,15 @@
       if (payload.barSec > 0) barSec = payload.barSec;
     });
 
-    // 2. Background time-axis calibration from TradingView's visible bottom axis strip
+    // 2. Background time-axis calibration from TradingView's actual bottom 28px X-axis strip!
     const host = overlayRootEl;
     if (host) {
-      const stripX = plotLeft;
-      const stripY = Math.max(PLOT_TOP_PX, plotBottom - 4);
-      const stripW = plotWidth;
-      const stripH = Math.min(46, Math.max(26, paneHeight - stripY - 22));
+      const stripY = Math.max(PLOT_TOP_PX, curPlotBottom - 2);
+      const stripH = Math.max(24, curH - stripY);
       void captureElementRegion(host, {
-        x: stripX,
+        x: curPlotLeft,
         y: stripY,
-        width: stripW,
+        width: curPlotWidth,
         height: stripH
       }).then((snap) => {
         if (controller.signal.aborted || !snap?.dataUrl) return;
@@ -460,9 +489,14 @@
             timezone: timeZone
           },
           controller.signal
-        ).then((anchors) => {
+        ).then((anchors: CalibratedAxisAnchor[]) => {
           if (controller.signal.aborted || anchors.length < 2) return;
-          calibratedAnchors = anchors;
+          // Convert each xRatio into pixel distance from plotRight at capture time!
+          calibratedAnchors = anchors.map((a) => ({
+            distR: (1 - a.xRatio) * curPlotWidth,
+            ts: a.ts,
+            label: a.label
+          }));
           isCalibrated = true;
         });
       });
@@ -483,6 +517,7 @@
     if (target?.closest('[data-range-ui]')) return;
 
     const lx = getLocalX(e);
+    const dr = xToDistR(lx);
 
     if (phase === 'selected') {
       // Clicking outside the highlighted range dismisses it (just like TradingView)
@@ -495,71 +530,70 @@
     if (phase === 'selecting-start') {
       e.preventDefault();
       e.stopPropagation();
-      anchorX = lx;
-      hoverX = lx;
+      anchorDistR = dr;
+      hoverDistR = dr;
       pointerDownX = lx;
       isPointerDraggingNew = true;
       phase = 'selecting-end';
       return;
     }
 
-    if (phase === 'selecting-end' && anchorX !== null) {
+    if (phase === 'selecting-end' && anchorDistR !== null) {
       e.preventDefault();
       e.stopPropagation();
-      finalizeRange(anchorX, lx);
+      finalizeRange(anchorDistR, dr);
     }
   }
 
   function handleCanvasPointerMove(e: PointerEvent) {
     if (dragHandle) {
-      const lx = getLocalX(e);
+      const dr = xToDistR(getLocalX(e));
       if (dragHandle === 'start') {
-        startX = lx;
+        startDistR = dr;
       } else {
-        endX = lx;
+        endDistR = dr;
       }
       return;
     }
 
     if (phase === 'selecting-start' || phase === 'selecting-end') {
-      hoverX = getLocalX(e);
+      hoverDistR = xToDistR(getLocalX(e));
     }
   }
 
   function handleCanvasPointerUp(e: PointerEvent) {
     if (dragHandle) {
-      const lo = Math.min(startX, endX);
-      const hi = Math.max(startX, endX);
-      if (hi - lo < 12) {
-        startX = lo;
-        endX = clampPlotX(lo + 16);
+      const loD = Math.max(startDistR, endDistR); // left/start
+      const hiD = Math.min(startDistR, endDistR); // right/end
+      if (loD - hiD < 12) {
+        startDistR = loD;
+        endDistR = Math.max(0, loD - 16);
       } else {
-        startX = lo;
-        endX = hi;
+        startDistR = loD;
+        endDistR = hiD;
       }
       dragHandle = null;
       return;
     }
 
-    if (isPointerDraggingNew && phase === 'selecting-end' && anchorX !== null) {
+    if (isPointerDraggingNew && phase === 'selecting-end' && anchorDistR !== null) {
       isPointerDraggingNew = false;
       const lx = getLocalX(e);
-      // If user clicked-and-dragged > 14px, finalize immediately on release; otherwise stay in 2-click mode
       if (Math.abs(lx - pointerDownX) > 14) {
-        finalizeRange(anchorX, lx);
+        finalizeRange(anchorDistR, xToDistR(lx));
       }
     }
   }
 
-  function finalizeRange(x1: number, x2: number) {
-    let lo = Math.min(x1, x2);
-    let hi = Math.max(x1, x2);
-    if (hi - lo < 14) {
-      hi = clampPlotX(lo + 28);
-      if (hi - lo < 14) lo = clampPlotX(hi - 28);
+  function finalizeRange(d1: number, d2: number) {
+    let leftD = Math.max(d1, d2);
+    let rightD = Math.min(d1, d2);
+    if (leftD - rightD < 14) {
+      rightD = Math.max(2, leftD - 28);
+      if (leftD - rightD < 14) leftD = Math.min(plotWidth - 2, rightD + 28);
     }
-    startX = lo;
-    endX = hi;
+    startDistR = leftD;
+    endDistR = rightD;
     phase = 'selected';
     popoverCollapsed = false;
     isPointerDraggingNew = false;
@@ -569,11 +603,10 @@
     if (e.button !== 0 || phase !== 'selected') return;
     e.preventDefault();
     e.stopPropagation();
-    // Normalize startX <= endX before dragging
-    const lo = Math.min(startX, endX);
-    const hi = Math.max(startX, endX);
-    startX = lo;
-    endX = hi;
+    const leftD = Math.max(startDistR, endDistR);
+    const rightD = Math.min(startDistR, endDistR);
+    startDistR = leftD;
+    endDistR = rightD;
     dragHandle = which;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -582,14 +615,14 @@
     if (!dragHandle) return;
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
-    const lo = Math.min(startX, endX);
-    const hi = Math.max(startX, endX);
-    if (hi - lo < 12) {
-      startX = lo;
-      endX = clampPlotX(lo + 16);
+    const leftD = Math.max(startDistR, endDistR);
+    const rightD = Math.min(startDistR, endDistR);
+    if (leftD - rightD < 12) {
+      startDistR = leftD;
+      endDistR = Math.max(2, leftD - 16);
     } else {
-      startX = lo;
-      endX = hi;
+      startDistR = leftD;
+      endDistR = rightD;
     }
     dragHandle = null;
   }
@@ -607,7 +640,7 @@
     const capturedCalibrated = isCalibrated;
 
     // Hide ONLY the floating popover for 1 animation frame so the captured screenshot shows
-    // the full purple/blue range highlight & unobstructed candlesticks inside the range!
+    // the full purple/blue range highlight & unobstructed candlesticks inside the range
     capturingForAi = true;
     await tick();
     await new Promise<void>((resolve) =>
@@ -663,32 +696,6 @@
   onpointermove={handleCanvasPointerMove}
   onpointerup={handleCanvasPointerUp}
 >
-  <!-- |✦| Range Analysis Trigger Button (Top-Right of Plot Canvas, Unobstructed) -->
-  <button
-    class="range-trigger-btn"
-    class:active={phase !== 'idle'}
-    type="button"
-    data-range-ui="true"
-    aria-label="AI Chart Range Analysis"
-    aria-pressed={phase !== 'idle'}
-    title={phase !== 'idle'
-      ? 'Exit AI Range Analysis (Esc)'
-      : 'AI Chart Range Analysis (Alt+R)'}
-    onclick={(e) => {
-      e.stopPropagation();
-      toggleRangeMode();
-    }}
-  >
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <line x1="3.75" y1="4.25" x2="3.75" y2="15.75" />
-      <line x1="16.25" y1="4.25" x2="16.25" y2="15.75" />
-      <path
-        d="M10 6c.42 2.25 1.75 3.58 4 4-2.25.42-3.58 1.75-4 4-.42-2.25-1.75-3.58-4-4 2.25-.42 3.58-1.75 4-4Z"
-        class="sparkle-fill"
-      />
-    </svg>
-  </button>
-
   <!-- Live Hover Vertical Guide Line while picking Start Point -->
   {#if phase === 'selecting-start' && hoverX !== null}
     <div
@@ -699,7 +706,7 @@
     ></div>
   {/if}
 
-  <!-- Highlighted Range Band, Gradient Vertical Lines, Midpoint □ Handles & Time Axis Pills -->
+  <!-- Highlighted Range Band, Gradient Vertical Lines, Midpoint □ Handles & Flush Time Axis Pills -->
   {#if hasVisibleBand}
     <div
       class="range-band"
@@ -709,13 +716,15 @@
       style:height="{plotHeight}px"
     ></div>
 
-    <!-- Start Vertical Gradient Line -->
-    <div
-      class="range-edge-line"
-      style:left="{activeStartX}px"
-      style:top="{PLOT_TOP_PX}px"
-      style:height="{plotHeight}px"
-    ></div>
+    <!-- Start Vertical Gradient Line (hidden only if scrolled past left viewport edge) -->
+    {#if !startClippedLeft}
+      <div
+        class="range-edge-line"
+        style:left="{activeStartX}px"
+        style:top="{PLOT_TOP_PX}px"
+        style:height="{plotHeight}px"
+      ></div>
+    {/if}
 
     <!-- End Vertical Gradient Line -->
     <div
@@ -725,23 +734,25 @@
       style:height="{plotHeight}px"
     ></div>
 
-    <!-- Midpoint Draggable □ Resize Handles (Screenshots 3 & 4) -->
+    <!-- Midpoint Draggable □ Resize Handles -->
     {#if phase === 'selected'}
-      <div
-        class="edge-handle-hit"
-        data-range-ui="true"
-        role="slider"
-        tabindex="0"
-        aria-label="Adjust range start"
-        aria-valuenow={startTs}
-        style:left="{activeStartX}px"
-        style:top="{handleMidY}px"
-        onpointerdown={(e) => startHandleResize('start', e)}
-        onpointerup={endHandleResize}
-        onpointercancel={endHandleResize}
-      >
-        <span class="edge-handle-box"></span>
-      </div>
+      {#if !startClippedLeft}
+        <div
+          class="edge-handle-hit"
+          data-range-ui="true"
+          role="slider"
+          tabindex="0"
+          aria-label="Adjust range start"
+          aria-valuenow={startTs}
+          style:left="{activeStartX}px"
+          style:top="{handleMidY}px"
+          onpointerdown={(e) => startHandleResize('start', e)}
+          onpointerup={endHandleResize}
+          onpointercancel={endHandleResize}
+        >
+          <span class="edge-handle-box"></span>
+        </div>
+      {/if}
 
       <div
         class="edge-handle-hit"
@@ -760,7 +771,7 @@
       </div>
     {/if}
 
-    <!-- Time Axis Connector Tint & Blue Timestamp Pills -->
+    <!-- Time Axis Connector Tint & Flush Blue Timestamp Pills -->
     <div
       class="axis-connector-strip"
       style:left="{activeStartX}px"
@@ -788,7 +799,7 @@
     {/if}
   {/if}
 
-  <!-- Bottom Floating Guide Tooltip (Screenshot 2) -->
+  <!-- Bottom Floating Guide Tooltip -->
   {#if phase === 'selecting-start' || phase === 'selecting-end'}
     <div
       class="guide-tooltip"
@@ -807,7 +818,7 @@
       class="collapsed-range-bar"
       data-range-ui="true"
       style:left="{Math.round(
-        Math.max(plotLeft + 8, Math.min(plotRight - 144, (activeStartX + activeEndX) / 2 - 64))
+        Math.max(plotLeft + 8, Math.min(plotRight - 134, (activeStartX + activeEndX) / 2 - 58))
       )}px"
       style:top="{PLOT_TOP_PX + 10}px"
     >
@@ -841,7 +852,7 @@
     </div>
   {/if}
 
-  <!-- Range Action Popover (Inside or Outside as in Screenshots 3 & 4) -->
+  <!-- Range Action Popover (Inside or Outside as in TradingView Reference) -->
   {#if phase === 'selected' && !popoverCollapsed && !capturingForAi}
     <div
       class="range-popover"
@@ -917,76 +928,6 @@
     cursor: crosshair;
   }
 
-  /* |✦| Trigger Button */
-  .range-trigger-btn {
-    position: absolute;
-    top: 46px;
-    right: 66px;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border-radius: 7px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    background: rgba(20, 20, 20, 0.84);
-    color: #e5e5e5;
-    display: grid;
-    place-items: center;
-    cursor: pointer;
-    pointer-events: auto;
-    backdrop-filter: blur(8px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.36);
-    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 100ms ease;
-    z-index: 12;
-  }
-
-  .range-trigger-btn:hover {
-    background: rgba(38, 38, 38, 0.94);
-    border-color: rgba(255, 255, 255, 0.24);
-    color: #ffffff;
-  }
-
-  .range-trigger-btn.active {
-    background: #2c2c2c;
-    border-color: #7c5cff;
-    color: #ffffff;
-    box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.4), 0 3px 10px rgba(0, 0, 0, 0.42);
-  }
-
-  .range-overlay-root.light .range-trigger-btn {
-    background: rgba(255, 255, 255, 0.92);
-    border-color: rgba(19, 23, 34, 0.13);
-    color: #131722;
-    box-shadow: 0 2px 8px rgba(19, 23, 34, 0.1);
-  }
-
-  .range-overlay-root.light .range-trigger-btn:hover {
-    background: #f2f3f6;
-    border-color: rgba(19, 23, 34, 0.22);
-  }
-
-  .range-overlay-root.light .range-trigger-btn.active {
-    background: #e5e8ef;
-    border-color: #2962ff;
-    color: #131722;
-    box-shadow: 0 0 0 1px rgba(41, 98, 255, 0.22), 0 2px 8px rgba(19, 23, 34, 0.12);
-  }
-
-  .range-trigger-btn svg {
-    width: 18px;
-    height: 18px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  .range-trigger-btn .sparkle-fill {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.35;
-  }
-
   /* Subtle hover crosshair before first click */
   .hover-guide-line {
     position: absolute;
@@ -1053,7 +994,7 @@
     transform: scale(1.18);
   }
 
-  /* Time Axis Highlight Strip + Royal-Blue Timestamp Pills */
+  /* Time Axis Highlight Strip + Flush Royal-Blue Timestamp Pills */
   .axis-connector-strip {
     position: absolute;
     pointer-events: none;

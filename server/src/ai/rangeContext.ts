@@ -247,15 +247,31 @@ export async function calibrateChartTimeAxis(params: {
   const nowRef = params.referenceIso && !Number.isNaN(Date.parse(params.referenceIso))
     ? params.referenceIso
     : new Date().toISOString();
-  const localNow = formatPartsInTz(new Date(nowRef), tz);
+  const refDate = new Date(nowRef);
+  const localNow = formatPartsInTz(refDate, tz);
+  // Compute exact ISO timezone offset (e.g. "+03:00", "-05:00", "Z") so axis ticks always resolve cleanly
+  let tzOffsetStr = '+00:00';
+  try {
+    const offFmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      timeZoneName: 'shortOffset'
+    }).formatToParts(refDate);
+    const rawOff = offFmt.find((p) => p.type === 'timeZoneName')?.value ?? 'GMT';
+    const m = rawOff.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
+    if (m) {
+      tzOffsetStr = `${m[1]}${m[2].padStart(2, '0')}:${(m[3] ?? '00').padStart(2, '0')}`;
+    }
+  } catch {
+    tzOffsetStr = '+00:00';
+  }
 
   const prompt = [
-    `Read the horizontal time-axis tick labels visible in this cropped TradingView chart bottom strip.`,
-    `Context: symbol=${params.symbol || 'unknown'}, timeframe=${params.interval || 'unknown'}, chart timezone=${tz}, current local date=${localNow.date} ${localNow.time}.`,
-    `Note: On TradingView intraday axes, a bold day number like "26" or "27" means 00:00 on that day of the month (in the chart timezone shown at the bottom-right, e.g. UTC+3). Time labels like "09:00", "12:00", "15:00" belong to the most recent day number to their left. Monthly labels like "Nov" or "Dec" mean the 1st of that month 00:00.`,
-    `Return ONLY strict JSON (no markdown, no explanation) with 3 to 6 clearly legible evenly-spaced tick labels across the axis:`,
-    `{"ticks":[{"label":"26","iso":"2026-11-26T00:00:00+03:00","xPercent":18.5}]}`,
-    `Rules: xPercent is the horizontal center of each tick label as a percentage (0 to 100) from the left edge to the right edge of the provided image. Include the timezone offset in every iso string. Omit any bottom preset buttons ("1D", "5D", "1M", "YTD", "All") and the bottom-right clock.`
+    `Read the horizontal time-axis tick labels visible in this cropped TradingView chart bottom axis strip.`,
+    `Context: symbol=${params.symbol || 'unknown'}, timeframe=${params.interval || 'unknown'}, chart timezone=${tz} (UTC offset ${tzOffsetStr}), current local date=${localNow.date} ${localNow.time}.`,
+    `Note: On TradingView axes, a bold day number like "18", "24", "26", "27", "28" means 00:00 on that day of the month in timezone ${tzOffsetStr}. Time labels like "09:00", "12:00", "15:00" belong to the most recent day number to their left. Monthly labels like "Nov" or "Dec" mean the 1st of that month 00:00.`,
+    `Return ONLY strict JSON (no markdown, no explanation) with 3 to 7 clearly legible tick labels across the axis from left to right:`,
+    `{"ticks":[{"label":"24","iso":"2026-11-24T00:00:00${tzOffsetStr}","xPercent":42.5}]}`,
+    `Rules: xPercent is the horizontal center of each tick label as a percentage (0 to 100) from the left edge to the right edge of the provided image. Use offset "${tzOffsetStr}" in every iso string. Ignore any non-date icons (like a gear icon or TV logo).`
   ].join('\n');
 
   const controller = new AbortController();
@@ -506,13 +522,15 @@ function detectRangeTechnicalShifts(
 }
 
 function buildRangeModeGuidance(mode: AiRangeMode): string {
+  const tableHint = `- Keep any Markdown tables compact (max 3–4 short columns) so they read cleanly inside a narrow side panel without wrapping words mid-word.`;
   switch (mode) {
     case 'explain':
       return [
         `TASK FOCUS (EXPLAIN THIS PRICE MOVE):`,
         `- Deliver a crisp, chronological explanation of HOW and WHY price moved across this exact range.`,
         `- Break down the impulse legs, consolidations/pullbacks, liquidity sweeps/wick rejections, volatility expansion, and any aligned calendar releases or news catalysts from the telemetry.`,
-        `- Lead with a 1-line summary headline (direction, net % / points, and primary driver), followed by **Price Action Breakdown**, **Key Inflection Candles & Levels**, and **Catalyst / Context Link**.`
+        `- Lead with a 1-line summary headline (direction, net % / points, and primary driver), followed by **Price Action Breakdown**, **Key Inflection Candles & Levels**, and **Catalyst / Context Link**.`,
+        tableHint
       ].join('\n');
     case 'events':
       return [
@@ -520,20 +538,23 @@ function buildRangeModeGuidance(mode: AiRangeMode): string {
         `- Build a precise **Catalyst & Event Timeline** correlating the exact timestamps of the range's biggest displacement candles against the economic calendar releases (Actual vs Forecast vs Prior) and dated news stories provided in telemetry.`,
         `- Clearly state which events coincided with the exact move window and explain the transmission mechanism (e.g., USD yields/DXY reaction -> Gold).`,
         `- If NO scheduled macro release or verified news headline occurred during the exact window, state that transparently rather than fabricating a catalyst — and note whether the move looks session-open flow, stop-run/liquidity sweep, or technical breakout driven.`,
-        `- Cite every news headline used as a Markdown link \`[Title](url)\`.`
+        `- Cite every news headline used as a Markdown link \`[Title](url)\`.`,
+        tableHint
       ].join('\n');
     case 'technicals':
       return [
         `TASK FOCUS (ANALYZE TECHNICALS IN THIS AREA):`,
         `- Perform an institutional technical audit strictly anchored to this selected zone using the exact Start vs. End indicator telemetry and OHLC structure.`,
         `- Include a compact **Technical Shift Table (Range Start → Range End)** covering RSI(14), MACD, ADX(14), ATR(14), and key EMAs (20/50/200).`,
-        `- Identify market structure (BOS / CHoCH / range accumulation / distribution), dynamic S/R interaction, momentum divergences or exhaustion, key support/resistance/invalidation levels inside the area, and the resulting technical bias exiting the range.`
+        `- Identify market structure (BOS / CHoCH / range accumulation / distribution), dynamic S/R interaction, momentum divergences or exhaustion, key support/resistance/invalidation levels inside the area, and the resulting technical bias exiting the range.`,
+        tableHint
       ].join('\n');
     case 'custom':
     default:
       return [
         `TASK FOCUS (CUSTOM RANGE QUESTION):`,
-        `- Answer the trader's specific question directly using the exact OANDA range candles, computed start-vs-end technicals, and windowed calendar/news telemetry provided below.`
+        `- Answer the trader's specific question directly using the exact OANDA range candles, computed start-vs-end technicals, and windowed calendar/news telemetry provided below.`,
+        tableHint
       ].join('\n');
   }
 }

@@ -89,6 +89,8 @@
   let modifyingPosition: { position: PaperPosition; focusField: 'tp' | 'sl' | null } | null = null;
   let screenerFullscreen = false;
   let pendingRangeAnalysis: PendingRangeAnalysisRequest | null = null;
+  let rangeToggleSeqByTab: Record<string, number> = {};
+  let rangeActiveByTab: Record<string, boolean> = {};
   let symbolInsights: {
     symbol: string;
     shortName: string;
@@ -639,6 +641,12 @@
               onRequestModifyPosition={(pos, focusField = null) => {
                 if (paperState?.connected) modifyingPosition = { position: pos, focusField };
               }}
+              rangeToggleSeq={rangeToggleSeqByTab[tab.id] ?? 0}
+              onRangeActiveChange={(isActive) => {
+                if (Boolean(rangeActiveByTab[tab.id]) !== isActive) {
+                  rangeActiveByTab = { ...rangeActiveByTab, [tab.id]: isActive };
+                }
+              }}
               onAnalyzeRange={(req) => {
                 pendingRangeAnalysis = req;
               }}
@@ -732,6 +740,13 @@
       {screenerFullscreen}
       onToggleScreenerFullscreen={() => (screenerFullscreen = !screenerFullscreen)}
       onCloseScreenerFullscreen={() => (screenerFullscreen = false)}
+      rangeAnalysisActive={Boolean(rangeActiveByTab[activeTab.id])}
+      onToggleRangeAnalysis={() => {
+        symbolInsights = null;
+        screenerFullscreen = false;
+        const tid = activeTab.id;
+        rangeToggleSeqByTab = { ...rangeToggleSeqByTab, [tid]: (rangeToggleSeqByTab[tid] ?? 0) + 1 };
+      }}
       {pendingRangeAnalysis}
       onConsumePendingRangeAnalysis={() => (pendingRangeAnalysis = null)}
     />

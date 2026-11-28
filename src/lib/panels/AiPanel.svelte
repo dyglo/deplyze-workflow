@@ -1900,11 +1900,16 @@
     border: 1px solid var(--ai-border);
     border-radius: 9px;
     overflow-x: auto;
-    scrollbar-width: none;
+    scrollbar-width: thin;
   }
 
   .md-content :global(.md-table-wrap::-webkit-scrollbar) {
-    display: none;
+    height: 5px;
+  }
+
+  .md-content :global(.md-table-wrap::-webkit-scrollbar-thumb) {
+    background: var(--ai-border);
+    border-radius: 999px;
   }
 
   .md-content :global(table) {
@@ -1912,11 +1917,14 @@
     border-collapse: collapse;
     font-size: 12px;
     font-variant-numeric: tabular-nums;
+    word-break: normal;
+    overflow-wrap: normal;
   }
 
   .md-content :global(th) {
     padding: 7px 8px;
     font-weight: 600;
+    white-space: nowrap;
     color: var(--ai-secondary);
     background: var(--ai-table-head);
     border-bottom: 1px solid var(--ai-border);

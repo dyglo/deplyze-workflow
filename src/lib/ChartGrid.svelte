@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { PendingRangeAnalysisRequest } from './ai/types';
   import Chart, { type ChartQuote } from './Chart.svelte';
   import ChartRangeAnalysisOverlay from './chart/ChartRangeAnalysisOverlay.svelte';
@@ -22,7 +22,9 @@
     onPaneInterval?: (paneIndex: number, interval: string) => void;
     onRequestClosePosition?: (position: PaperPosition) => void;
     onRequestModifyPosition?: (position: PaperPosition, focusField?: 'tp' | 'sl' | null) => void;
+    rangeToggleSeq?: number;
     onAnalyzeRange?: (request: PendingRangeAnalysisRequest) => void;
+    onRangeActiveChange?: (active: boolean) => void;
   }
 
   let {
@@ -38,7 +40,9 @@
     onPaneInterval,
     onRequestClosePosition,
     onRequestModifyPosition,
-    onAnalyzeRange
+    rangeToggleSeq = 0,
+    onAnalyzeRange,
+    onRangeActiveChange
   }: Props = $props();
 
   const layout = $derived(getLayoutById(layoutId));
@@ -49,6 +53,26 @@
   const paneDockOffsets = new Map<number, number>();
   const pendingDockTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const readyPanes = new Set<number>();
+  const activeRangePanes = new Set<number>();
+  let paneToggleSeqs = $state<Record<number, number>>({});
+  let lastGridToggleSeq = 0;
+
+  $effect(() => {
+    const seq = rangeToggleSeq;
+    if (seq > lastGridToggleSeq) {
+      lastGridToggleSeq = seq;
+      untrack(() => {
+        const target = currentActivePane;
+        paneToggleSeqs = { ...paneToggleSeqs, [target]: (paneToggleSeqs[target] ?? 0) + 1 };
+      });
+    }
+  });
+
+  function handlePaneRangeActive(idx: number, isActive: boolean) {
+    if (isActive) activeRangePanes.add(idx);
+    else activeRangePanes.delete(idx);
+    onRangeActiveChange?.(activeRangePanes.size > 0);
+  }
 
   function postDockOffsetToPane(idx: number, offsetPx: number) {
     if (!gridEl) return;
@@ -224,6 +248,8 @@
         isActivePane={currentActivePane === idx}
         leftToolbarCollapsed={idx > 0}
         legendSlot={paneLegendSlots[idx] ?? null}
+        toggleSeq={paneToggleSeqs[idx] ?? 0}
+        onRangeActiveChange={(isActive) => handlePaneRangeActive(idx, isActive)}
         onAnalyzeRange={(req) => {
           setActivePane(idx);
           onAnalyzeRange?.(req);

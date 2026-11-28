@@ -52,6 +52,8 @@
     screenerFullscreen?: boolean;
     onToggleScreenerFullscreen?: () => void;
     onCloseScreenerFullscreen?: () => void;
+    rangeAnalysisActive?: boolean;
+    onToggleRangeAnalysis?: () => void;
     pendingRangeAnalysis?: PendingRangeAnalysisRequest | null;
     onConsumePendingRangeAnalysis?: () => void;
   }
@@ -79,6 +81,8 @@
     screenerFullscreen = false,
     onToggleScreenerFullscreen,
     onCloseScreenerFullscreen,
+    rangeAnalysisActive = false,
+    onToggleRangeAnalysis,
     pendingRangeAnalysis = null,
     onConsumePendingRangeAnalysis
   }: Props = $props();
@@ -461,6 +465,22 @@
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <rect x="2.75" y="2.75" width="14.5" height="14.5" rx="3.75" />
       <path d="M6.75 10.35 9 12.6l4.25-4.85" />
+    </svg>
+  </button>
+
+  <button
+    class="rail-button"
+    class:active={rangeAnalysisActive}
+    type="button"
+    aria-label="AI Chart Range Analysis"
+    title={rangeAnalysisActive ? 'Exit AI Range Analysis (Esc)' : 'AI Chart Range Analysis (Alt+R)'}
+    aria-pressed={rangeAnalysisActive}
+    onclick={() => onToggleRangeAnalysis?.()}
+  >
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <line x1="3.5" y1="4.25" x2="3.5" y2="15.75" />
+      <line x1="16.5" y1="4.25" x2="16.5" y2="15.75" />
+      <path d="M10 6c.42 2.25 1.75 3.58 4 4-2.25.42-3.58 1.75-4 4-.42-2.25-1.75-3.58-4-4 2.25-.42 3.58-1.75 4-4Z" />
     </svg>
   </button>
 
